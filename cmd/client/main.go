@@ -57,10 +57,16 @@ func main() {
 	logger.Printf("circuit of %d hops, payload limit %d bytes", len(chain), c.MaxPayload())
 
 	for i := 0; *count == 0 || i < *count; i++ {
+		start := time.Now()
 		if err := c.Send([]byte(*message)); err != nil {
 			logger.Fatalf("send: %v", err)
 		}
-		logger.Printf("sent %d bytes", len(*message))
+		select {
+		case reply := <-c.Replies():
+			logger.Printf("round trip %d bytes in %s", len(reply), time.Since(start).Round(time.Microsecond))
+		case <-time.After(5 * time.Second):
+			logger.Print("no reply within 5s")
+		}
 		if *count == 0 || i+1 < *count {
 			time.Sleep(*interval)
 		}

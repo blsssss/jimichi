@@ -37,6 +37,7 @@ type Client struct {
 	conn    net.Conn
 	circuit *wire.Circuit
 	keys    []*secmem.Buffer
+	replies chan []byte
 
 	mu      sync.Mutex
 	counter uint64
@@ -102,7 +103,8 @@ func Dial(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	c := &Client{cfg: cfg, conn: conn, circuit: circuit, keys: setup.CellKeys}
+	c := &Client{cfg: cfg, conn: conn, circuit: circuit, keys: setup.CellKeys, replies: make(chan []byte, 64)}
+	go c.receive()
 	if cfg.CoverRate > 0 {
 		c.startCover()
 	}
@@ -110,6 +112,27 @@ func Dial(cfg Config) (*Client, error) {
 }
 
 func (c *Client) MaxPayload() int { return c.circuit.MaxPayload() }
+
+// replies arrive wrapped in one layer per hop, in the reverse order
+func (c *Client) Replies() <-chan []byte { return c.replies }
+
+func (c *Client) receive() {
+	defer close(c.replies)
+	for {
+		var cell wire.Cell
+		if _, err := io.ReadFull(c.conn, cell[:]); err != nil {
+			return
+		}
+		payload, err := c.circuit.OpenExit(&cell, wire.Backward)
+		if err != nil {
+			continue
+		}
+		select {
+		case c.replies <- payload:
+		default:
+		}
+	}
+}
 
 func (c *Client) Send(payload []byte) error {
 	return c.send(wire.KindPayload, payload)

@@ -211,3 +211,64 @@ func unframe(inner []byte) ([]byte, error) {
 	copy(out, inner[lengthPrefix:lengthPrefix+n])
 	return out, nil
 }
+
+// exit builds the first backward layer; the reply travels the chain in reverse,
+// every relay adding its own layer instead of stripping one
+func (h *Hop) SealReply(inboundCircuit, counter uint64, payload []byte) (*Cell, error) {
+	if h.aead == nil {
+		return nil, fmt.Errorf("wire: hop closed")
+	}
+	inner := make([]byte, layerLen(h.index, h.overhead)-h.overhead)
+	if len(payload)+lengthPrefix > len(inner) {
+		return nil, fmt.Errorf("%w: %d > %d", ErrPayloadSize, len(payload), len(inner)-lengthPrefix)
+	}
+	binary.BigEndian.PutUint16(inner[:lengthPrefix], uint16(len(payload)))
+	copy(inner[lengthPrefix:], payload)
+	if _, err := io.ReadFull(rand.Reader, inner[lengthPrefix+len(payload):]); err != nil {
+		return nil, err
+	}
+
+	cell, err := NewCell(Header{Kind: KindPayload, Circuit: inboundCircuit, Counter: counter}, make([]byte, BodySize))
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := nonceFor(h.aead.NonceSize(), Backward, inboundCircuit, counter)
+	if err != nil {
+		return nil, err
+	}
+	sealed := h.aead.Seal(nil, nonce, inner, cell.aad(h.index))
+
+	body := make([]byte, BodySize)
+	copy(body, sealed)
+	if _, err := io.ReadFull(rand.Reader, body[len(sealed):]); err != nil {
+		return nil, err
+	}
+	return NewCell(Header{Kind: KindPayload, Circuit: inboundCircuit, Counter: counter}, body)
+}
+
+// adds this hop's layer to a cell travelling back towards the client
+func (h *Hop) Wrap(cell *Cell, inboundCircuit uint64) (*Cell, error) {
+	if h.aead == nil {
+		return nil, fmt.Errorf("wire: hop closed")
+	}
+	hdr, err := cell.Header()
+	if err != nil {
+		return nil, err
+	}
+	out, err := NewCell(Header{Kind: hdr.Kind, Circuit: inboundCircuit, Counter: hdr.Counter}, make([]byte, BodySize))
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := nonceFor(h.aead.NonceSize(), Backward, inboundCircuit, hdr.Counter)
+	if err != nil {
+		return nil, err
+	}
+	sealed := h.aead.Seal(nil, nonce, cell.Body()[:layerLen(h.index+1, h.overhead)], out.aad(h.index))
+
+	body := make([]byte, BodySize)
+	copy(body, sealed)
+	if _, err := io.ReadFull(rand.Reader, body[len(sealed):]); err != nil {
+		return nil, err
+	}
+	return NewCell(Header{Kind: hdr.Kind, Circuit: inboundCircuit, Counter: hdr.Counter}, body)
+}

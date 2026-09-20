@@ -21,6 +21,7 @@ func main() {
 	listen := flag.String("listen", ":9000", "address for cells")
 	info := flag.String("info", ":9100", "address for the public key and counters")
 	harden := flag.Bool("harden", true, "lock key memory and disable core dumps")
+	echo := flag.Bool("echo", true, "as an exit, send the payload back along the circuit")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
@@ -45,9 +46,13 @@ func main() {
 	r, err := relay.New(relay.Config{
 		Provider:   provider,
 		StaticPriv: staticPriv,
-		Deliver: func(uint64, []byte) {
-			// the payload itself is never logged: that would hand out exactly
-			// the metadata the node exists to withhold
+		// the payload is never logged: that would hand out exactly the metadata
+		// the node exists to withhold
+		Deliver: func(_ uint64, payload []byte) []byte {
+			if *echo {
+				return payload
+			}
+			return nil
 		},
 	})
 	if err != nil {

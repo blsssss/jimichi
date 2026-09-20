@@ -57,8 +57,9 @@ func TestMessageTraversesThreeRelays(t *testing.T) {
 	p := c25519.New()
 	delivered := make(chan []byte, 4)
 
-	exit := startNode(t, p, func(_ uint64, payload []byte) {
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
 		delivered <- append([]byte(nil), payload...)
+		return nil
 	})
 	middle := startNode(t, p, nil)
 	entry := startNode(t, p, nil)
@@ -90,8 +91,9 @@ func TestCoverCellsAreNotDelivered(t *testing.T) {
 	p := c25519.New()
 	delivered := make(chan []byte, 4)
 
-	exit := startNode(t, p, func(_ uint64, payload []byte) {
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
 		delivered <- append([]byte(nil), payload...)
+		return nil
 	})
 	middle := startNode(t, p, nil)
 	entry := startNode(t, p, nil)
@@ -144,8 +146,9 @@ func TestRelayRejectsReplay(t *testing.T) {
 	p := c25519.New()
 	delivered := make(chan []byte, 4)
 
-	exit := startNode(t, p, func(_ uint64, payload []byte) {
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
 		delivered <- append([]byte(nil), payload...)
+		return nil
 	})
 	entry := startNode(t, p, nil)
 
@@ -206,5 +209,36 @@ func TestRelayRejectsReplay(t *testing.T) {
 
 	if _, _, _, dropped := entry.r.Stats().Snapshot(); dropped == 0 {
 		t.Fatal("entry did not count the replay as dropped")
+	}
+}
+
+// the reply travels back through the same chain: every relay adds a layer and
+// only the client can strip them all
+func TestReplyReturnsThroughChain(t *testing.T) {
+	p := c25519.New()
+
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+		return append([]byte("echo:"), payload...)
+	})
+	middle := startNode(t, p, nil)
+	entry := startNode(t, p, nil)
+
+	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+
+	if err := cl.Send([]byte("ping")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case reply := <-cl.Replies():
+		if string(reply) != "echo:ping" {
+			t.Fatalf("reply %q", reply)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no reply came back")
 	}
 }

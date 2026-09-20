@@ -60,6 +60,13 @@ Every cell is 512 bytes, payload and cover cells alike.
 - A node keeps a window of accepted counters and drops a replay: forwarding one would hand an
   active observer a free timing mark.
 
+## Return path
+
+A reply travels the same chain in reverse: the exit applies its layer, every relay towards the
+client adds its own, and only the client strips them all. The direction enters the nonce, so a
+forward and a backward cell never share one under the same key. The backward counter is separate,
+and each relay keeps its own replay window per direction.
+
 ## Circuit setup
 
 Setup takes one control cell of the same 512 bytes, with no extra round trips.

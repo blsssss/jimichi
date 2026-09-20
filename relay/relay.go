@@ -14,8 +14,9 @@ import (
 	"github.com/blsssss/jimichi/wire"
 )
 
-// called on the exit node with the delivered message
-type Deliver func(circuit uint64, payload []byte)
+// called on the exit node with the delivered message; a non-nil return travels
+// back to the client along the same circuit
+type Deliver func(circuit uint64, payload []byte) []byte
 
 type Config struct {
 	Provider    jcrypto.CryptoProvider
@@ -61,12 +62,16 @@ func (s *Stats) Snapshot() (accepted, forwarded, delivered, dropped uint64) {
 type circuit struct {
 	hop      *wire.Hop
 	replay   *wire.ReplayWindow
+	back     *wire.ReplayWindow
 	next     net.Conn
+	in       net.Conn
 	nextID   uint64
 	isExit   bool
 	writeMu  sync.Mutex
+	inMu     sync.Mutex
 	inbound  uint64
 	hopIndex int
+	replies  uint64
 }
 
 func New(cfg Config) (*Relay, error) {
@@ -150,7 +155,7 @@ func (r *Relay) handle(conn net.Conn) {
 		if _, err := io.ReadFull(conn, cell[:]); err != nil {
 			return
 		}
-		if err := r.route(&cell); err != nil {
+		if err := r.route(&cell, conn); err != nil {
 			r.stats.add(&r.stats.Dropped)
 			if errors.Is(err, errFatal) {
 				return
@@ -161,7 +166,7 @@ func (r *Relay) handle(conn net.Conn) {
 
 var errFatal = errors.New("relay: connection unusable")
 
-func (r *Relay) route(cell *wire.Cell) error {
+func (r *Relay) route(cell *wire.Cell, from net.Conn) error {
 	hdr, err := cell.Header()
 	if err != nil {
 		return err
@@ -169,7 +174,7 @@ func (r *Relay) route(cell *wire.Cell) error {
 	r.stats.add(&r.stats.Accepted)
 
 	if hdr.Kind == wire.KindControl {
-		return r.setup(cell, hdr)
+		return r.setup(cell, hdr, from)
 	}
 
 	r.mu.Lock()
@@ -188,7 +193,11 @@ func (r *Relay) route(cell *wire.Cell) error {
 			return err
 		}
 		if hdr.Kind == wire.KindPayload && r.cfg.Deliver != nil {
-			r.cfg.Deliver(c.inbound, payload)
+			if reply := r.cfg.Deliver(c.inbound, payload); reply != nil {
+				if err := r.reply(c, reply); err != nil {
+					return err
+				}
+			}
 		}
 		r.stats.add(&r.stats.Delivered)
 		return nil
@@ -206,7 +215,49 @@ func (r *Relay) route(cell *wire.Cell) error {
 	return nil
 }
 
-func (r *Relay) setup(cell *wire.Cell, hdr wire.Header) error {
+func (r *Relay) reply(c *circuit, payload []byte) error {
+	c.writeMu.Lock()
+	counter := c.replies
+	c.replies++
+	c.writeMu.Unlock()
+
+	cell, err := c.hop.SealReply(c.inbound, counter, payload)
+	if err != nil {
+		return err
+	}
+	return c.writeBack(cell)
+}
+
+// cells coming from the next hop travel towards the client, so this relay adds
+// its own layer instead of stripping one
+func (r *Relay) backward(c *circuit) {
+	for {
+		var cell wire.Cell
+		if _, err := io.ReadFull(c.next, cell[:]); err != nil {
+			return
+		}
+		hdr, err := cell.Header()
+		if err != nil {
+			r.stats.add(&r.stats.Dropped)
+			continue
+		}
+		if !c.back.Accept(hdr.Counter) {
+			r.stats.add(&r.stats.Dropped)
+			continue
+		}
+		out, err := c.hop.Wrap(&cell, c.inbound)
+		if err != nil {
+			r.stats.add(&r.stats.Dropped)
+			continue
+		}
+		if err := c.writeBack(out); err != nil {
+			return
+		}
+		r.stats.add(&r.stats.Forwarded)
+	}
+}
+
+func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from net.Conn) error {
 	layer, err := wire.OpenSetup(r.cfg.Provider, r.cfg.StaticPriv, cell)
 	if err != nil {
 		return err
@@ -222,9 +273,11 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header) error {
 	c := &circuit{
 		hop:      hop,
 		replay:   wire.NewReplayWindow(r.cfg.ReplaySize),
+		back:     wire.NewReplayWindow(r.cfg.ReplaySize),
 		nextID:   layer.NextCircuit,
 		isExit:   layer.NextAddr == "",
 		inbound:  hdr.Circuit,
+		in:       from,
 		hopIndex: index,
 	}
 
@@ -246,6 +299,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header) error {
 			_ = conn.Close()
 			return err
 		}
+		go r.backward(c)
 	}
 
 	r.mu.Lock()
@@ -263,5 +317,12 @@ func (c *circuit) write(cell *wire.Cell) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	_, err := c.next.Write(cell[:])
+	return err
+}
+
+func (c *circuit) writeBack(cell *wire.Cell) error {
+	c.inMu.Lock()
+	defer c.inMu.Unlock()
+	_, err := c.in.Write(cell[:])
 	return err
 }
