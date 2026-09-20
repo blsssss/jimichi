@@ -23,13 +23,28 @@ type Node struct {
 	StaticPub []byte
 }
 
-// CoverRate and Jitter are the two knobs the experiments sweep: cover traffic
-// hides when a message is sent, jitter breaks the timing pattern
+type Mode uint8
+
+const (
+	// a cell leaves as soon as there is something to send, and cover cells are
+	// added on top; the send pattern still follows the conversation
+	Immediate Mode = iota
+	// cells leave on a fixed schedule and a payload takes the slot of a cover
+	// cell, so the pattern on the link does not depend on the conversation
+	ConstantRate
+)
+
+// Mode, Rate and Jitter are the knobs the experiments sweep
 type Config struct {
 	Provider  jcrypto.CryptoProvider
 	Chain     []Node
+	Mode      Mode
+	Rate      time.Duration
 	CoverRate time.Duration
 	Jitter    time.Duration
+	// lets the testbed observe the entry link the way a passive network
+	// adversary would; nil means a plain dial
+	Dial func(network, addr string) (net.Conn, error)
 }
 
 type Client struct {
@@ -38,6 +53,8 @@ type Client struct {
 	circuit *wire.Circuit
 	keys    []*secmem.Buffer
 	replies chan []byte
+	queue   chan []byte
+	dropped uint64
 
 	mu      sync.Mutex
 	counter uint64
@@ -90,7 +107,11 @@ func Dial(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	conn, err := net.Dial("tcp", cfg.Chain[0].Addr)
+	dial := cfg.Dial
+	if dial == nil {
+		dial = net.Dial
+	}
+	conn, err := dial("tcp", cfg.Chain[0].Addr)
 	if err != nil {
 		circuit.Close()
 		release()
@@ -103,9 +124,19 @@ func Dial(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	c := &Client{cfg: cfg, conn: conn, circuit: circuit, keys: setup.CellKeys, replies: make(chan []byte, 64)}
+	c := &Client{
+		cfg:     cfg,
+		conn:    conn,
+		circuit: circuit,
+		keys:    setup.CellKeys,
+		replies: make(chan []byte, 64),
+		queue:   make(chan []byte, 256),
+	}
 	go c.receive()
-	if cfg.CoverRate > 0 {
+	switch {
+	case cfg.Mode == ConstantRate && cfg.Rate > 0:
+		c.startSchedule()
+	case cfg.CoverRate > 0:
 		c.startCover()
 	}
 	return c, nil
@@ -135,7 +166,57 @@ func (c *Client) receive() {
 }
 
 func (c *Client) Send(payload []byte) error {
+	if c.cfg.Mode == ConstantRate && c.cfg.Rate > 0 {
+		buf := make([]byte, len(payload))
+		copy(buf, payload)
+		select {
+		case c.queue <- buf:
+			return nil
+		default:
+			// the schedule is full: dropping keeps the link pattern constant,
+			// which is the property being measured
+			c.mu.Lock()
+			c.dropped++
+			c.mu.Unlock()
+			return nil
+		}
+	}
 	return c.send(wire.KindPayload, payload)
+}
+
+// how many messages the fixed schedule could not take
+func (c *Client) Dropped() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dropped
+}
+
+// one cell per tick, payload if the queue has one and cover otherwise
+func (c *Client) startSchedule() {
+	c.stopCover = make(chan struct{})
+	c.coverDone.Add(1)
+	go func() {
+		defer c.coverDone.Done()
+		ticker := time.NewTicker(c.cfg.Rate)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-c.stopCover:
+				return
+			case <-ticker.C:
+				var err error
+				select {
+				case payload := <-c.queue:
+					err = c.send(wire.KindPayload, payload)
+				default:
+					err = c.send(wire.KindCover, nil)
+				}
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (c *Client) SendCover() error {

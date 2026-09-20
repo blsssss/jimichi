@@ -22,7 +22,9 @@ func main() {
 	message := flag.String("message", "hello from the chain", "payload to send")
 	count := flag.Int("count", 1, "how many messages to send, 0 for endless")
 	interval := flag.Duration("interval", time.Second, "pause between messages")
-	cover := flag.Duration("cover", 0, "cover traffic period, 0 disables it")
+	cover := flag.Duration("cover", 0, "cover traffic added on top of payload, 0 disables it")
+	mode := flag.String("mode", "immediate", "immediate or fixed: fixed sends one cell per tick and a payload takes a cover slot")
+	rate := flag.Duration("rate", 200*time.Millisecond, "cell period in fixed mode")
 	jitter := flag.Duration("jitter", 0, "random delay added before each cell")
 	flag.Parse()
 
@@ -43,18 +45,24 @@ func main() {
 		chain = append(chain, client.Node{Addr: addr, StaticPub: pub})
 	}
 
-	c, err := client.Dial(client.Config{
+	cfg := client.Config{
 		Provider:  provider,
 		Chain:     chain,
 		CoverRate: *cover,
 		Jitter:    *jitter,
-	})
+	}
+	if *mode == "fixed" {
+		cfg.Mode = client.ConstantRate
+		cfg.Rate = *rate
+	}
+
+	c, err := client.Dial(cfg)
 	if err != nil {
 		logger.Fatalf("dial: %v", err)
 	}
 	defer c.Close()
 
-	logger.Printf("circuit of %d hops, payload limit %d bytes", len(chain), c.MaxPayload())
+	logger.Printf("circuit of %d hops, payload limit %d bytes, mode %s", len(chain), c.MaxPayload(), *mode)
 
 	for i := 0; *count == 0 || i < *count; i++ {
 		start := time.Now()

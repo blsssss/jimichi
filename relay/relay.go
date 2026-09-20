@@ -19,11 +19,14 @@ import (
 type Deliver func(circuit uint64, payload []byte) []byte
 
 type Config struct {
-	Provider    jcrypto.CryptoProvider
-	StaticPriv  *secmem.Buffer
-	ReplaySize  uint64
-	Deliver     Deliver
-	DialTimeout net.Dialer
+	Provider   jcrypto.CryptoProvider
+	StaticPriv *secmem.Buffer
+	ReplaySize uint64
+	Deliver    Deliver
+	Dialer     net.Dialer
+	// lets the testbed observe the link to the next hop the way a passive
+	// network adversary would; nil means a plain dial
+	Dial func(network, addr string) (net.Conn, error)
 }
 
 type Relay struct {
@@ -282,7 +285,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from net.Conn) error {
 	}
 
 	if !c.isExit {
-		conn, err := r.cfg.DialTimeout.Dial("tcp", layer.NextAddr)
+		conn, err := r.dial(layer.NextAddr)
 		if err != nil {
 			hop.Close()
 			return err
@@ -311,6 +314,13 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from net.Conn) error {
 	r.circuits[hdr.Circuit] = c
 	r.mu.Unlock()
 	return nil
+}
+
+func (r *Relay) dial(addr string) (net.Conn, error) {
+	if r.cfg.Dial != nil {
+		return r.cfg.Dial("tcp", addr)
+	}
+	return r.cfg.Dialer.Dial("tcp", addr)
 }
 
 func (c *circuit) write(cell *wire.Cell) error {

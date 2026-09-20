@@ -60,6 +60,16 @@ Every cell is 512 bytes, payload and cover cells alike.
 - A node keeps a window of accepted counters and drops a replay: forwarding one would hand an
   active observer a free timing mark.
 
+## Sending modes
+
+| Mode | How cells leave | What an observer sees |
+|---|---|---|
+| Immediate | a cell leaves as soon as there is something to send, cover is added on top | the send pattern follows the conversation |
+| Constant rate | cells leave on a schedule and a payload takes a cover slot | the pattern on the link does not depend on the conversation |
+
+The second mode is the countermeasure against flow linking. Its price is queueing: a message waits
+for its slot, so latency grows at a low schedule rate and shrinks at a high one.
+
 ## Return path
 
 A reply travels the same chain in reverse: the exit applies its layer, every relay towards the

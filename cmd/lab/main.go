@@ -1,0 +1,171 @@
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
+
+	"github.com/blsssss/jimichi/client"
+	"github.com/blsssss/jimichi/lab"
+	"github.com/blsssss/jimichi/lab/metrics"
+)
+
+type result struct {
+	Traffic    string  `json:"traffic"`
+	Flows      int     `json:"flows"`
+	Hops       int     `json:"hops"`
+	Cells      int     `json:"cells"`
+	Messages   int     `json:"messages"`
+	Multiplier float64 `json:"bandwidth_multiplier"`
+	AUC        float64 `json:"auc"`
+	AUCLow     float64 `json:"auc_ci_low"`
+	AUCHigh    float64 `json:"auc_ci_high"`
+	TPR        float64 `json:"tpr_at_fpr_0.01"`
+	TopOne     float64 `json:"top1_accuracy"`
+	DropRate   float64 `json:"drop_rate"`
+	P50        string  `json:"latency_p50"`
+	P95        string  `json:"latency_p95"`
+}
+
+type variant struct {
+	label string
+	cfg   lab.Config
+}
+
+func main() {
+	flows := flag.Int("flows", 6, "concurrent flows")
+	hops := flag.Int("hops", 3, "relays in the chain")
+	duration := flag.Duration("duration", 20*time.Second, "length of one run")
+	send := flag.Duration("send", 200*time.Millisecond, "mean gap between messages of one flow")
+	bin := flag.Duration("bin", 100*time.Millisecond, "observation window for the attack")
+	repeats := flag.Int("repeats", 1, "runs per configuration")
+	out := flag.String("out", "artifacts", "directory for the json report")
+	flag.Parse()
+
+	variants := []variant{
+		{"none", lab.Config{}},
+		{"add-0.5x", lab.Config{CoverEvery: 400 * time.Millisecond}},
+		{"add-1x", lab.Config{CoverEvery: 200 * time.Millisecond}},
+		{"add-2x", lab.Config{CoverEvery: 100 * time.Millisecond}},
+		{"fixed-1x", lab.Config{Mode: client.ConstantRate, Rate: 200 * time.Millisecond}},
+		{"fixed-2x", lab.Config{Mode: client.ConstantRate, Rate: 100 * time.Millisecond}},
+		{"fixed-4x", lab.Config{Mode: client.ConstantRate, Rate: 50 * time.Millisecond}},
+	}
+
+	results := make([]result, 0, len(variants)*(*repeats))
+	fmt.Printf("%-9s %6s %11s %24s %7s %6s %7s %9s %9s\n",
+		"traffic", "cells", "multiplier", "auc [95% ci]", "tpr@1%", "top1", "drops", "p50", "p95")
+
+	for _, v := range variants {
+		for r := 0; r < *repeats; r++ {
+			cfg := v.cfg
+			cfg.Hops = *hops
+			cfg.Flows = *flows
+			cfg.Duration = *duration
+			cfg.SendEvery = *send
+			cfg.Seed = int64(1000 + r)
+
+			run, err := lab.Execute(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "run failed: %v\n", err)
+				os.Exit(1)
+			}
+			res := analyse(run, v.label, *bin)
+			results = append(results, res)
+			fmt.Printf("%-9s %6d %11.2f     %.3f [%.3f, %.3f] %7.3f %6.3f %7.3f %9s %9s\n",
+				res.Traffic, res.Cells, res.Multiplier,
+				res.AUC, res.AUCLow, res.AUCHigh, res.TPR, res.TopOne,
+				res.DropRate, res.P50, res.P95)
+		}
+	}
+
+	if err := write(*out, results); err != nil {
+		fmt.Fprintf(os.Stderr, "report: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func analyse(run *lab.Run, traffic string, bin time.Duration) result {
+	entry := make([][]float64, len(run.Entry))
+	for i, t := range run.Entry {
+		entry[i] = metrics.Bin(t.Events(), run.Config.Duration, bin)
+	}
+	exit := make([][]float64, len(run.Exit))
+	for i, t := range run.Exit {
+		exit[i] = metrics.Bin(t.Events(), run.Config.Duration, bin)
+	}
+
+	// the observer never sees the pairing; it only scores the attack
+	truth := make(map[int]int, len(entry))
+	for i := range entry {
+		truth[i] = i
+	}
+
+	scores := metrics.ScorePairs(entry, exit, truth)
+	ci := metrics.BootstrapAUC(scores, len(entry), 2000, 7)
+
+	multiplier := 0.0
+	if run.Sent > 0 {
+		multiplier = float64(run.Cells) / float64(run.Sent)
+	}
+
+	p50, p95 := percentiles(run.Latency)
+	drops := 0.0
+	if total := run.Sent; total > 0 {
+		drops = float64(run.Dropped) / float64(total)
+	}
+
+	return result{
+		Traffic:    traffic,
+		Flows:      run.Config.Flows,
+		Hops:       run.Config.Hops,
+		Cells:      run.Cells,
+		Messages:   run.Sent,
+		Multiplier: multiplier,
+		AUC:        ci.Point,
+		AUCLow:     ci.Low,
+		AUCHigh:    ci.High,
+		TPR:        metrics.TPRAtFPR(scores, 0.01),
+		TopOne:     metrics.TopOneAccuracy(scores, len(entry)),
+		DropRate:   drops,
+		P50:        p50.Round(time.Microsecond).String(),
+		P95:        p95.Round(time.Microsecond).String(),
+	}
+}
+
+func percentiles(samples []time.Duration) (p50, p95 time.Duration) {
+	if len(samples) == 0 {
+		return 0, 0
+	}
+	sorted := make([]time.Duration, len(samples))
+	copy(sorted, samples)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := func(q float64) time.Duration {
+		i := int(q * float64(len(sorted)-1))
+		return sorted[i]
+	}
+	return idx(0.5), idx(0.95)
+}
+
+func write(dir string, results []result) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	name := filepath.Join(dir, fmt.Sprintf("correlation-%s.json", time.Now().UTC().Format("20060102-150405")))
+	f, err := os.Create(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(results); err != nil {
+		return err
+	}
+	fmt.Printf("\nreport: %s\n", name)
+	return nil
+}

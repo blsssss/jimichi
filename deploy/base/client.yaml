@@ -28,8 +28,10 @@ spec:
             - "0"
             - "-interval"
             - "2s"
-            - "-cover"
-            - "500ms"
+            - "-mode"
+            - "fixed"
+            - "-rate"
+            - "200ms"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

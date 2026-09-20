@@ -1,7 +1,7 @@
 CLUSTER ?= jimichi
 NAMESPACE ?= jimichi
 
-.PHONY: test lint images kind-up kind-load deploy up down logs stats
+.PHONY: test lint images kind-up kind-load deploy up redeploy down logs stats
 
 test:
 	go vet ./...
@@ -29,6 +29,9 @@ deploy:
 	kubectl apply -f deploy/base/client.yaml
 
 up: kind-up kind-load deploy
+
+redeploy:
+	bash scripts/redeploy.sh
 
 down:
 	kind delete cluster --name $(CLUSTER)

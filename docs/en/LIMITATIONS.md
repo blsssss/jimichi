@@ -25,5 +25,8 @@ English | [Русский](../ru/LIMITATIONS.md)
   not immunity.
 - An adversary holding several snapshots of the container over time sees changes in the areas the
   decoy claims are unused. The property is not claimed against that adversary.
+- Latency measurement needs a clock finer than a millisecond. On a Windows host short intervals
+  read as zero, so latency runs happen in Linux (a container or the cluster), not on the
+  development host.
 - The model does not cover a global observer, compromise of the user's device, or side-channel
   attacks.
