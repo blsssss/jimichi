@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jimichi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-1
+  namespace: jimichi
+  labels: {app: relay, hop: "1"}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: relay, hop: "1"}
+  template:
+    metadata:
+      labels: {app: relay, hop: "1"}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: relay
+          image: jimichi/relay:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-listen", ":9000", "-info", ":9100"]
+          ports:
+            - {name: cells, containerPort: 9000}
+            - {name: info, containerPort: 9100}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
+          readinessProbe:
+            httpGet: {path: /healthz, port: info}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-1
+  namespace: jimichi
+spec:
+  selector: {app: relay, hop: "1"}
+  ports:
+    - {name: cells, port: 9000, targetPort: cells}
+    - {name: info, port: 9100, targetPort: info}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-2
+  namespace: jimichi
+  labels: {app: relay, hop: "2"}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: relay, hop: "2"}
+  template:
+    metadata:
+      labels: {app: relay, hop: "2"}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: relay
+          image: jimichi/relay:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-listen", ":9000", "-info", ":9100"]
+          ports:
+            - {name: cells, containerPort: 9000}
+            - {name: info, containerPort: 9100}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
+          readinessProbe:
+            httpGet: {path: /healthz, port: info}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-2
+  namespace: jimichi
+spec:
+  selector: {app: relay, hop: "2"}
+  ports:
+    - {name: cells, port: 9000, targetPort: cells}
+    - {name: info, port: 9100, targetPort: info}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-3
+  namespace: jimichi
+  labels: {app: relay, hop: "3"}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: relay, hop: "3"}
+  template:
+    metadata:
+      labels: {app: relay, hop: "3"}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: relay
+          image: jimichi/relay:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-listen", ":9000", "-info", ":9100"]
+          ports:
+            - {name: cells, containerPort: 9000}
+            - {name: info, containerPort: 9100}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
+          readinessProbe:
+            httpGet: {path: /healthz, port: info}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-3
+  namespace: jimichi
+spec:
+  selector: {app: relay, hop: "3"}
+  ports:
+    - {name: cells, port: 9000, targetPort: cells}
+    - {name: info, port: 9100, targetPort: info}

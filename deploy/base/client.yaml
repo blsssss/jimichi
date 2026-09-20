@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-a
+  namespace: jimichi
+  labels: {app: client}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: client}
+  template:
+    metadata:
+      labels: {app: client}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: client
+          image: jimichi/client:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-nodes"
+            - "relay-1.jimichi.svc.cluster.local:9000,relay-2.jimichi.svc.cluster.local:9000,relay-3.jimichi.svc.cluster.local:9000"
+            - "-count"
+            - "0"
+            - "-interval"
+            - "2s"
+            - "-cover"
+            - "500ms"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
