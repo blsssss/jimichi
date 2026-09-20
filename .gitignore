@@ -1,0 +1,29 @@
+# working notes, never committed
+.dev/
+*.local.md
+*.notes.md
+
+# experiment output: datasets, reports, memory dumps
+artifacts/
+*.pcap
+*.core
+core.*
+
+# go
+/bin/
+*.test
+*.out
+coverage.*
+go.work
+go.work.sum
+
+# kind and kubectl
+kubeconfig*
+*.kubeconfig
+
+# editors and os
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
