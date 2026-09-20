@@ -1,5 +1,7 @@
 # jimichi
 
+English | [Русский](README.ru.md)
+
 A confidential messaging system that protects metadata, and the measurements that show what
 that protection is worth.
 
@@ -32,12 +34,12 @@ All primitives sit behind a single `CryptoProvider` interface. The primary suite
 (VKO GOST R 34.10-2012, Kuznyechik-MGM, Streebog); a second suite (X25519, XChaCha20-Poly1305,
 Ed25519) implements the same contract, so results are comparable with international work and a
 difference points at the suite, not at the harness. Both must pass the same conformance tests.
-See [docs/CRYPTO.md](docs/CRYPTO.md).
+See [docs/en/CRYPTO.md](docs/en/CRYPTO.md).
 
 ## Layout
 
 ```
-cmd/          entry points: relay, client, lab
+cmd/          entry points: relay, client, jimichi
 crypto/       CryptoProvider interface
   gost/       GOST suite
   c25519/     X25519 / XChaCha20-Poly1305 / Ed25519 suite
@@ -46,18 +48,21 @@ crypto/       CryptoProvider interface
 wire/         fixed-size cells, nested layers, replay window
 relay/        relay node
 client/       sender, receiver, cover traffic
+vault/        client container with two volumes
 lab/          scenario/, metrics/, report/
+web/          testbed dashboard
 deploy/       compose/ for development, kind/ and base/ for the demo
-docs/         system and experiment documentation
+docs/         documentation, en/ and ru/
 ```
 
 ## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - components, message flow, cell format, layout.
-- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) - assets, adversaries, threats and countermeasures.
-- [docs/CRYPTO.md](docs/CRYPTO.md) - the CryptoProvider contract.
-- [docs/EXPERIMENT.md](docs/EXPERIMENT.md) - the four experiment blocks and how they are measured.
-- [docs/LIMITATIONS.md](docs/LIMITATIONS.md) - what the results do and do not cover.
+- [docs/en/ARCHITECTURE.md](docs/en/ARCHITECTURE.md) - components, message flow, cell format.
+- [docs/en/THREAT_MODEL.md](docs/en/THREAT_MODEL.md) - assets, adversaries, threats, deniability.
+- [docs/en/CRYPTO.md](docs/en/CRYPTO.md) - the CryptoProvider contract.
+- [docs/en/EXPERIMENT.md](docs/en/EXPERIMENT.md) - adversary models, metrics, experiment blocks.
+- [docs/en/LIMITATIONS.md](docs/en/LIMITATIONS.md) - what the results do and do not cover.
+- [docs/en/GLOSSARY.md](docs/en/GLOSSARY.md) - terms.
 
 ## Requirements
 
