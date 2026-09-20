@@ -66,6 +66,24 @@ docs/         документация, en/ и ru/
 - [docs/ru/LIMITATIONS.md](docs/ru/LIMITATIONS.md) - границы применимости результатов.
 - [docs/ru/GLOSSARY.md](docs/ru/GLOSSARY.md) - термины.
 
+## Запуск стенда
+
+```
+kind create cluster --config deploy/kind/cluster.yaml
+make images
+kind load docker-image jimichi/relay:dev jimichi/client:dev --name jimichi
+kubectl apply -f deploy/base/relay.yaml
+kubectl apply -f deploy/base/client.yaml
+```
+
+В пространстве имён `jimichi` поднимаются три узла и клиент. Узел публикует свой открытый ключ и
+агрегированные счётчики на порту 9100:
+
+```
+kubectl -n jimichi port-forward svc/relay-3 9100:9100
+curl -s localhost:9100/stats
+```
+
 ## Требования
 
 Go 1.23. Блокировка памяти, запрет дампов и сценарии извлечения ключей работают только на Linux;

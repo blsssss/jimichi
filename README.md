@@ -64,6 +64,24 @@ docs/         documentation, en/ and ru/
 - [docs/en/LIMITATIONS.md](docs/en/LIMITATIONS.md) - what the results do and do not cover.
 - [docs/en/GLOSSARY.md](docs/en/GLOSSARY.md) - terms.
 
+## Running the testbed
+
+```
+kind create cluster --config deploy/kind/cluster.yaml
+make images
+kind load docker-image jimichi/relay:dev jimichi/client:dev --name jimichi
+kubectl apply -f deploy/base/relay.yaml
+kubectl apply -f deploy/base/client.yaml
+```
+
+Three relays and a client appear in the `jimichi` namespace. A relay publishes its public key and
+its aggregated counters on port 9100:
+
+```
+kubectl -n jimichi port-forward svc/relay-3 9100:9100
+curl -s localhost:9100/stats
+```
+
 ## Requirements
 
 Go 1.23. Memory locking, dump prevention and the key-extraction scenarios are Linux-only; other

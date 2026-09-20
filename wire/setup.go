@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	AddrSize   = 32
+	AddrSize   = 64
 	setupFlags = 1
 	setupHdr   = setupFlags + AddrSize + 8
 
