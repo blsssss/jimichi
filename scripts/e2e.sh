@@ -13,7 +13,8 @@ kubectl apply -f deploy/base/client.yaml
 kubectl -n "$NAMESPACE" rollout status deployment/client-a --timeout=180s
 
 for _ in $(seq 1 60); do
-  if kubectl -n "$NAMESPACE" logs deployment/client-a --tail=20 2>/dev/null | grep -q "round trip"; then
+  # an empty reply means the circuit died, which must not count as a pass
+  if kubectl -n "$NAMESPACE" logs deployment/client-a --tail=20 2>/dev/null | grep -Eq "round trip [1-9][0-9]* bytes"; then
     kubectl -n "$NAMESPACE" logs deployment/client-a --tail=3
     for h in 1 2 3; do
       kubectl -n "$NAMESPACE" logs "deployment/relay-$h" --tail=1

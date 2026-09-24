@@ -123,7 +123,7 @@ func (p *Provider) Sign(priv *secmem.Buffer, msg []byte) ([]byte, error) {
 	if priv == nil || priv.Len() != ed25519.PrivateKeySize {
 		return nil, jcrypto.ErrBadKeySize
 	}
-	return ed25519.Sign(ed25519.PrivateKey(priv.Bytes()), msg), nil
+	return sign(priv.Bytes(), msg), nil
 }
 
 func (p *Provider) Verify(pub, msg, sig []byte) bool {

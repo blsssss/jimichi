@@ -74,11 +74,17 @@ Decisions taken:
 
 - GOST: go.cypherpunks.su/gogost (GPLv3; the module path and the presence of the KDF and MGM are
   to be verified).
-- c25519: golang.org/x/crypto (curve25519, chacha20poly1305, hkdf) and crypto/ed25519 from the
-  standard library.
+- c25519: golang.org/x/crypto (curve25519, chacha20poly1305, hkdf). Ed25519 signing follows
+  RFC 8032 on filippo.io/edwards25519, directly over the secmem buffer. Since Go 1.25 crypto/ed25519
+  caches the expanded key under a weak pointer to the key: on mmap memory the runtime aborts, and on
+  the heap the expanded key lives until garbage collection.
 
 ## Known gaps
 
 - Ciphers expand the key into a round key schedule on the Go heap (Kuznyechik, the ChaCha state).
   Wiping it depends on the library and the garbage collector may copy it. Recorded in
   LIMITATIONS.md.
+- X25519 through crypto/ecdh copies the scalar to the heap for the duration of the call, and that
+  copy cannot be wiped. The SHA-512 state during signing is on the heap as well and holds the nonce
+  prefix, which is as sensitive as the key, for the duration of the call. The internal copy of the
+  scalar in edwards25519 is not wiped.

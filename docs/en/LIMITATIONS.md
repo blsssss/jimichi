@@ -14,6 +14,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   machine hosting a node, process-level measures do not work; that is the expected result.
 - The cell format uses constant size and replay protection but is not full Sphinx: beyond the
   constant size there is no processing that hides the position of a node in the chain.
+- Each circuit opens its own TCP connections between nodes and closes them in a cascade when it
+  breaks. Connection open and close times match along the chain and are visible to a global
+  observer. The correlation attack in this work uses cells only, this signal is not measured.
 - The correlation attack runs in laboratory conditions where the true flow labels are known.
   Transferring the estimates to a real network requires care.
 - The dataset is synthetic: cover traffic is generated, not captured from real users.
