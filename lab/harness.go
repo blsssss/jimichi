@@ -12,6 +12,7 @@ import (
 	jcrypto "github.com/blsssss/jimichi/crypto"
 	"github.com/blsssss/jimichi/crypto/c25519"
 	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/blsssss/jimichi/link"
 	"github.com/blsssss/jimichi/relay"
 )
 
@@ -74,6 +75,18 @@ func Execute(cfg Config) (*Run, error) {
 	provider := c25519.New()
 	start := time.Now()
 
+	frame, err := link.FrameSize(provider)
+	if err != nil {
+		return nil, err
+	}
+	handshake, err := link.InitiatorHandshakeSize(provider)
+	if err != nil {
+		return nil, err
+	}
+	tap := func(conn net.Conn, t *Trace) net.Conn {
+		return &tappedConn{Conn: conn, trace: t, skip: handshake, frame: frame}
+	}
+
 	exitTraces := make([]*Trace, 0, cfg.Flows)
 	var exitMu sync.Mutex
 	// the last link carries the cells of one circuit only, so a new connection
@@ -87,7 +100,7 @@ func Execute(cfg Config) (*Run, error) {
 		exitMu.Lock()
 		exitTraces = append(exitTraces, t)
 		exitMu.Unlock()
-		return &tappedConn{Conn: conn, trace: t}, nil
+		return tap(conn, t), nil
 	}
 
 	nodes := make([]*node, cfg.Hops)
@@ -128,7 +141,7 @@ func Execute(cfg Config) (*Run, error) {
 				if err != nil {
 					return nil, err
 				}
-				return &tappedConn{Conn: conn, trace: entry[i]}, nil
+				return tap(conn, entry[i]), nil
 			},
 		})
 		if err != nil {

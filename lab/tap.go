@@ -4,8 +4,6 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"github.com/blsssss/jimichi/wire"
 )
 
 // what a passive observer on one link can see: the moment a cell crossed it.
@@ -38,11 +36,13 @@ func (t *Trace) Len() int {
 	return len(t.events)
 }
 
-// counts whole cells as they pass, since a link carries nothing but cells of a
-// fixed size
+// counts whole frames as they pass: after the link handshake the wire carries
+// nothing but encrypted frames of one size, so a frame is all the observer sees
 type tappedConn struct {
 	net.Conn
 	trace   *Trace
+	skip    int
+	frame   int
 	pending int
 }
 
@@ -54,9 +54,17 @@ func (c *tappedConn) Write(b []byte) (int, error) {
 
 func (c *tappedConn) count(n int) {
 	now := time.Now()
+	if c.skip > 0 {
+		used := n
+		if used > c.skip {
+			used = c.skip
+		}
+		c.skip -= used
+		n -= used
+	}
 	c.pending += n
-	for c.pending >= wire.CellSize {
-		c.pending -= wire.CellSize
+	for c.pending >= c.frame {
+		c.pending -= c.frame
 		c.trace.Mark(now)
 	}
 }

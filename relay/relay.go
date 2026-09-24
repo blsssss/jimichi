@@ -5,12 +5,12 @@ package relay
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 
 	jcrypto "github.com/blsssss/jimichi/crypto"
 	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/blsssss/jimichi/link"
 	"github.com/blsssss/jimichi/wire"
 )
 
@@ -66,8 +66,8 @@ type circuit struct {
 	hop      *wire.Hop
 	replay   *wire.ReplayWindow
 	back     *wire.ReplayWindow
-	next     net.Conn
-	in       net.Conn
+	next     *link.Conn
+	in       *link.Conn
 	nextID   uint64
 	isExit   bool
 	writeMu  sync.Mutex
@@ -153,12 +153,17 @@ func (r *Relay) handle(conn net.Conn) {
 		_ = conn.Close()
 	}()
 
+	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv)
+	if err != nil {
+		return
+	}
+
 	for {
 		var cell wire.Cell
-		if _, err := io.ReadFull(conn, cell[:]); err != nil {
+		if err := lc.ReadCell(&cell); err != nil {
 			return
 		}
-		if err := r.route(&cell, conn); err != nil {
+		if err := r.route(&cell, lc); err != nil {
 			r.stats.add(&r.stats.Dropped)
 			if errors.Is(err, errFatal) {
 				return
@@ -169,7 +174,7 @@ func (r *Relay) handle(conn net.Conn) {
 
 var errFatal = errors.New("relay: connection unusable")
 
-func (r *Relay) route(cell *wire.Cell, from net.Conn) error {
+func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	hdr, err := cell.Header()
 	if err != nil {
 		return err
@@ -236,7 +241,7 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 func (r *Relay) backward(c *circuit) {
 	for {
 		var cell wire.Cell
-		if _, err := io.ReadFull(c.next, cell[:]); err != nil {
+		if err := c.next.ReadCell(&cell); err != nil {
 			return
 		}
 		hdr, err := cell.Header()
@@ -260,7 +265,7 @@ func (r *Relay) backward(c *circuit) {
 	}
 }
 
-func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from net.Conn) error {
+func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	layer, err := wire.OpenSetup(r.cfg.Provider, r.cfg.StaticPriv, cell)
 	if err != nil {
 		return err
@@ -285,9 +290,18 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from net.Conn) error {
 	}
 
 	if !c.isExit {
-		conn, err := r.dial(layer.NextAddr)
+		raw, err := r.dial(layer.NextAddr)
 		if err != nil {
 			hop.Close()
+			return err
+		}
+		// the relay does not know the next node's long-term key, so the link to it
+		// is anonymous: it hides headers from a passive observer, the onion layers
+		// keep the content bound to the nodes the client chose
+		conn, err := link.Dial(raw, r.cfg.Provider, nil)
+		if err != nil {
+			hop.Close()
+			_ = raw.Close()
 			return err
 		}
 		c.next = conn
@@ -326,13 +340,11 @@ func (r *Relay) dial(addr string) (net.Conn, error) {
 func (c *circuit) write(cell *wire.Cell) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_, err := c.next.Write(cell[:])
-	return err
+	return c.next.WriteCell(cell)
 }
 
 func (c *circuit) writeBack(cell *wire.Cell) error {
 	c.inMu.Lock()
 	defer c.inMu.Unlock()
-	_, err := c.in.Write(cell[:])
-	return err
+	return c.in.WriteCell(cell)
 }

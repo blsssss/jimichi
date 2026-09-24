@@ -9,6 +9,7 @@ import (
 	"github.com/blsssss/jimichi/client"
 	jcrypto "github.com/blsssss/jimichi/crypto"
 	"github.com/blsssss/jimichi/crypto/c25519"
+	"github.com/blsssss/jimichi/link"
 	"github.com/blsssss/jimichi/relay"
 	"github.com/blsssss/jimichi/wire"
 )
@@ -172,13 +173,17 @@ func TestRelayRejectsReplay(t *testing.T) {
 	}
 	defer circuit.Close()
 
-	conn, err := net.Dial("tcp", entry.addr)
+	raw, err := net.Dial("tcp", entry.addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
+	conn, err := link.Dial(raw, p, entry.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
 	defer conn.Close()
 
-	if _, err := conn.Write(setup.Cell[:]); err != nil {
+	if err := conn.WriteCell(setup.Cell); err != nil {
 		t.Fatalf("write setup: %v", err)
 	}
 
@@ -186,8 +191,10 @@ func TestRelayRejectsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
+	// the link layer re-encrypts each copy, so only the relay's replay window
+	// stands between the duplicate and the exit
 	for i := 0; i < 2; i++ {
-		if _, err := conn.Write(cell[:]); err != nil {
+		if err := conn.WriteCell(cell); err != nil {
 			t.Fatalf("write cell: %v", err)
 		}
 	}

@@ -38,6 +38,7 @@ the implementation.
 | Linking sender and recipient by traffic | constant cell size, cover traffic, delays and batching | our own correlation attack, ROC and AUC under different parameters |
 | One node learning the whole route | nested encryption, a node sees only its neighbours | compromising one node of three, checking what it holds |
 | A node inserted through a compromised CA | the client picks the chain, layers are encrypted per node | inserting one and two nodes, measuring the residual leak |
+| Linking a flow by cell headers | link encryption between neighbours, frames of one size on the wire | searching a link capture for counters and identifiers |
 | Replay and tampering | AEAD on every layer, a window of counters | replaying a recorded cell, flipping a byte, expecting a refusal |
 | Proving that a message was sent | cover and payload cells are indistinguishable on the wire | distinguishing the two kinds from observable features, expecting chance level |
 | Proving authorship to a third party | deniable authentication: the recipient is convinced by a shared secret, not by a signature | the recipient forges a transcript indistinguishable from a real one |

@@ -60,6 +60,24 @@ Every cell is 512 bytes, payload and cover cells alike.
 - A node keeps a window of accepted counters and drops a replay: forwarding one would hand an
   active observer a free timing mark.
 
+## Link encryption
+
+A cell never crosses a link in the clear: it travels inside an encrypted frame. Without this layer
+the cell header is visible on the wire, and its counter is the same on every link of the chain: an
+observer at the entry and at the exit would link a flow by matching numbers, with no statistics.
+
+- Handshake: the initiator sends an ephemeral public key, the responder answers with its own. The
+  secret of the two ephemeral keys gives the link forward secrecy.
+- The client knows the long-term key of the entry node and mixes it into the secret, so the first
+  link is authenticated. Links between nodes are anonymous: they hide headers from a passive
+  observer, while the onion layers bind the content to the nodes the client chose.
+- Two keys are derived from the secret, one per direction. The nonce is the frame number in that
+  direction.
+- A frame is the 512-byte cell plus a 16-byte tag, 528 bytes. After the handshake the wire carries
+  only frames of one size: no identifiers, no counters.
+- The link layer takes its primitives from the same CryptoProvider, so it works on the GOST suite
+  as well.
+
 ## Sending modes
 
 | Mode | How cells leave | What an observer sees |

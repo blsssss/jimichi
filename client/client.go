@@ -14,6 +14,7 @@ import (
 
 	jcrypto "github.com/blsssss/jimichi/crypto"
 	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/blsssss/jimichi/link"
 	"github.com/blsssss/jimichi/wire"
 )
 
@@ -49,7 +50,7 @@ type Config struct {
 
 type Client struct {
 	cfg     Config
-	conn    net.Conn
+	conn    *link.Conn
 	circuit *wire.Circuit
 	keys    []*secmem.Buffer
 	replies chan []byte
@@ -111,13 +112,20 @@ func Dial(cfg Config) (*Client, error) {
 	if dial == nil {
 		dial = net.Dial
 	}
-	conn, err := dial("tcp", cfg.Chain[0].Addr)
+	raw, err := dial("tcp", cfg.Chain[0].Addr)
 	if err != nil {
 		circuit.Close()
 		release()
 		return nil, err
 	}
-	if _, err := conn.Write(setup.Cell[:]); err != nil {
+	conn, err := link.Dial(raw, cfg.Provider, cfg.Chain[0].StaticPub)
+	if err != nil {
+		circuit.Close()
+		release()
+		_ = raw.Close()
+		return nil, err
+	}
+	if err := conn.WriteCell(setup.Cell); err != nil {
 		circuit.Close()
 		release()
 		_ = conn.Close()
@@ -151,7 +159,7 @@ func (c *Client) receive() {
 	defer close(c.replies)
 	for {
 		var cell wire.Cell
-		if _, err := io.ReadFull(c.conn, cell[:]); err != nil {
+		if err := c.conn.ReadCell(&cell); err != nil {
 			return
 		}
 		payload, err := c.circuit.OpenExit(&cell, wire.Backward)
@@ -246,8 +254,7 @@ func (c *Client) send(kind wire.Kind, payload []byte) error {
 	if c.closed {
 		return errors.New("client: closed")
 	}
-	_, err = c.conn.Write(cell[:])
-	return err
+	return c.conn.WriteCell(cell)
 }
 
 // jitter is drawn per cell, so the send pattern does not repeat
