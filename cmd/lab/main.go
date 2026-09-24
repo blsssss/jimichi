@@ -24,6 +24,7 @@ type result struct {
 	AUC        float64 `json:"auc"`
 	AUCLow     float64 `json:"auc_ci_low"`
 	AUCHigh    float64 `json:"auc_ci_high"`
+	CIMethod   string  `json:"auc_ci_method"`
 	TPR        float64 `json:"tpr_at_fpr_0.01"`
 	TopOne     float64 `json:"top1_accuracy"`
 	DropRate   float64 `json:"drop_rate"`
@@ -141,7 +142,7 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 	}
 
 	scores := metrics.ScorePairs(entry, exit, truth)
-	ci := metrics.BootstrapAUC(scores, len(entry), 2000, 7)
+	ci := metrics.BootstrapAUC(scores, len(entry), 10000, 7)
 
 	matrix := make([][]float64, len(entry))
 	for i := range matrix {
@@ -151,9 +152,19 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		matrix[sc.Entry][sc.Exit] = sc.Value
 	}
 
+	// only cells inside the observation window count, the drain after the
+	// deadline is not something the observer was scored on
+	cells := 0
+	for _, t := range run.Entry {
+		for _, e := range t.Events() {
+			if e < run.Config.Duration {
+				cells++
+			}
+		}
+	}
 	multiplier := 0.0
 	if run.Sent > 0 {
-		multiplier = float64(run.Cells) / float64(run.Sent)
+		multiplier = float64(cells) / float64(run.Sent)
 	}
 
 	p50, p95 := percentiles(run.Latency)
@@ -166,12 +177,13 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		Traffic:    traffic,
 		Flows:      run.Config.Flows,
 		Hops:       run.Config.Hops,
-		Cells:      run.Cells,
+		Cells:      cells,
 		Messages:   run.Sent,
 		Multiplier: multiplier,
 		AUC:        ci.Point,
 		AUCLow:     ci.Low,
 		AUCHigh:    ci.High,
+		CIMethod:   ci.Method + "-10000",
 		TPR:        metrics.TPRAtFPR(scores, 0.01),
 		TopOne:     metrics.TopOneAccuracy(scores, len(entry)),
 		DropRate:   drops,
@@ -188,9 +200,15 @@ func percentiles(samples []time.Duration) (p50, p95 time.Duration) {
 	sorted := make([]time.Duration, len(samples))
 	copy(sorted, samples)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	// linear interpolation between order statistics, the usual type 7 estimator
 	idx := func(q float64) time.Duration {
-		i := int(q * float64(len(sorted)-1))
-		return sorted[i]
+		pos := q * float64(len(sorted)-1)
+		lo := int(pos)
+		if lo+1 >= len(sorted) {
+			return sorted[lo]
+		}
+		frac := pos - float64(lo)
+		return sorted[lo] + time.Duration(frac*float64(sorted[lo+1]-sorted[lo]))
 	}
 	return idx(0.5), idx(0.95)
 }

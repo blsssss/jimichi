@@ -61,7 +61,6 @@ func TestPearsonKnownAnswer(t *testing.T) {
 		{"identical", []float64{1, 2, 3, 4, 5}, 1},
 		{"scaled and shifted", []float64{10, 12, 14, 16, 18}, 1},
 		{"negated", []float64{5, 4, 3, 2, 1}, -1},
-		{"constant has no correlation", []float64{3, 3, 3, 3, 3}, 0},
 		// deviations of a: -2 -1 0 1 2; of b (mean 2.8): -0.8 -1.8 1.2 0.2 1.2
 		// cross sum 6, squares 10 and 6.8, so r = 6 / sqrt(68)
 		{"hand computed", []float64{2, 1, 4, 3, 4}, 6 / math.Sqrt(10*6.8)},
@@ -70,6 +69,12 @@ func TestPearsonKnownAnswer(t *testing.T) {
 		if got := metrics.Pearson(a, c.b); !near(got, c.want) {
 			t.Errorf("%s: r = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestPearsonUndefinedWithoutVariation(t *testing.T) {
+	if r := metrics.Pearson([]float64{1, 2, 3}, []float64{4, 4, 4}); !math.IsNaN(r) {
+		t.Fatalf("a constant series has no correlation to report, got %v", r)
 	}
 }
 
@@ -105,6 +110,77 @@ func TestTPRAtFPR(t *testing.T) {
 	}
 }
 
+// positives 0.9 and 0.5, negatives 0.5 and 0.1. the curve goes (0,0) to (0,0.5)
+// at 0.9, then the tie at 0.5 moves it straight to (0.5,1). at FPR 0.25 the
+// straight segment gives 0.5 + 0.5 * 0.5 = 0.75
+func TestTPRInterpolatesAcrossATie(t *testing.T) {
+	if got := metrics.TPRAtFPR(scored([]float64{0.9, 0.5}, []float64{0.5, 0.1}), 0.25); !near(got, 0.75) {
+		t.Fatalf("TPR at FPR 0.25 = %v, want 0.75", got)
+	}
+}
+
+// when every pair looks the same the adversary can only guess: the curve is the
+// diagonal, so TPR equals FPR, AUC is one half and top-1 is one in N
+func TestAllTiedIsChance(t *testing.T) {
+	m := [][]float64{{0.3, 0.3, 0.3}, {0.3, 0.3, 0.3}, {0.3, 0.3, 0.3}}
+	s := matrixScores(m)
+	if got := metrics.AUC(s); !near(got, 0.5) {
+		t.Errorf("AUC = %v, want 0.5", got)
+	}
+	for _, fpr := range []float64{0.01, 0.1, 0.5} {
+		if got := metrics.TPRAtFPR(s, fpr); !near(got, fpr) {
+			t.Errorf("TPR at FPR %v = %v, want %v", fpr, got, fpr)
+		}
+	}
+	if got := metrics.TopOneAccuracy(s, 3); !near(got, 1.0/3) {
+		t.Errorf("top-1 = %v, want 1/3", got)
+	}
+}
+
+// entry 0 ties its own exit with one other exit: half a hit; entry 1 is found;
+// entry 2 prefers a wrong exit. (0.5 + 1 + 0) / 3 = 0.5
+func TestTopOneBreaksTiesAtRandom(t *testing.T) {
+	m := [][]float64{
+		{0.8, 0.8, 0.1},
+		{0.2, 0.9, 0.3},
+		{0.6, 0.1, 0.4},
+	}
+	if got := metrics.TopOneAccuracy(matrixScores(m), 3); !near(got, 0.5) {
+		t.Fatalf("top-1 = %v, want 0.5", got)
+	}
+}
+
+func TestScorePairsTreatsUndefinedAsTie(t *testing.T) {
+	flat := []float64{1, 1, 1, 1}
+	s := metrics.ScorePairs([][]float64{flat, flat}, [][]float64{flat, flat}, map[int]int{0: 0, 1: 1})
+	if got := metrics.AUC(s); !near(got, 0.5) {
+		t.Fatalf("flat series must leave the observer at chance, AUC = %v", got)
+	}
+}
+
+// the second exit series is 3x + 1 of the first, so in exact arithmetic both
+// pairs have the same correlation while the floating point results differ in
+// the last bits; they must still rank as a tie
+func TestRoundingNoiseIsATie(t *testing.T) {
+	base := []float64{0.1, 0.7, 0.2, 0.9, 0.3, 0.45, 0.05}
+	stretched := make([]float64, len(base))
+	for i, v := range base {
+		stretched[i] = 3*v + 1
+	}
+	entry := [][]float64{{0.3, 0.5, 0.1, 0.8, 0.2, 0.6, 0.15}}
+	exit := [][]float64{base, stretched}
+	if raw0, raw1 := metrics.Pearson(entry[0], base), metrics.Pearson(entry[0], stretched); raw0 == raw1 {
+		t.Log("this platform computed both correlations bit-identically; rounding is not exercised")
+	}
+	s := metrics.ScorePairs(entry, exit, map[int]int{0: 0})
+	if s[0].Value != s[1].Value {
+		t.Fatalf("identical pairs scored %v and %v", s[0].Value, s[1].Value)
+	}
+	if got := metrics.TopOneAccuracy(s, 1); !near(got, 0.5) {
+		t.Fatalf("top-1 = %v, want 0.5 for a two-way tie", got)
+	}
+}
+
 func matrixScores(m [][]float64) []metrics.Score {
 	var out []metrics.Score
 	for i, row := range m {
@@ -133,7 +209,10 @@ func TestBootstrapBracketsThePoint(t *testing.T) {
 		{0.2, 0.5, 0.6, 0.1},
 		{0.3, 0.1, 0.4, 0.7},
 	}
-	ci := metrics.BootstrapAUC(matrixScores(m), 4, 2000, 1)
+	ci := metrics.BootstrapAUC(matrixScores(m), 4, 10000, 1)
+	if ci.Method != "bca" {
+		t.Fatalf("method = %q, want bca", ci.Method)
+	}
 	if ci.Low > ci.Point || ci.High < ci.Point {
 		t.Fatalf("interval [%v, %v] does not contain the point %v", ci.Low, ci.High, ci.Point)
 	}
