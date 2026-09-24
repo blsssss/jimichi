@@ -112,6 +112,16 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
 
 An empty next address marks the exit node.
 
+Circuit teardown:
+
+- A circuit is bound to the link its control cell arrived on. A cell with the same identifier on
+  another link is dropped.
+- Closing a link anywhere closes the neighbouring links of the circuit in both directions, so the
+  break reaches the client and the exit node.
+- Circuit keys are released once every goroutine using them has stopped.
+- The client sees the break as its reply channel closing and exits. The orchestrator restarts it
+  on a new circuit.
+
 ## Node authentication
 
 - Every node has a long-term signing pair and a certificate from the testbed CA.

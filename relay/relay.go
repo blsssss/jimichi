@@ -36,6 +36,7 @@ type Relay struct {
 	circuits map[uint64]*circuit
 	conns    map[net.Conn]struct{}
 	closed   bool
+	handlers sync.WaitGroup
 
 	stats Stats
 }
@@ -75,6 +76,7 @@ type circuit struct {
 	inbound  uint64
 	hopIndex int
 	replies  uint64
+	done     chan struct{}
 }
 
 func New(cfg Config) (*Relay, error) {
@@ -102,11 +104,16 @@ func (r *Relay) Serve(ln net.Listener) error {
 			}
 			return err
 		}
-		r.track(conn)
+		if !r.track(conn) {
+			_ = conn.Close()
+			return nil
+		}
 		go r.handle(conn)
 	}
 }
 
+// returns once every circuit key is released: each connection handler tears
+// down its own circuits, so no key is destroyed while a goroutine still uses it
 func (r *Relay) Close() {
 	r.mu.Lock()
 	if r.closed {
@@ -118,19 +125,12 @@ func (r *Relay) Close() {
 	for c := range r.conns {
 		conns = append(conns, c)
 	}
-	circuits := r.circuits
-	r.circuits = make(map[uint64]*circuit)
 	r.mu.Unlock()
 
 	for _, c := range conns {
 		_ = c.Close()
 	}
-	for _, c := range circuits {
-		c.hop.Close()
-		if c.next != nil {
-			_ = c.next.Close()
-		}
-	}
+	r.handlers.Wait()
 }
 
 func (r *Relay) isClosed() bool {
@@ -139,13 +139,19 @@ func (r *Relay) isClosed() bool {
 	return r.closed
 }
 
-func (r *Relay) track(conn net.Conn) {
+func (r *Relay) track(conn net.Conn) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return false
+	}
 	r.conns[conn] = struct{}{}
-	r.mu.Unlock()
+	r.handlers.Add(1)
+	return true
 }
 
 func (r *Relay) handle(conn net.Conn) {
+	defer r.handlers.Done()
 	defer func() {
 		r.mu.Lock()
 		delete(r.conns, conn)
@@ -157,6 +163,10 @@ func (r *Relay) handle(conn net.Conn) {
 	if err != nil {
 		return
 	}
+	defer func() {
+		_ = lc.Close()
+		r.teardown(lc)
+	}()
 
 	for {
 		var cell wire.Cell
@@ -188,7 +198,9 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	r.mu.Lock()
 	c := r.circuits[hdr.Circuit]
 	r.mu.Unlock()
-	if c == nil {
+	// a circuit answers only on the link that set it up, which also keeps its keys
+	// in the hands of the one goroutine that later releases them
+	if c == nil || c.in != from {
 		return fmt.Errorf("relay: unknown circuit")
 	}
 	if !c.replay.Accept(hdr.Counter) {
@@ -236,9 +248,39 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 	return c.writeBack(cell)
 }
 
+// a circuit dies with the link it came in on; closing the link onwards makes the
+// next relay do the same, so a break anywhere reaches both ends of the chain
+func (r *Relay) teardown(from *link.Conn) {
+	r.mu.Lock()
+	var dead []*circuit
+	for id, c := range r.circuits {
+		if c.in == from {
+			dead = append(dead, c)
+			delete(r.circuits, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, c := range dead {
+		c.release()
+	}
+}
+
+func (c *circuit) release() {
+	if c.next != nil {
+		_ = c.next.Close()
+		<-c.done
+	}
+	c.hop.Close()
+}
+
 // cells coming from the next hop travel towards the client, so this relay adds
 // its own layer instead of stripping one
 func (r *Relay) backward(c *circuit) {
+	defer func() {
+		close(c.done)
+		// the next hop is gone, so the previous one must learn it too
+		_ = c.in.Close()
+	}()
 	for {
 		var cell wire.Cell
 		if err := c.next.ReadCell(&cell); err != nil {
@@ -287,6 +329,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 		inbound:  hdr.Circuit,
 		in:       from,
 		hopIndex: index,
+		done:     make(chan struct{}),
 	}
 
 	if !c.isExit {
@@ -322,7 +365,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		hop.Close()
+		c.release()
 		return errFatal
 	}
 	r.circuits[hdr.Circuit] = c

@@ -63,6 +63,9 @@ type Client struct {
 
 	stopCover chan struct{}
 	coverDone sync.WaitGroup
+	// goroutines still using the circuit keys; Close waits for them before it
+	// destroys the keys
+	busy sync.WaitGroup
 }
 
 func Dial(cfg Config) (*Client, error) {
@@ -140,6 +143,7 @@ func Dial(cfg Config) (*Client, error) {
 		replies: make(chan []byte, 64),
 		queue:   make(chan []byte, 256),
 	}
+	c.busy.Add(1)
 	go c.receive()
 	switch {
 	case cfg.Mode == ConstantRate && cfg.Rate > 0:
@@ -156,6 +160,7 @@ func (c *Client) MaxPayload() int { return c.circuit.MaxPayload() }
 func (c *Client) Replies() <-chan []byte { return c.replies }
 
 func (c *Client) receive() {
+	defer c.busy.Done()
 	defer close(c.replies)
 	for {
 		var cell wire.Cell
@@ -239,7 +244,9 @@ func (c *Client) send(kind wire.Kind, payload []byte) error {
 	}
 	counter := c.counter
 	c.counter++
+	c.busy.Add(1)
 	c.mu.Unlock()
+	defer c.busy.Done()
 
 	cell, err := c.circuit.Seal(kind, counter, payload)
 	if err != nil {
@@ -299,15 +306,17 @@ func (c *Client) Close() error {
 	c.closed = true
 	c.mu.Unlock()
 
+	err := c.conn.Close()
 	if c.stopCover != nil {
 		close(c.stopCover)
 		c.coverDone.Wait()
 	}
+	c.busy.Wait()
 	c.circuit.Close()
 	for _, k := range c.keys {
 		k.Release()
 	}
-	return c.conn.Close()
+	return err
 }
 
 func randomCircuitID() (uint64, error) {

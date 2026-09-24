@@ -250,27 +250,42 @@ func TestReplyReturnsThroughChain(t *testing.T) {
 	}
 }
 
-// when a relay of the chain goes away the client must learn it: a circuit that
+// when any relay of the chain goes away the client must learn it: a circuit that
 // dies silently would swallow every message sent after it
 func TestClientSeesDeadCircuit(t *testing.T) {
-	p := c25519.New()
-	exit := startNode(t, p, func(_ uint64, payload []byte) []byte { return payload })
-	entry := startNode(t, p, nil)
+	for dead, name := range []string{"entry", "middle", "exit"} {
+		t.Run(name, func(t *testing.T) {
+			p := c25519.New()
+			exit := startNode(t, p, func(_ uint64, payload []byte) []byte { return payload })
+			middle := startNode(t, p, nil)
+			entry := startNode(t, p, nil)
+			nodes := []*node{entry, middle, exit}
 
-	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, exit)})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer cl.Close()
+			cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(nodes...)})
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer cl.Close()
 
-	entry.r.Close()
+			if err := cl.Send([]byte("ping")); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			select {
+			case <-cl.Replies():
+			case <-time.After(3 * time.Second):
+				t.Fatal("no reply before the break")
+			}
 
-	select {
-	case _, open := <-cl.Replies():
-		if open {
-			t.Fatal("got a reply from a chain whose entry is gone")
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("the client never noticed that its circuit died")
+			nodes[dead].r.Close()
+
+			select {
+			case _, open := <-cl.Replies():
+				if open {
+					t.Fatal("got a reply from a broken chain")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("the client never noticed that its circuit died")
+			}
+		})
 	}
 }
