@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/img/logo.svg" width="96" alt="jimichi">
+  <img src="docs/img/logo.png" width="96" alt="jimichi">
 </p>
 
 <h1 align="center">jimichi</h1>
@@ -130,7 +130,7 @@ curl -s localhost:9100/stats
 
 ## Requirements
 
-Go 1.23. Memory locking, dump prevention and the key-extraction scenarios are Linux-only; other
+Go 1.27. Memory locking, dump prevention and the key-extraction scenarios are Linux-only; other
 platforms build against stubs that report memory as unlocked, so a node refuses to start there.
 Docker Compose for development, kind for the cluster demo.
 

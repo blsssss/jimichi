@@ -70,7 +70,12 @@ func main() {
 			logger.Fatalf("send: %v", err)
 		}
 		select {
-		case reply := <-c.Replies():
+		case reply, open := <-c.Replies():
+			if !open {
+				// a dead circuit would otherwise swallow every message silently;
+				// exiting lets the orchestrator restart the client on a fresh one
+				logger.Fatal("circuit closed")
+			}
 			logger.Printf("round trip %d bytes in %s", len(reply), time.Since(start).Round(time.Microsecond))
 		case <-time.After(5 * time.Second):
 			logger.Print("no reply within 5s")

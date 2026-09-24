@@ -249,3 +249,28 @@ func TestReplyReturnsThroughChain(t *testing.T) {
 		t.Fatal("no reply came back")
 	}
 }
+
+// when a relay of the chain goes away the client must learn it: a circuit that
+// dies silently would swallow every message sent after it
+func TestClientSeesDeadCircuit(t *testing.T) {
+	p := c25519.New()
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte { return payload })
+	entry := startNode(t, p, nil)
+
+	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+
+	entry.r.Close()
+
+	select {
+	case _, open := <-cl.Replies():
+		if open {
+			t.Fatal("got a reply from a chain whose entry is gone")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client never noticed that its circuit died")
+	}
+}
