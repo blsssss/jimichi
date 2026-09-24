@@ -1,11 +1,16 @@
 CLUSTER ?= jimichi
 NAMESPACE ?= jimichi
 
-.PHONY: test lint images kind-up kind-load deploy up redeploy start stop down logs stats sweep
+.PHONY: check test lint images kind-up kind-load deploy up redeploy start stop down logs stats sweep
+
+check:
+	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
+	go vet ./...
+	go test -short ./...
 
 test:
 	go vet ./...
-	go test ./...
+	go test -count=1 ./...
 
 lint:
 	gofmt -l .
