@@ -115,7 +115,7 @@ An empty next address marks the exit node.
 Circuit teardown:
 
 - A circuit is bound to the link its control cell arrived on. A cell with the same identifier on
-  another link is dropped.
+  another link is dropped, and so is a second control cell with an identifier already in use.
 - Closing a link anywhere closes the neighbouring links of the circuit in both directions, so the
   break reaches the client and the exit node.
 - Circuit keys are released once every goroutine using them has stopped.

@@ -85,4 +85,6 @@ Decisions taken:
   Wiping it depends on the library and the garbage collector may copy it. Recorded in
   LIMITATIONS.md.
 - X25519 through crypto/ecdh copies the scalar to the heap for the duration of the call, and that
-  copy cannot be wiped. The SHA-512 state during signing is on the heap as well.
+  copy cannot be wiped. The SHA-512 state during signing is on the heap as well and holds the nonce
+  prefix, which is as sensitive as the key, for the duration of the call. The internal copy of the
+  scalar in edwards25519 is not wiped.

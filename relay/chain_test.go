@@ -3,6 +3,7 @@ package relay_test
 import (
 	"bytes"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,11 @@ type node struct {
 
 func startNode(t *testing.T, p jcrypto.CryptoProvider, deliver relay.Deliver) *node {
 	t.Helper()
+	return startRelay(t, p, relay.Config{Deliver: deliver})
+}
+
+func startRelay(t *testing.T, p jcrypto.CryptoProvider, cfg relay.Config) *node {
+	t.Helper()
 
 	priv, pub, err := p.GenerateEphemeral()
 	if err != nil {
@@ -29,7 +35,8 @@ func startNode(t *testing.T, p jcrypto.CryptoProvider, deliver relay.Deliver) *n
 	}
 	t.Cleanup(priv.Release)
 
-	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, Deliver: deliver})
+	cfg.Provider, cfg.StaticPriv = p, priv
+	r, err := relay.New(cfg)
 	if err != nil {
 		t.Fatalf("relay.New: %v", err)
 	}
@@ -287,5 +294,128 @@ func TestClientSeesDeadCircuit(t *testing.T) {
 				t.Fatal("the client never noticed that its circuit died")
 			}
 		})
+	}
+}
+
+// a next hop that accepts and then stays silent must not keep Close, and with it
+// the zeroing of every key, waiting for a handshake that never comes
+func TestCloseWithSilentNextHop(t *testing.T) {
+	p := c25519.New()
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer silent.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if conn, err := silent.Accept(); err == nil {
+			accepted <- conn
+		}
+	}()
+
+	_, silentPub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	entry := startNode(t, p, nil)
+	cl, err := client.Dial(client.Config{Provider: p, Chain: []client.Node{
+		{Addr: entry.addr, StaticPub: entry.pub},
+		{Addr: silent.Addr().String(), StaticPub: silentPub},
+	}})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+
+	select {
+	case conn := <-accepted:
+		defer conn.Close()
+	case <-time.After(3 * time.Second):
+		t.Fatal("entry never dialled the next hop")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		entry.r.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close is stuck behind a silent next hop")
+	}
+}
+
+// a repeated setup must neither replace the circuit nor open a second link
+// onwards: the replaced circuit's keys would never be released
+func TestDuplicateSetupIsRefused(t *testing.T) {
+	p := c25519.New()
+	delivered := make(chan []byte, 4)
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+		delivered <- append([]byte(nil), payload...)
+		return nil
+	})
+
+	var dials atomic.Int32
+	entry := startRelay(t, p, relay.Config{Dial: func(network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		return net.Dial(network, addr)
+	}})
+
+	links := []uint64{31, 42}
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{
+		{StaticPub: entry.pub, Link: links[0], NextAddr: exit.addr, NextCircuit: links[1]},
+		{StaticPub: exit.pub, Link: links[1]},
+	})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, links)
+	if err != nil {
+		t.Fatalf("NewCircuit: %v", err)
+	}
+	defer circuit.Close()
+
+	raw, err := net.Dial("tcp", entry.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn, err := link.Dial(raw, p, entry.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	defer conn.Close()
+
+	for i := 0; i < 2; i++ {
+		if err := conn.WriteCell(setup.Cell); err != nil {
+			t.Fatalf("write setup: %v", err)
+		}
+	}
+	cell, err := circuit.Seal(wire.KindPayload, 0, []byte("still here"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := conn.WriteCell(cell); err != nil {
+		t.Fatalf("write cell: %v", err)
+	}
+
+	select {
+	case got := <-delivered:
+		if string(got) != "still here" {
+			t.Fatalf("delivered %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the first circuit stopped working")
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("entry dialled the next hop %d times", n)
+	}
+	if _, _, _, dropped := entry.r.Stats().Snapshot(); dropped == 0 {
+		t.Fatal("the repeated setup was not counted as dropped")
 	}
 }

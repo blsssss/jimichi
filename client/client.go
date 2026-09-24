@@ -256,9 +256,12 @@ func (c *Client) send(kind wire.Kind, payload []byte) error {
 		return err
 	}
 
+	// the link has its own write lock; holding c.mu across a write to a stalled
+	// entry would keep Close from closing the connection that unblocks it
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
 		return errors.New("client: closed")
 	}
 	return c.conn.WriteCell(cell)
