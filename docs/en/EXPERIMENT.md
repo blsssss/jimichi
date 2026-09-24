@@ -7,8 +7,7 @@ latency in a three-hop chain with constant-size cells, and where does that resis
 working**. Everything else serves that answer.
 
 Every run is reproducible: the configuration, the generator seed, the code version and the time
-go into the report. Results live in artifacts/ and the figures are produced from those files by
-a script.
+go into the report. Results live in artifacts/ and the figures are produced from those files.
 
 ## Adversary models
 
@@ -154,6 +153,8 @@ hold. It is reported as a measured boundary, not passed over.
 ## Statistics
 
 - At least 30 repetitions per point, warm-up discarded.
+- Series run on an idle host: concurrent load disturbs timing and lowers the AUC of individual
+  runs. Tables report the median.
 - Median and a 95 percent confidence interval, BCa bootstrap, 10000 resamples.
 - Comparisons: Mann-Whitney U at 0.05, always with an effect size (Cliff's delta). A significant
   but negligible difference is reported as such.

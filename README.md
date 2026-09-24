@@ -1,6 +1,14 @@
-# jimichi
+<p align="center">
+  <img src="docs/img/logo.svg" width="96" alt="jimichi">
+</p>
 
-English | [Русский](README.ru.md)
+<h1 align="center">jimichi</h1>
+
+<p align="center">
+  Confidential messaging that hides who talks to whom, and the measurements that prove it.
+  <br>
+  English | <a href="README.ru.md">Русский</a>
+</p>
 
 A confidential messaging system that protects metadata, and the measurements that show what
 that protection is worth.
@@ -27,6 +35,37 @@ away. The repository therefore contains both the system and the attack against i
 - **Cost.** Latency per hop, throughput, CPU, padding overhead, GOST versus X25519.
 
 Threat modelling follows the FSTEC methodology of 2021-02-05; scenarios are named in plain words.
+
+## Results
+
+The first question is whether cover traffic hides who talks to whom. A passive observer sees only
+when cells cross the entry link and the last link before the exit, and scores every pair of flows
+by correlating cell counts in 100 ms windows.
+
+<p align="center"><img src="docs/img/tradeoff.png" width="900" alt="attack AUC and latency against bandwidth"></p>
+
+| Traffic | Bandwidth | Attack AUC | Top-1 linking | Median latency |
+|---|---|---|---|---|
+| no cover | x1.01 | 1.000 | 100% | 0.14 ms |
+| cover added on top, x1.5 | x1.51 | 1.000 | 100% | 0.14 ms |
+| cover added on top, x2 | x2.02 | 1.000 | 100% | 0.14 ms |
+| cover added on top, x3 | x3.05 | 1.000 | 100% | 0.14 ms |
+| constant rate, 5 cells/s | x1.03 | 0.500 | 10% | 1215 ms |
+| constant rate, 10 cells/s | x2.05 | 0.500 | 10% | 81 ms |
+| constant rate, 20 cells/s | x4.08 | 0.500 | 10% | 32 ms |
+
+Ten flows, three relays, 30 s per run, three runs per row, medians shown.
+
+- Cover traffic added on top of real messages does not help at all: even at three times the
+  bandwidth the observer links every flow, because bursts of real conversation still stand out.
+- A constant sending rate, where a message takes the slot of a cover cell instead of being added to
+  it, drops the attack to chance: 10% top-1 with ten flows is guessing.
+- The price is latency, and it is bought back with bandwidth: 20 cells per second keep the median
+  delivery at 32 ms.
+
+Runs are sensitive to host load: individual runs taken while the machine was busy scored lower,
+which widens the intervals of the unprotected rows. Series are therefore run on an idle host and
+reported as medians.
 
 ## Cryptography
 

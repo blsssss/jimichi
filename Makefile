@@ -1,7 +1,7 @@
 CLUSTER ?= jimichi
 NAMESPACE ?= jimichi
 
-.PHONY: test lint images kind-up kind-load deploy up redeploy down logs stats
+.PHONY: test lint images kind-up kind-load deploy up redeploy start stop down logs stats sweep
 
 test:
 	go vet ./...
@@ -16,6 +16,7 @@ images:
 
 kind-up:
 	kind create cluster --config deploy/kind/cluster.yaml
+	docker update --restart=no $(CLUSTER)-control-plane $(CLUSTER)-worker $(CLUSTER)-worker2
 
 kind-load: images
 	kind load docker-image jimichi/relay:dev --name $(CLUSTER)
@@ -33,8 +34,19 @@ up: kind-up kind-load deploy
 redeploy:
 	bash scripts/redeploy.sh
 
+start:
+	docker start $(CLUSTER)-control-plane $(CLUSTER)-worker $(CLUSTER)-worker2
+	kubectl wait --for=condition=Ready nodes --all --timeout=180s
+	kubectl -n $(NAMESPACE) rollout status deployment/client-a --timeout=180s
+
+stop:
+	docker stop $(CLUSTER)-worker2 $(CLUSTER)-worker $(CLUSTER)-control-plane
+
 down:
 	kind delete cluster --name $(CLUSTER)
+
+sweep:
+	bash scripts/sweep.sh -flows 10 -duration 30s -repeats 3
 
 logs:
 	kubectl logs -n $(NAMESPACE) -l app=relay --prefix --tail=20
