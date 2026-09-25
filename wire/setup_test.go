@@ -104,6 +104,9 @@ func TestOpenSetupReleasesEverythingButTheCellKey(t *testing.T) {
 	}
 	defer layer.CellKey.Release()
 
+	if layer.CellKey.Bytes() == nil {
+		t.Fatal("OpenSetup handed back a released cell key")
+	}
 	if n := tp.live(layer.CellKey); n != 0 {
 		t.Fatalf("%d key buffers still held after OpenSetup, want 0", n)
 	}
@@ -123,6 +126,21 @@ func TestBuildSetupReleasesKeysOnError(t *testing.T) {
 	}
 }
 
+// hops before the failing one already hold keys, and those must go too
+func TestBuildSetupReleasesEarlierHopsWhenOneFails(t *testing.T) {
+	tp := &trackingProvider{CryptoProvider: provider()}
+	_, pubs := staticKeys(t, provider(), hops)
+	chain := chainTo(pubs)
+	chain[hops-1].StaticPub = chain[hops-1].StaticPub[:5]
+
+	if _, err := wire.BuildSetup(tp, chain); err == nil {
+		t.Fatal("BuildSetup accepted a malformed public key")
+	}
+	if n := tp.live(); n != 0 {
+		t.Fatalf("%d key buffers still held after a failed BuildSetup, want 0", n)
+	}
+}
+
 func TestBuildSetupKeepsOnlyCellKeys(t *testing.T) {
 	tp := &trackingProvider{CryptoProvider: provider()}
 	_, pubs := staticKeys(t, provider(), hops)
@@ -131,8 +149,11 @@ func TestBuildSetupKeepsOnlyCellKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildSetup: %v", err)
 	}
-	for _, k := range setup.CellKeys {
+	for i, k := range setup.CellKeys {
 		defer k.Release()
+		if k.Bytes() == nil {
+			t.Fatalf("cell key %d released before it was handed back", i)
+		}
 	}
 	if n := tp.live(setup.CellKeys...); n != 0 {
 		t.Fatalf("%d key buffers still held besides the cell keys, want 0", n)
