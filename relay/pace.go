@@ -27,6 +27,8 @@ type pacer struct {
 	done   chan struct{}
 	once   sync.Once
 	stats  *Stats
+	// built once, so an empty tick costs exactly what a full one does
+	padding *wire.Cell
 }
 
 func newPacer(out *link.Conn, period time.Duration, size int, stats *Stats) *pacer {
@@ -40,6 +42,8 @@ func newPacer(out *link.Conn, period time.Duration, size int, stats *Stats) *pac
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
 		stats:  stats,
+
+		padding: wire.NewPadding(),
 	}
 	go p.run()
 	return p
@@ -97,7 +101,7 @@ func (p *pacer) send() error {
 		}
 		return nil
 	default:
-		if err := p.out.WritePadding(); err != nil {
+		if err := p.out.WriteCell(p.padding); err != nil {
 			return err
 		}
 		p.stats.add(&p.stats.Padding)

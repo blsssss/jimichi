@@ -107,8 +107,13 @@ clock.
 - There is no shuffling across circuits: every circuit runs over its own TCP connections, so
   there is nothing to mix on a link.
 
-The price: on each of the three nodes a cell waits half a period on average in each direction, and
-the links between nodes carry a constant stream per circuit even while the client is silent.
+Entry and middle send on their own clock in both directions, the exit only backwards: it has
+nothing to send forwards. The price: at each such step a cell waits half a period on average, about
+two and a half periods per round trip, and the links between nodes and from the entry to the
+client carry a constant stream per circuit even while the client is silent.
+
+The measure hides timing from an observer on a link. A neighbouring node removes the link
+encryption and tells padding from a real cell by its kind, so it does not help against a node.
 
 ## Return path
 
@@ -157,7 +162,7 @@ Circuit teardown:
 | Source | Data |
 |---|---|
 | client | send and receive timestamps per cell, losses, flow identifier |
-| relay | aggregated counters on stdout: accepted, forwarded, dropped. No flow identifiers |
+| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding. No flow identifiers. The counters are not published on the network: polled often, they would show which ticks carried a real cell |
 | network | traffic captures at the entry and the exit for the correlation attack |
 | memory | dumps of the relay process in the key extraction scenario |
 

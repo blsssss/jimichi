@@ -49,9 +49,9 @@ indistinguishability, not on the secrecy of the implementation.
 
 | Metric | Definition |
 |---|---|
-| Bandwidth multiplier | cells sent over cells carrying payload |
+| Bandwidth multiplier | frames on a link within the observation window over messages handed to the clients. Reported separately for the client-entry link and for the observed link between nodes, in each direction. A frame on the window boundary is excluded, the setup cell is included |
 | Goodput | payload bytes per second per client |
-| Latency | median, 95th and 99th percentile of delivery |
+| Latency | median, 95th and 99th percentile. The testbed currently measures the round trip: from handing a message to the client to the exit's echo coming back |
 | Cost per cell | nanoseconds of CPU and allocations to strip a layer |
 | Cost per session | nanoseconds to agree a key, per suite |
 

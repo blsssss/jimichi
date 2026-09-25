@@ -252,14 +252,12 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		if err != nil {
 			return err
 		}
+		r.stats.add(&r.stats.Delivered)
 		if hdr.Kind == wire.KindPayload && r.cfg.Deliver != nil {
 			if reply := r.cfg.Deliver(c.inbound, payload); reply != nil {
-				if err := r.reply(c, reply); err != nil {
-					return err
-				}
+				return r.reply(c, reply)
 			}
 		}
-		r.stats.add(&r.stats.Delivered)
 		return nil
 	}
 
@@ -409,17 +407,14 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	r.circuits[hdr.Circuit] = c
 	r.mu.Unlock()
 
-	if r.cfg.Period > 0 {
-		c.bwd = newPacer(from, r.cfg.Period, r.cfg.QueueCells, &r.stats)
-	}
 	if c.isExit {
+		c.bwd = r.newPacer(from)
 		return nil
 	}
 	if err := r.extend(c, layer, index); err != nil {
 		r.mu.Lock()
 		delete(r.circuits, hdr.Circuit)
 		r.mu.Unlock()
-		c.bwd.close()
 		hop.Close()
 		return err
 	}
@@ -462,11 +457,19 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 
 	c.next = conn
 	c.nextRaw = raw
-	if r.cfg.Period > 0 {
-		c.fwd = newPacer(conn, r.cfg.Period, r.cfg.QueueCells, &r.stats)
-	}
+	// both pacers start only once the circuit is complete here, so a failed
+	// extend has no writer on the inbound link left to stop
+	c.fwd = r.newPacer(conn)
+	c.bwd = r.newPacer(c.in)
 	go r.backward(c)
 	return nil
+}
+
+func (r *Relay) newPacer(out *link.Conn) *pacer {
+	if r.cfg.Period <= 0 {
+		return nil
+	}
+	return newPacer(out, r.cfg.Period, r.cfg.QueueCells, &r.stats)
 }
 
 func (r *Relay) dial(addr string) (net.Conn, error) {

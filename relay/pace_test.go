@@ -181,3 +181,33 @@ func TestCloseDoesNotWaitForTheTick(t *testing.T) {
 		t.Fatal("close blocked")
 	}
 }
+
+// what the wire shows must not depend on how much the previous hop sent: a
+// queue overflowing still yields exactly one frame per tick
+func TestOverfullQueueKeepsOneFramePerTick(t *testing.T) {
+	period := 20 * time.Millisecond
+	frame, _ := link.FrameSize(c25519.New())
+	p, raw, stats := pacedPipe(t, period, 4)
+
+	body := make([]byte, wire.BodySize)
+	accepted := 0
+	for i := 0; i < 30; i++ {
+		cell, _ := wire.NewCell(wire.Header{Kind: wire.KindPayload, Counter: uint64(i)}, body)
+		if p.push(cell, true) {
+			accepted++
+		}
+	}
+	// the first tick may already have taken one cell off the queue
+	if accepted < 4 || accepted > 5 {
+		t.Fatalf("queue of 4 took %d cells", accepted)
+	}
+
+	times := frameTimes(t, raw, frame, 16, 5*time.Second)
+	if span := times[len(times)-1].Sub(times[0]); span < 10*period {
+		t.Fatalf("16 frames left within %v, want about %v", span, 15*period)
+	}
+	s := stats.Snapshot()
+	if s.Forwarded != uint64(accepted) || s.Padding < 10 {
+		t.Fatalf("forwarded %d, padding %d; want %d forwarded and the rest padding", s.Forwarded, s.Padding, accepted)
+	}
+}

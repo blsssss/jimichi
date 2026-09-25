@@ -26,7 +26,7 @@ spec:
         - name: relay
           image: jimichi/relay:dev
           imagePullPolicy: IfNotPresent
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "200ms"]
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms"]
           ports:
             - {name: cells, containerPort: 9000}
             - {name: info, containerPort: 9100}
@@ -76,7 +76,7 @@ spec:
         - name: relay
           image: jimichi/relay:dev
           imagePullPolicy: IfNotPresent
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "200ms"]
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms"]
           ports:
             - {name: cells, containerPort: 9000}
             - {name: info, containerPort: 9100}
@@ -126,7 +126,7 @@ spec:
         - name: relay
           image: jimichi/relay:dev
           imagePullPolicy: IfNotPresent
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "200ms"]
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms"]
           ports:
             - {name: cells, containerPort: 9000}
             - {name: info, containerPort: 9100}

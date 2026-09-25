@@ -3,11 +3,9 @@
 package wire
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 )
 
 const (
@@ -106,14 +104,13 @@ func (c *Cell) Header() (Header, error) {
 
 func (c *Cell) Body() []byte { return c[headerSize:] }
 
-// the body is random so a padding frame carries nothing a relay could tell apart
-// from a real cell, even inside the link encryption
-func NewPadding() (*Cell, error) {
-	body := make([]byte, BodySize)
-	if _, err := io.ReadFull(rand.Reader, body); err != nil {
-		return nil, err
-	}
-	return NewCell(Header{Kind: KindPadding}, body)
+// the body stays zero: the link encryption alone makes the frame look like any
+// other on the wire, and the neighbour reads the kind and drops it anyway
+func NewPadding() *Cell {
+	var c Cell
+	c[0] = Version
+	c[1] = byte(KindPadding)
+	return &c
 }
 
 func (c *Cell) IsPadding() bool { return c[0] == Version && Kind(c[1]) == KindPadding }

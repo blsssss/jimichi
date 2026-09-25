@@ -167,10 +167,10 @@ func TestPaddingIsDroppedByTheReceiver(t *testing.T) {
 	frame, _ := link.FrameSize(p)
 
 	go func() {
-		_ = client.WritePadding()
+		_ = client.WriteCell(wire.NewPadding())
 		_ = client.WriteCell(sample(7))
-		_ = client.WritePadding()
-		_ = client.WritePadding()
+		_ = client.WriteCell(wire.NewPadding())
+		_ = client.WriteCell(wire.NewPadding())
 		_ = client.WriteCell(sample(8))
 	}()
 	for _, want := range []uint64{7, 8} {

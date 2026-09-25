@@ -217,14 +217,6 @@ func (c *Conn) WriteCell(cell *wire.Cell) error {
 	return err
 }
 
-func (c *Conn) WritePadding() error {
-	cell, err := wire.NewPadding()
-	if err != nil {
-		return err
-	}
-	return c.WriteCell(cell)
-}
-
 // padding is a property of this link only, so it never reaches the caller
 func (c *Conn) ReadCell(cell *wire.Cell) error {
 	for {

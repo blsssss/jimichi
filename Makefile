@@ -57,4 +57,4 @@ logs:
 	kubectl logs -n $(NAMESPACE) -l app=relay --prefix --tail=20
 
 stats:
-	kubectl exec -n $(NAMESPACE) deployment/client-a -- wget -qO- http://relay-1:9100/stats
+	bash scripts/stats.sh

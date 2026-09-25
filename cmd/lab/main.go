@@ -21,19 +21,21 @@ type result struct {
 	Cells      int     `json:"cells"`
 	Messages   int     `json:"messages"`
 	Multiplier float64 `json:"bandwidth_multiplier"`
-	// the same ratio on the observed link between relays, where pacing adds its
-	// padding
-	RelayCells      int     `json:"relay_link_cells"`
-	RelayMultiplier float64 `json:"relay_link_multiplier"`
-	AUC             float64 `json:"auc"`
-	AUCLow          float64 `json:"auc_ci_low"`
-	AUCHigh         float64 `json:"auc_ci_high"`
-	CIMethod        string  `json:"auc_ci_method"`
-	TPR             float64 `json:"tpr_at_fpr_0.01"`
-	TopOne          float64 `json:"top1_accuracy"`
-	DropRate        float64 `json:"drop_rate"`
-	P50             string  `json:"latency_p50"`
-	P95             string  `json:"latency_p95"`
+	// the same ratio in the other direction of the entry link and in both
+	// directions of the observed link between relays, where pacing adds padding
+	EntryBackMultiplier float64 `json:"entry_back_multiplier"`
+	RelayMultiplier     float64 `json:"relay_link_multiplier"`
+	RelayBackMultiplier float64 `json:"relay_link_back_multiplier"`
+	AUC                 float64 `json:"auc"`
+	AUCLow              float64 `json:"auc_ci_low"`
+	AUCHigh             float64 `json:"auc_ci_high"`
+	CIMethod            string  `json:"auc_ci_method"`
+	TPR                 float64 `json:"tpr_at_fpr_0.01"`
+	TopOne              float64 `json:"top1_accuracy"`
+	DropRate            float64 `json:"drop_rate"`
+	RelayDropRate       float64 `json:"relay_drop_rate"`
+	P50                 string  `json:"latency_p50"`
+	P95                 string  `json:"latency_p95"`
 }
 
 type variant struct {
@@ -58,10 +60,12 @@ func variantSet(name string) []variant {
 		out := []variant{{"none", lab.Config{}}}
 		for _, ms := range []int{70, 35} {
 			d := time.Duration(ms) * time.Millisecond
+			// nodes tick 5% faster than the client, so a missed tick is caught up
+			node := d * 95 / 100
 			out = append(out,
 				variant{fmt.Sprintf("fixed-%dms", ms), lab.Config{Mode: client.ConstantRate, Rate: d}},
-				variant{fmt.Sprintf("relay-%dms", ms), lab.Config{RelayPeriod: d}},
-				variant{fmt.Sprintf("both-%dms", ms), lab.Config{Mode: client.ConstantRate, Rate: d, RelayPeriod: d}},
+				variant{fmt.Sprintf("relay-%dms", ms), lab.Config{RelayPeriod: node}},
+				variant{fmt.Sprintf("both-%dms", ms), lab.Config{Mode: client.ConstantRate, Rate: d, RelayPeriod: node}},
 			)
 		}
 		return out
@@ -170,20 +174,17 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		matrix[sc.Entry][sc.Exit] = sc.Value
 	}
 
-	// only cells inside the observation window count, the drain after the
-	// deadline is not something the observer was scored on
-	cells := cellsWithin(run.Entry, run.Config.Duration)
-	relayCells := cellsWithin(run.Exit, run.Config.Duration)
-	multiplier, relayMultiplier := 0.0, 0.0
-	if run.Sent > 0 {
-		multiplier = float64(cells) / float64(run.Sent)
-		relayMultiplier = float64(relayCells) / float64(run.Sent)
+	window := run.Config.Duration
+	cost := func(traces []*lab.Trace) float64 {
+		return metrics.Multiplier(metrics.CellsWithin(events(traces), window), run.Sent)
 	}
+	cells := metrics.CellsWithin(events(run.Entry), window)
 
 	p50, p95 := percentiles(run.Latency)
-	drops := 0.0
+	drops, relayDrops := 0.0, 0.0
 	if total := run.Sent; total > 0 {
 		drops = float64(run.Dropped) / float64(total)
+		relayDrops = float64(run.RelayDropped) / float64(total)
 	}
 
 	res := result{
@@ -192,33 +193,31 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		Hops:       run.Config.Hops,
 		Cells:      cells,
 		Messages:   run.Sent,
-		Multiplier: multiplier,
+		Multiplier: metrics.Multiplier(cells, run.Sent),
 
-		RelayCells:      relayCells,
-		RelayMultiplier: relayMultiplier,
-		AUC:             ci.Point,
-		AUCLow:          ci.Low,
-		AUCHigh:         ci.High,
-		CIMethod:        ci.Method + "-10000",
-		TPR:             metrics.TPRAtFPR(scores, 0.01),
-		TopOne:          metrics.TopOneAccuracy(scores, len(entry)),
-		DropRate:        drops,
-		P50:             p50.Round(time.Microsecond).String(),
-		P95:             p95.Round(time.Microsecond).String(),
+		EntryBackMultiplier: cost(run.EntryBack),
+		RelayMultiplier:     cost(run.Exit),
+		RelayBackMultiplier: cost(run.ExitBack),
+		AUC:                 ci.Point,
+		AUCLow:              ci.Low,
+		AUCHigh:             ci.High,
+		CIMethod:            ci.Method + "-10000",
+		TPR:                 metrics.TPRAtFPR(scores, 0.01),
+		TopOne:              metrics.TopOneAccuracy(scores, len(entry)),
+		DropRate:            drops,
+		RelayDropRate:       relayDrops,
+		P50:                 p50.Round(time.Microsecond).String(),
+		P95:                 p95.Round(time.Microsecond).String(),
 	}
 	return res, detail{Traffic: traffic, Bin: bin.String(), Entry: entry, Exit: exit, Scores: matrix}
 }
 
-func cellsWithin(traces []*lab.Trace, window time.Duration) int {
-	n := 0
-	for _, t := range traces {
-		for _, e := range t.Events() {
-			if e < window {
-				n++
-			}
-		}
+func events(traces []*lab.Trace) [][]time.Duration {
+	out := make([][]time.Duration, len(traces))
+	for i, t := range traces {
+		out[i] = t.Events()
 	}
-	return n
+	return out
 }
 
 func percentiles(samples []time.Duration) (p50, p95 time.Duration) {

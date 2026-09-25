@@ -53,12 +53,18 @@ func (c Config) withDefaults() Config {
 // entry and exit traces of the same flow share an index, which is the ground
 // truth the attack is scored against and which the attack itself never sees
 type Run struct {
-	Config  Config
-	Entry   []*Trace
-	Exit    []*Trace
-	Sent    int
-	Cells   int
-	Dropped uint64
+	Config Config
+	// Entry and Exit carry the forward direction the attack scores; the Back
+	// traces are the same links towards the client, counted for the cost
+	Entry     []*Trace
+	Exit      []*Trace
+	EntryBack []*Trace
+	ExitBack  []*Trace
+	Sent      int
+	Cells     int
+	Dropped   uint64
+	// cells the relays themselves dropped, from their aggregated counters
+	RelayDropped uint64
 	// delivery latency of every message that came back, in order
 	Latency []time.Duration
 }
@@ -85,11 +91,18 @@ func Execute(cfg Config) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	tap := func(conn net.Conn, t *Trace) net.Conn {
-		return &tappedConn{Conn: conn, trace: t, skip: handshake, frame: frame}
+	// the responder answers the handshake with its public key alone, one byte
+	// shorter than the initiator's hello
+	tap := func(conn net.Conn, out, in *Trace) net.Conn {
+		return &tappedConn{
+			Conn: conn,
+			out:  &counter{trace: out, skip: handshake, frame: frame},
+			in:   &counter{trace: in, skip: handshake - 1, frame: frame},
+		}
 	}
 
 	exitTraces := make([]*Trace, 0, cfg.Flows)
+	exitBack := make([]*Trace, 0, cfg.Flows)
 	var exitMu sync.Mutex
 	// the last link carries the cells of one circuit only, so a new connection
 	// on it marks a new flow for the observer
@@ -98,11 +111,12 @@ func Execute(cfg Config) (*Run, error) {
 		if err != nil {
 			return nil, err
 		}
-		t := NewTrace(start)
+		t, back := NewTrace(start), NewTrace(start)
 		exitMu.Lock()
 		exitTraces = append(exitTraces, t)
+		exitBack = append(exitBack, back)
 		exitMu.Unlock()
-		return tap(conn, t), nil
+		return tap(conn, t, back), nil
 	}
 
 	nodes := make([]*node, cfg.Hops)
@@ -128,6 +142,7 @@ func Execute(cfg Config) (*Run, error) {
 	}
 
 	entry := make([]*Trace, cfg.Flows)
+	entryBack := make([]*Trace, cfg.Flows)
 	clients := make([]*client.Client, cfg.Flows)
 	defer func() {
 		for _, c := range clients {
@@ -142,7 +157,7 @@ func Execute(cfg Config) (*Run, error) {
 		return len(exitTraces)
 	}
 	for i := 0; i < cfg.Flows; i++ {
-		entry[i] = NewTrace(start)
+		entry[i], entryBack[i] = NewTrace(start), NewTrace(start)
 		c, err := client.Dial(client.Config{
 			Provider:  provider,
 			Chain:     chain,
@@ -155,7 +170,7 @@ func Execute(cfg Config) (*Run, error) {
 				if err != nil {
 					return nil, err
 				}
-				return tap(conn, entry[i]), nil
+				return tap(conn, entry[i], entryBack[i]), nil
 			},
 		})
 		if err != nil {
@@ -178,12 +193,16 @@ func Execute(cfg Config) (*Run, error) {
 	// let the last cells drain before the traces are read
 	time.Sleep(300 * time.Millisecond)
 
-	run := &Run{Config: cfg, Entry: entry, Sent: sent, Latency: latency.samples()}
+	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples()}
 	for _, c := range clients {
 		run.Dropped += c.Dropped()
 	}
+	for _, n := range nodes {
+		run.RelayDropped += n.relay.Stats().Snapshot().Dropped
+	}
 	exitMu.Lock()
 	run.Exit = exitTraces
+	run.ExitBack = exitBack
 	exitMu.Unlock()
 	for _, t := range run.Entry {
 		run.Cells += t.Len()

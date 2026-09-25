@@ -120,12 +120,13 @@ kubectl apply -f deploy/base/relay.yaml
 kubectl apply -f deploy/base/client.yaml
 ```
 
-Three relays and a client appear in the `jimichi` namespace. A relay publishes its public key and
-its aggregated counters on port 9100:
+Three relays and a client appear in the `jimichi` namespace. A relay publishes its public key on
+port 9100. Its aggregated counters go to stdout once a minute and to port 9101 on loopback only,
+read through a port-forward:
 
 ```
-kubectl -n jimichi port-forward svc/relay-3 9100:9100
-curl -s localhost:9100/stats
+kubectl -n jimichi port-forward deployment/relay-3 9101:9101
+curl -s localhost:9101/stats
 ```
 
 ## Requirements

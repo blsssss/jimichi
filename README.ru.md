@@ -121,12 +121,13 @@ kubectl apply -f deploy/base/relay.yaml
 kubectl apply -f deploy/base/client.yaml
 ```
 
-В пространстве имён `jimichi` поднимаются три узла и клиент. Узел публикует свой открытый ключ и
-агрегированные счётчики на порту 9100:
+В пространстве имён `jimichi` поднимаются три узла и клиент. Узел публикует свой открытый ключ на
+порту 9100. Агрегированные счётчики раз в минуту идут в stdout и на порт 9101 только на loopback,
+читаются через port-forward:
 
 ```
-kubectl -n jimichi port-forward svc/relay-3 9100:9100
-curl -s localhost:9100/stats
+kubectl -n jimichi port-forward deployment/relay-3 9101:9101
+curl -s localhost:9101/stats
 ```
 
 ## Требования

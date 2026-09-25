@@ -146,6 +146,10 @@ func TestCoverCellsAreNotDelivered(t *testing.T) {
 	if s.Delivered < 6 {
 		t.Fatalf("exit opened %d cells, want at least 6", s.Delivered)
 	}
+	// without a period the node forwards at once and adds nothing of its own
+	if s.Padding != 0 {
+		t.Fatalf("unpaced exit sent %d padding frames", s.Padding)
+	}
 }
 
 // a replayed cell must not reach the exit twice: the test drives the wire

@@ -12,10 +12,13 @@ English | [Русский](../ru/LIMITATIONS.md)
   collector may copy it. secmem protects only its own buffers.
 - mlock prevents swapping, not reading by a process with sufficient privileges. Against root on the
   machine hosting a node, process-level measures do not work; that is the expected result.
-- Sending on a node's own clock requires the node's period to be no longer than the client's. The
-  node does not know how fast a client sends: if the client sends more often, the node's queue
-  fills up and the excess cells are lost. The testbed configures the same period for clients and
-  nodes.
+- Sending on a node's own clock requires the node's period to be shorter than the client's, with a
+  margin of a few percent. The node does not know how fast a client sends: if the client sends more
+  often, the node's queue fills up and the excess cells are lost, and with equal periods a missed
+  tick can never be caught up. The testbed gives nodes a period 5% shorter than the client's.
+- The circuit setup cell leaves at once, not on the node's clock. Together with the TCP connection
+  opening it marks the start of the circuit on every link, which is the same signal as the moment
+  the connection opens.
 - The cell format uses constant size and replay protection but is not full Sphinx: beyond the
   constant size there is no processing that hides the position of a node in the chain.
 - Each circuit opens its own TCP connections between nodes and closes them in a cascade when it
