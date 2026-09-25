@@ -9,6 +9,10 @@ working**. Everything else serves that answer.
 Every run is reproducible: the configuration, the generator seed, the code version and the time
 go into the report. Results live in artifacts/ and the figures are produced from those files.
 
+Real clients start at unrelated moments, so on the testbed each client's schedule gets a random
+phase drawn from the run's seed. Clients started back to back would tick almost in phase and hand
+the attack ties that a real network does not produce.
+
 ## Adversary models
 
 The codes are used in every results table.
@@ -49,9 +53,9 @@ indistinguishability, not on the secrecy of the implementation.
 
 | Metric | Definition |
 |---|---|
-| Bandwidth multiplier | frames on a link within the observation window over messages handed to the clients. Reported separately for the client-entry link and for the observed link between nodes, in each direction. A frame on the window boundary is excluded, the setup cell is included |
+| Bandwidth multiplier | frames on a link within the observation window over messages handed to the clients. Reported separately for the client-entry link and for the observed link between nodes, in each direction. The window opens when the flows start sending: circuit setup and anything sent before it are excluded. A frame on the window boundary is excluded |
 | Goodput | payload bytes per second per client |
-| Latency | median, 95th and 99th percentile. The testbed currently measures the round trip: from handing a message to the client to the exit's echo coming back |
+| Latency | median, 95th and 99th percentile. The testbed measures the round trip: from handing a message to the client to the exit's echo coming back, matched to its message by sequence number, not by order |
 | Cost per cell | nanoseconds of CPU and allocations to strip a layer |
 | Cost per session | nanoseconds to agree a key, per suite |
 

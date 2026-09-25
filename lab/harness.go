@@ -65,6 +65,9 @@ type Run struct {
 	Dropped   uint64
 	// cells the relays themselves dropped, from their aggregated counters
 	RelayDropped uint64
+	// where the observation window starts on the trace clock: flows begin to
+	// send only once every circuit is up, so setup falls before it
+	Origin time.Duration
 	// delivery latency of every message that came back, in order
 	Latency []time.Duration
 }
@@ -91,13 +94,15 @@ func Execute(cfg Config) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	// the responder answers the handshake with its public key alone, one byte
-	// shorter than the initiator's hello
+	answer, err := link.ResponderHandshakeSize(provider)
+	if err != nil {
+		return nil, err
+	}
 	tap := func(conn net.Conn, out, in *Trace) net.Conn {
 		return &tappedConn{
 			Conn: conn,
 			out:  &counter{trace: out, skip: handshake, frame: frame},
-			in:   &counter{trace: in, skip: handshake - 1, frame: frame},
+			in:   &counter{trace: in, skip: answer, frame: frame},
 		}
 	}
 
@@ -156,7 +161,15 @@ func Execute(cfg Config) (*Run, error) {
 		defer exitMu.Unlock()
 		return len(exitTraces)
 	}
+	// real clients start at unrelated moments, so each schedule gets a random
+	// phase; dialling back to back instead would put every client in phase and
+	// hand the attack ties that no real network produces
+	phases := rand.New(rand.NewSource(cfg.Seed))
+	schedule := max(cfg.Rate, cfg.CoverEvery)
 	for i := 0; i < cfg.Flows; i++ {
+		if schedule > 0 {
+			time.Sleep(time.Duration(phases.Int63n(int64(schedule))))
+		}
 		entry[i], entryBack[i] = NewTrace(start), NewTrace(start)
 		c, err := client.Dial(client.Config{
 			Provider:  provider,
@@ -188,12 +201,13 @@ func Execute(cfg Config) (*Run, error) {
 	}
 
 	latency := newLatency(clients)
+	origin := time.Since(start)
 	sent := runFlows(cfg, clients, latency)
 
 	// let the last cells drain before the traces are read
 	time.Sleep(300 * time.Millisecond)
 
-	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples()}
+	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin}
 	for _, c := range clients {
 		run.Dropped += c.Dropped()
 	}
@@ -221,23 +235,33 @@ func waitFor(cond func() bool, limit time.Duration) error {
 	return nil
 }
 
-// pairs a reply with the message that caused it: one flow per client, and the
-// exit answers in order
+// pairs a reply with the message that caused it by the sequence number the
+// exit echoes back, so a lost message cannot shift every later pairing
 type latencyCollector struct {
 	mu   sync.Mutex
-	sent [][]time.Time
+	sent []map[uint64]time.Time
 	out  []time.Duration
 }
 
+const (
+	flowField = 2
+	seqField  = 8
+)
+
 func newLatency(clients []*client.Client) *latencyCollector {
-	l := &latencyCollector{sent: make([][]time.Time, len(clients))}
+	l := &latencyCollector{sent: make([]map[uint64]time.Time, len(clients))}
 	for i, c := range clients {
+		l.sent[i] = make(map[uint64]time.Time)
 		go func(flow int, c *client.Client) {
-			for range c.Replies() {
+			for reply := range c.Replies() {
+				if len(reply) < flowField+seqField {
+					continue
+				}
+				seq := binary.BigEndian.Uint64(reply[flowField : flowField+seqField])
 				l.mu.Lock()
-				if len(l.sent[flow]) > 0 {
-					l.out = append(l.out, time.Since(l.sent[flow][0]))
-					l.sent[flow] = l.sent[flow][1:]
+				if at, ok := l.sent[flow][seq]; ok {
+					l.out = append(l.out, time.Since(at))
+					delete(l.sent[flow], seq)
 				}
 				l.mu.Unlock()
 			}
@@ -246,9 +270,9 @@ func newLatency(clients []*client.Client) *latencyCollector {
 	return l
 }
 
-func (l *latencyCollector) mark(flow int) {
+func (l *latencyCollector) mark(flow int, seq uint64) {
 	l.mu.Lock()
-	l.sent[flow] = append(l.sent[flow], time.Now())
+	l.sent[flow][seq] = time.Now()
 	l.mu.Unlock()
 }
 
@@ -271,9 +295,14 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector) i
 		go func(flow int, c *client.Client) {
 			defer wg.Done()
 			rng := rand.New(rand.NewSource(cfg.Seed + int64(flow)))
-			payload := make([]byte, cfg.Payload)
-			binary.BigEndian.PutUint16(payload[:2], uint16(flow))
+			payload := make([]byte, max(cfg.Payload, flowField+seqField))
+			binary.BigEndian.PutUint16(payload[:flowField], uint16(flow))
 			local := 0
+			defer func() {
+				mu.Lock()
+				sent += local
+				mu.Unlock()
+			}()
 			for time.Now().Before(deadline) {
 				// exponential gaps: a real conversation is bursty, and a
 				// regular pattern would make the attack unrealistically easy
@@ -282,15 +311,14 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector) i
 				if time.Now().After(deadline) {
 					break
 				}
-				latency.mark(flow)
+				seq := uint64(local)
+				binary.BigEndian.PutUint64(payload[flowField:flowField+seqField], seq)
+				latency.mark(flow, seq)
 				if err := c.Send(payload); err != nil {
 					return
 				}
 				local++
 			}
-			mu.Lock()
-			sent += local
-			mu.Unlock()
 		}(i, c)
 	}
 	wg.Wait()

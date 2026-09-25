@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/blsssss/jimichi/client"
@@ -14,10 +15,24 @@ import (
 	"github.com/blsssss/jimichi/lab/metrics"
 )
 
+// one row per run and observation window; the configuration travels with the
+// numbers so any row can be reproduced from the report alone
 type result struct {
-	Traffic    string  `json:"traffic"`
-	Flows      int     `json:"flows"`
-	Hops       int     `json:"hops"`
+	Traffic     string `json:"traffic"`
+	Bin         string `json:"bin"`
+	Repeat      int    `json:"repeat"`
+	Seed        int64  `json:"seed"`
+	Mode        string `json:"mode"`
+	Rate        string `json:"rate"`
+	CoverEvery  string `json:"cover_every"`
+	RelayPeriod string `json:"relay_period"`
+	Send        string `json:"send_mean_gap"`
+	Duration    string `json:"duration"`
+	Flows       int    `json:"flows"`
+	Hops        int    `json:"hops"`
+	Rev         string `json:"rev"`
+	GOOS        string `json:"goos"`
+
 	Cells      int     `json:"cells"`
 	Messages   int     `json:"messages"`
 	Multiplier float64 `json:"bandwidth_multiplier"`
@@ -26,16 +41,20 @@ type result struct {
 	EntryBackMultiplier float64 `json:"entry_back_multiplier"`
 	RelayMultiplier     float64 `json:"relay_link_multiplier"`
 	RelayBackMultiplier float64 `json:"relay_link_back_multiplier"`
-	AUC                 float64 `json:"auc"`
-	AUCLow              float64 `json:"auc_ci_low"`
-	AUCHigh             float64 `json:"auc_ci_high"`
-	CIMethod            string  `json:"auc_ci_method"`
-	TPR                 float64 `json:"tpr_at_fpr_0.01"`
-	TopOne              float64 `json:"top1_accuracy"`
-	DropRate            float64 `json:"drop_rate"`
-	RelayDropRate       float64 `json:"relay_drop_rate"`
-	P50                 string  `json:"latency_p50"`
-	P95                 string  `json:"latency_p95"`
+
+	AUC      float64 `json:"auc"`
+	AUCLow   float64 `json:"auc_ci_low"`
+	AUCHigh  float64 `json:"auc_ci_high"`
+	CIMethod string  `json:"auc_ci_method"`
+	TPR      float64 `json:"tpr_at_fpr_0.01"`
+	TopOne   float64 `json:"top1_accuracy"`
+
+	DropRate          float64 `json:"drop_rate"`
+	RelayDroppedCells uint64  `json:"relay_dropped_cells"`
+	LatencySamples    int     `json:"latency_samples"`
+	P50               string  `json:"latency_p50,omitempty"`
+	P95               string  `json:"latency_p95,omitempty"`
+	P99               string  `json:"latency_p99,omitempty"`
 }
 
 type variant struct {
@@ -96,20 +115,25 @@ func main() {
 	hops := flag.Int("hops", 3, "relays in the chain")
 	duration := flag.Duration("duration", 20*time.Second, "length of one run")
 	send := flag.Duration("send", 200*time.Millisecond, "mean gap between messages of one flow")
-	bin := flag.Duration("bin", 100*time.Millisecond, "observation window for the attack")
+	binList := flag.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
 	repeats := flag.Int("repeats", 1, "runs per configuration")
 	out := flag.String("out", "artifacts", "directory for the json report")
 	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks")
+	rev := flag.String("rev", "unknown", "code revision recorded in every row")
 	flag.Parse()
+
+	bins, err := parseBins(*binList)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bins: %v\n", err)
+		os.Exit(2)
+	}
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	details := make([]detail, 0)
-
 	variants := variantSet(*set)
-
-	results := make([]result, 0, len(variants)*(*repeats))
-	fmt.Printf("%-11s %6s %11s %8s %24s %7s %6s %7s %9s %9s\n",
-		"traffic", "cells", "multiplier", "relay-x", "auc [95% ci]", "tpr@1%", "top1", "drops", "p50", "p95")
+	results := make([]result, 0, len(variants)*(*repeats)*len(bins))
+	fmt.Printf("%-11s %6s %6s %11s %8s %24s %7s %6s %7s %9s %9s\n",
+		"traffic", "bin", "cells", "multiplier", "relay-x", "auc [95% ci]", "tpr@1%", "top1", "drops", "p50", "p95")
 
 	for _, v := range variants {
 		for r := 0; r < *repeats; r++ {
@@ -125,15 +149,22 @@ func main() {
 				fmt.Fprintf(os.Stderr, "run failed: %v\n", err)
 				os.Exit(1)
 			}
-			res, d := analyse(run, v.label, *bin)
-			results = append(results, res)
-			if r == 0 {
-				details = append(details, d)
+			if run.Sent == 0 {
+				fmt.Fprintf(os.Stderr, "%s: no message was sent, nothing to score\n", v.label)
+				os.Exit(1)
 			}
-			fmt.Printf("%-11s %6d %11.2f %8.2f     %.3f [%.3f, %.3f] %7.3f %6.3f %7.3f %9s %9s\n",
-				res.Traffic, res.Cells, res.Multiplier, res.RelayMultiplier,
-				res.AUC, res.AUCLow, res.AUCHigh, res.TPR, res.TopOne,
-				res.DropRate, res.P50, res.P95)
+			for _, bin := range bins {
+				res, d := analyse(run, v.label, bin)
+				res.Repeat, res.Rev, res.GOOS = r, *rev, runtime.GOOS
+				results = append(results, res)
+				if r == 0 {
+					details = append(details, d)
+				}
+				fmt.Printf("%-11s %6s %6d %11.2f %8.2f     %.3f [%.3f, %.3f] %7.3f %6.3f %7.3f %9s %9s\n",
+					res.Traffic, res.Bin, res.Cells, res.Multiplier, res.RelayMultiplier,
+					res.AUC, res.AUCLow, res.AUCHigh, res.TPR, res.TopOne,
+					res.DropRate, res.P50, res.P95)
+			}
 		}
 	}
 
@@ -147,14 +178,34 @@ func main() {
 	}
 }
 
-func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
-	entry := make([][]float64, len(run.Entry))
-	for i, t := range run.Entry {
-		entry[i] = metrics.Bin(t.Events(), run.Config.Duration, bin)
+func parseBins(list string) ([]time.Duration, error) {
+	var bins []time.Duration
+	for _, f := range strings.Split(list, ",") {
+		d, err := time.ParseDuration(strings.TrimSpace(f))
+		if err != nil {
+			return nil, err
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("window %v must be positive", d)
+		}
+		bins = append(bins, d)
 	}
-	exit := make([][]float64, len(run.Exit))
-	for i, t := range run.Exit {
-		exit[i] = metrics.Bin(t.Events(), run.Config.Duration, bin)
+	return bins, nil
+}
+
+func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
+	cfg := run.Config
+	window := cfg.Duration
+	entryEvents := sinceOrigin(run.Entry, run.Origin)
+	exitEvents := sinceOrigin(run.Exit, run.Origin)
+
+	entry := make([][]float64, len(entryEvents))
+	for i, e := range entryEvents {
+		entry[i] = metrics.Bin(e, window, bin)
+	}
+	exit := make([][]float64, len(exitEvents))
+	for i, e := range exitEvents {
+		exit[i] = metrics.Bin(e, window, bin)
 	}
 
 	// the observer never sees the pairing; it only scores the attack
@@ -174,70 +225,75 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		matrix[sc.Entry][sc.Exit] = sc.Value
 	}
 
-	window := run.Config.Duration
+	cells := metrics.CellsWithin(entryEvents, window)
 	cost := func(traces []*lab.Trace) float64 {
-		return metrics.Multiplier(metrics.CellsWithin(events(traces), window), run.Sent)
-	}
-	cells := metrics.CellsWithin(events(run.Entry), window)
-
-	p50, p95 := percentiles(run.Latency)
-	drops, relayDrops := 0.0, 0.0
-	if total := run.Sent; total > 0 {
-		drops = float64(run.Dropped) / float64(total)
-		relayDrops = float64(run.RelayDropped) / float64(total)
+		return metrics.Multiplier(metrics.CellsWithin(sinceOrigin(traces, run.Origin), window), run.Sent)
 	}
 
 	res := result{
-		Traffic:    traffic,
-		Flows:      run.Config.Flows,
-		Hops:       run.Config.Hops,
-		Cells:      cells,
-		Messages:   run.Sent,
-		Multiplier: metrics.Multiplier(cells, run.Sent),
+		Traffic:     traffic,
+		Bin:         bin.String(),
+		Seed:        cfg.Seed,
+		Mode:        modeName(cfg.Mode),
+		Rate:        cfg.Rate.String(),
+		CoverEvery:  cfg.CoverEvery.String(),
+		RelayPeriod: cfg.RelayPeriod.String(),
+		Send:        cfg.SendEvery.String(),
+		Duration:    cfg.Duration.String(),
+		Flows:       cfg.Flows,
+		Hops:        cfg.Hops,
 
+		Cells:               cells,
+		Messages:            run.Sent,
+		Multiplier:          metrics.Multiplier(cells, run.Sent),
 		EntryBackMultiplier: cost(run.EntryBack),
 		RelayMultiplier:     cost(run.Exit),
 		RelayBackMultiplier: cost(run.ExitBack),
-		AUC:                 ci.Point,
-		AUCLow:              ci.Low,
-		AUCHigh:             ci.High,
-		CIMethod:            ci.Method + "-10000",
-		TPR:                 metrics.TPRAtFPR(scores, 0.01),
-		TopOne:              metrics.TopOneAccuracy(scores, len(entry)),
-		DropRate:            drops,
-		RelayDropRate:       relayDrops,
-		P50:                 p50.Round(time.Microsecond).String(),
-		P95:                 p95.Round(time.Microsecond).String(),
+
+		AUC:      ci.Point,
+		AUCLow:   ci.Low,
+		AUCHigh:  ci.High,
+		CIMethod: ci.Method + "-10000",
+		TPR:      metrics.TPRAtFPR(scores, 0.01),
+		TopOne:   metrics.TopOneAccuracy(scores, len(entry)),
+
+		DropRate:          float64(run.Dropped) / float64(run.Sent),
+		RelayDroppedCells: run.RelayDropped,
+		LatencySamples:    len(run.Latency),
+		P50:               percentile(run.Latency, 0.5),
+		P95:               percentile(run.Latency, 0.95),
+		P99:               percentile(run.Latency, 0.99),
 	}
 	return res, detail{Traffic: traffic, Bin: bin.String(), Entry: entry, Exit: exit, Scores: matrix}
 }
 
-func events(traces []*lab.Trace) [][]time.Duration {
+// the window opens when the flows start sending: circuit setup and the cover
+// sent while the other circuits were still being built fall before it
+func sinceOrigin(traces []*lab.Trace, origin time.Duration) [][]time.Duration {
 	out := make([][]time.Duration, len(traces))
 	for i, t := range traces {
-		out[i] = t.Events()
+		for _, e := range t.Events() {
+			if e >= origin {
+				out[i] = append(out[i], e-origin)
+			}
+		}
 	}
 	return out
 }
 
-func percentiles(samples []time.Duration) (p50, p95 time.Duration) {
-	if len(samples) == 0 {
-		return 0, 0
+func percentile(samples []time.Duration, q float64) string {
+	v, ok := metrics.Percentile(samples, q)
+	if !ok {
+		return ""
 	}
-	sorted := make([]time.Duration, len(samples))
-	copy(sorted, samples)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	// linear interpolation between order statistics, the usual type 7 estimator
-	idx := func(q float64) time.Duration {
-		pos := q * float64(len(sorted)-1)
-		lo := int(pos)
-		if lo+1 >= len(sorted) {
-			return sorted[lo]
-		}
-		frac := pos - float64(lo)
-		return sorted[lo] + time.Duration(frac*float64(sorted[lo+1]-sorted[lo]))
+	return v.Round(time.Microsecond).String()
+}
+
+func modeName(m client.Mode) string {
+	if m == client.ConstantRate {
+		return "constant-rate"
 	}
-	return idx(0.5), idx(0.95)
+	return "immediate"
 }
 
 func write(dir, base string, v any) error {

@@ -55,6 +55,11 @@ func InitiatorHandshakeSize(p jcrypto.CryptoProvider) (int, error) {
 	return n + 1, err
 }
 
+// the responder answers with its public key alone, without the mode byte
+func ResponderHandshakeSize(p jcrypto.CryptoProvider) (int, error) {
+	return pubSize(p)
+}
+
 // FrameSize is what one cell costs on the wire once the link layer wraps it
 func FrameSize(p jcrypto.CryptoProvider) (int, error) {
 	probe, err := secmem.New(p.KeySize())

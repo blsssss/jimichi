@@ -55,3 +55,17 @@ func TestPacedRunFillsBothDirections(t *testing.T) {
 		t.Fatalf("relays dropped %d cells on an idle run", run.RelayDropped)
 	}
 }
+
+// skip 3, frame 4, reads of 2, 3, 4, 1 and 6 bytes: the first read and one
+// byte of the second are handshake, then 2, 6, 3 and 9 bytes pending, which
+// completes a frame on the third read and two more on the fifth
+func TestCounterSkipsHandshakeAndCountsFrames(t *testing.T) {
+	tr := NewTrace(time.Now())
+	c := &counter{trace: tr, skip: 3, frame: 4}
+	for _, n := range []int{2, 3, 4, 1, 6} {
+		c.count(n)
+	}
+	if got := tr.Len(); got != 3 || c.pending != 1 {
+		t.Fatalf("%d frames with %d bytes pending, want 3 and 1", got, c.pending)
+	}
+}
