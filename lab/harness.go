@@ -129,6 +129,18 @@ func Execute(cfg Config) (*Run, error) {
 
 	entry := make([]*Trace, cfg.Flows)
 	clients := make([]*client.Client, cfg.Flows)
+	defer func() {
+		for _, c := range clients {
+			if c != nil {
+				_ = c.Close()
+			}
+		}
+	}()
+	exitSeen := func() int {
+		exitMu.Lock()
+		defer exitMu.Unlock()
+		return len(exitTraces)
+	}
 	for i := 0; i < cfg.Flows; i++ {
 		entry[i] = NewTrace(start)
 		c, err := client.Dial(client.Config{
@@ -150,14 +162,15 @@ func Execute(cfg Config) (*Run, error) {
 			return nil, fmt.Errorf("flow %d: %w", i, err)
 		}
 		clients[i] = c
-	}
-	defer func() {
-		for _, c := range clients {
-			if c != nil {
-				_ = c.Close()
+		// exit traces are labelled by the order their links open; letting the
+		// next flow dial before this one's link exists would let two setups race
+		// and score the attack against a wrong pairing
+		if cfg.Hops >= 2 {
+			if err := waitFor(func() bool { return exitSeen() == i+1 }, 5*time.Second); err != nil {
+				return nil, fmt.Errorf("flow %d: exit link: %w", i, err)
 			}
 		}
-	}()
+	}
 
 	latency := newLatency(clients)
 	sent := runFlows(cfg, clients, latency)
@@ -176,6 +189,17 @@ func Execute(cfg Config) (*Run, error) {
 		run.Cells += t.Len()
 	}
 	return run, nil
+}
+
+func waitFor(cond func() bool, limit time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for !cond() {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %v", limit)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return nil
 }
 
 // pairs a reply with the message that caused it: one flow per client, and the
