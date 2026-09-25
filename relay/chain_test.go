@@ -480,3 +480,95 @@ func TestPacedChainDeliversAndReplies(t *testing.T) {
 		t.Fatalf("exit opened %d cells, want 4", s.Delivered)
 	}
 }
+
+// a node sends nothing back on a link until the circuit is complete on its
+// side: a pacer started before extend would write to a peer that may never
+// read, and the failed setup would have to wait for it
+func TestPacedNodeIsSilentWhileExtending(t *testing.T) {
+	p := c25519.New()
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer silent.Close()
+	go func() {
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+		}
+	}()
+	_, silentPub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := startRelay(t, p, relay.Config{Period: 5 * time.Millisecond})
+
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{
+		{StaticPub: entry.pub, Link: 71, NextAddr: silent.Addr().String(), NextCircuit: 72},
+		{StaticPub: silentPub, Link: 72},
+	})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+
+	raw, err := net.Dial("tcp", entry.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer raw.Close()
+	conn, err := link.Dial(raw, p, entry.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if err := conn.WriteCell(setup.Cell); err != nil {
+		t.Fatalf("write setup: %v", err)
+	}
+
+	// 60 periods while the next hop never answers its handshake
+	_ = raw.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 1)
+	if n, err := raw.Read(buf); n > 0 || err == nil {
+		t.Fatal("the node wrote to the previous hop before its circuit was complete")
+	}
+}
+
+// the exit opened the cell whether or not its reply found room in the queue
+func TestExitCountsDeliveryWhenReplyIsDropped(t *testing.T) {
+	p := c25519.New()
+	exit := startRelay(t, p, relay.Config{
+		Period:     time.Hour,
+		QueueCells: 1,
+		Deliver:    func(_ uint64, payload []byte) []byte { return payload },
+	})
+	middle := startNode(t, p, nil)
+	entry := startNode(t, p, nil)
+
+	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+	for i := 0; i < 5; i++ {
+		if err := cl.Send([]byte("ping")); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for exit.r.Stats().Snapshot().Delivered < 5 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	s := exit.r.Stats().Snapshot()
+	// the first reply may already be on its way or waiting in the one slot
+	if s.Delivered != 5 || s.Dropped < 3 {
+		t.Fatalf("delivered %d, dropped %d; want 5 delivered and at least 3 replies dropped", s.Delivered, s.Dropped)
+	}
+}

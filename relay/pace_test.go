@@ -2,6 +2,7 @@ package relay
 
 import (
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -134,6 +135,7 @@ func TestBurstLeavesOnePerTick(t *testing.T) {
 	if span < 20*period {
 		t.Fatalf("31 frames left within %v, want about %v", span, 30*period)
 	}
+	checkGaps(t, times, period)
 	if s := stats.Snapshot(); s.Forwarded != 30 {
 		t.Fatalf("forwarded %d cells, want 30", s.Forwarded)
 	}
@@ -144,12 +146,12 @@ func TestIdleLinkCarriesPadding(t *testing.T) {
 	frame, _ := link.FrameSize(c25519.New())
 	p, raw, stats := pacedPipe(t, period, 4)
 
-	frameTimes(t, raw, frame, 5, 5*time.Second)
+	checkGaps(t, frameTimes(t, raw, frame, 11, 5*time.Second), period)
 	_ = raw.Close()
 	p.close()
 	s := stats.Snapshot()
-	if s.Padding < 5 || s.Forwarded != 0 {
-		t.Fatalf("padding %d, forwarded %d; want at least 5 padding frames and nothing forwarded", s.Padding, s.Forwarded)
+	if s.Padding < 11 || s.Forwarded != 0 {
+		t.Fatalf("padding %d, forwarded %d; want at least 11 padding frames and nothing forwarded", s.Padding, s.Forwarded)
 	}
 }
 
@@ -209,5 +211,28 @@ func TestOverfullQueueKeepsOneFramePerTick(t *testing.T) {
 	s := stats.Snapshot()
 	if s.Forwarded != uint64(accepted) || s.Padding < 10 {
 		t.Fatalf("forwarded %d, padding %d; want %d forwarded and the rest padding", s.Forwarded, s.Padding, accepted)
+	}
+}
+
+// a scheduler hiccup may stretch one gap and shorten the next, so the check
+// is on the median and on most gaps rather than on every one
+func checkGaps(t *testing.T, times []time.Time, period time.Duration) {
+	t.Helper()
+	gaps := make([]time.Duration, 0, len(times)-1)
+	within := 0
+	for i := 1; i < len(times); i++ {
+		g := times[i].Sub(times[i-1])
+		gaps = append(gaps, g)
+		if g >= period/2 && g <= period*3/2 {
+			within++
+		}
+	}
+	slices.Sort(gaps)
+	median := gaps[len(gaps)/2]
+	if median < period*8/10 || median > period*12/10 {
+		t.Fatalf("median gap %v, want within 20%% of %v", median, period)
+	}
+	if within*10 < len(gaps)*9 {
+		t.Fatalf("%d of %d gaps within half a period of %v", within, len(gaps), period)
 	}
 }

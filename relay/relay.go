@@ -43,6 +43,9 @@ type Relay struct {
 
 	mu       sync.Mutex
 	circuits map[uint64]*circuit
+	// every circuit arrives on a connection of its own; a second one on the same
+	// link would add a pacer whose frame rate counts the circuits sharing it
+	owners   map[*link.Conn]uint64
 	conns    map[net.Conn]struct{}
 	closed   bool
 	handlers sync.WaitGroup
@@ -103,12 +106,16 @@ func New(cfg Config) (*Relay, error) {
 	if cfg.StaticPriv == nil {
 		return nil, errors.New("relay: no static key")
 	}
+	if cfg.QueueCells > maxQueueCells {
+		return nil, fmt.Errorf("relay: queue of %d cells exceeds %d", cfg.QueueCells, maxQueueCells)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Relay{
 		cfg:      cfg,
 		ctx:      ctx,
 		cancel:   cancel,
 		circuits: make(map[uint64]*circuit),
+		owners:   make(map[*link.Conn]uint64),
 		conns:    make(map[net.Conn]struct{}),
 	}, nil
 }
@@ -119,6 +126,7 @@ const handshakeTimeout = 5 * time.Second
 
 var (
 	errDuplicate = errors.New("relay: circuit id already in use")
+	errLinkTaken = errors.New("relay: link already carries a circuit")
 	errQueueFull = errors.New("relay: send queue full")
 )
 
@@ -302,15 +310,14 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 // next relay do the same, so a break anywhere reaches both ends of the chain
 func (r *Relay) teardown(from *link.Conn) {
 	r.mu.Lock()
-	var dead []*circuit
-	for id, c := range r.circuits {
-		if c.in == from {
-			dead = append(dead, c)
-			delete(r.circuits, id)
-		}
+	id, ok := r.owners[from]
+	c := r.circuits[id]
+	if ok {
+		delete(r.owners, from)
+		delete(r.circuits, id)
 	}
 	r.mu.Unlock()
-	for _, c := range dead {
+	if ok && c != nil {
 		r.release(c)
 	}
 }
@@ -404,7 +411,13 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 		hop.Close()
 		return errDuplicate
 	}
+	if _, taken := r.owners[from]; taken {
+		r.mu.Unlock()
+		hop.Close()
+		return errLinkTaken
+	}
 	r.circuits[hdr.Circuit] = c
+	r.owners[from] = hdr.Circuit
 	r.mu.Unlock()
 
 	if c.isExit {
@@ -414,6 +427,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	if err := r.extend(c, layer, index); err != nil {
 		r.mu.Lock()
 		delete(r.circuits, hdr.Circuit)
+		delete(r.owners, from)
 		r.mu.Unlock()
 		hop.Close()
 		return err

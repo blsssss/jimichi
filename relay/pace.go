@@ -9,7 +9,11 @@ import (
 	"github.com/blsssss/jimichi/wire"
 )
 
-const defaultQueueCells = 64
+const (
+	defaultQueueCells = 64
+	// the channel is allocated up front for every circuit and direction
+	maxQueueCells = 4096
+)
 
 type queued struct {
 	cell *wire.Cell
@@ -116,4 +120,14 @@ func (p *pacer) close() {
 	}
 	p.once.Do(func() { close(p.stop) })
 	<-p.done
+	// cells still waiting when the circuit goes away never left, so they are
+	// counted with the other losses
+	for {
+		select {
+		case <-p.queue:
+			p.stats.add(&p.stats.Dropped)
+		default:
+			return
+		}
+	}
 }
