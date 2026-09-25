@@ -76,8 +76,17 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 	cellKeys := make([]*secmem.Buffer, len(chain))
 	setupKeys := make([]*secmem.Buffer, len(chain))
 	ephPubs := make([][]byte, len(chain))
+	built := false
 	release := func() {
 		for _, k := range setupKeys {
+			if k != nil {
+				k.Release()
+			}
+		}
+		if built {
+			return
+		}
+		for _, k := range cellKeys {
 			if k != nil {
 				k.Release()
 			}
@@ -155,6 +164,7 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 	if err != nil {
 		return nil, err
 	}
+	built = true
 	return &SetupResult{Cell: cell, CellKeys: cellKeys}, nil
 }
 
@@ -177,10 +187,11 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 	}
 	index := int(hdr.Counter)
 
-	_, pub, err := p.GenerateEphemeral()
+	probePriv, pub, err := p.GenerateEphemeral()
 	if err != nil {
 		return nil, err
 	}
+	probePriv.Release()
 	pubLen := len(pub)
 
 	probe, err := secmem.New(p.KeySize())
