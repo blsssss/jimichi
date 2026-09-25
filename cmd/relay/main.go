@@ -22,6 +22,8 @@ func main() {
 	info := flag.String("info", ":9100", "address for the public key and counters")
 	harden := flag.Bool("harden", true, "lock key memory and disable core dumps")
 	echo := flag.Bool("echo", true, "as an exit, send the payload back along the circuit")
+	period := flag.Duration("period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
+	queue := flag.Int("queue", 64, "cells a circuit may queue per direction when -period is set")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
@@ -54,6 +56,8 @@ func main() {
 			}
 			return nil
 		},
+		Period:     *period,
+		QueueCells: *queue,
 	})
 	if err != nil {
 		logger.Fatalf("relay: %v", err)
@@ -68,7 +72,7 @@ func main() {
 
 	go serveInfo(*info, staticPub, r, logger)
 
-	logger.Printf("relay listening on %s, info on %s, locked=%v", *listen, *info, staticPriv.Locked())
+	logger.Printf("relay listening on %s, info on %s, locked=%v, period=%v", *listen, *info, staticPriv.Locked(), *period)
 	go func() {
 		if err := r.Serve(ln); err != nil {
 			logger.Printf("serve: %v", err)
@@ -90,12 +94,13 @@ func serveInfo(addr string, pub []byte, r *relay.Relay, logger *log.Logger) {
 		writeJSON(w, map[string]string{"pub": base64.StdEncoding.EncodeToString(pub)})
 	})
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
-		accepted, forwarded, delivered, dropped := r.Stats().Snapshot()
+		s := r.Stats().Snapshot()
 		writeJSON(w, map[string]uint64{
-			"accepted":  accepted,
-			"forwarded": forwarded,
-			"delivered": delivered,
-			"dropped":   dropped,
+			"accepted":  s.Accepted,
+			"forwarded": s.Forwarded,
+			"delivered": s.Delivered,
+			"dropped":   s.Dropped,
+			"padding":   s.Padding,
 		})
 	})
 

@@ -84,7 +84,7 @@ autocorrelation). The adversary trains on one sample and is evaluated on another
 |---|---|
 | Cover traffic | none, 0.5 of payload, 1.0, 2.0 |
 | Cell size | constant, variable with message length |
-| Node delay | none, uniform, exponential, batching by k cells |
+| Node delay | none, sending on the node's own clock, uniform, exponential, batching by k cells |
 | Concurrent flows | 2, 5, 10, 20 |
 | Primitive suite | GOST, X25519 |
 

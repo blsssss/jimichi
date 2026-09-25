@@ -29,6 +29,10 @@ type Config struct {
 	// lets the testbed observe the link to the next hop the way a passive
 	// network adversary would; nil means a plain dial
 	Dial func(network, addr string) (net.Conn, error)
+	// Period sends one frame per tick on each circuit and direction, padding
+	// when there is nothing queued; zero forwards every cell at once
+	Period     time.Duration
+	QueueCells int
 }
 
 type Relay struct {
@@ -49,11 +53,16 @@ type Relay struct {
 // aggregated only: per-circuit counters in a log would be exactly the metadata
 // the system is built to withhold
 type Stats struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	Counters
+}
+
+type Counters struct {
 	Accepted  uint64
 	Forwarded uint64
 	Delivered uint64
 	Dropped   uint64
+	Padding   uint64
 }
 
 func (s *Stats) add(field *uint64) {
@@ -62,10 +71,10 @@ func (s *Stats) add(field *uint64) {
 	s.mu.Unlock()
 }
 
-func (s *Stats) Snapshot() (accepted, forwarded, delivered, dropped uint64) {
+func (s *Stats) Snapshot() Counters {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.Accepted, s.Forwarded, s.Delivered, s.Dropped
+	return s.Counters
 }
 
 type circuit struct {
@@ -83,6 +92,8 @@ type circuit struct {
 	hopIndex int
 	replies  uint64
 	done     chan struct{}
+	fwd      *pacer
+	bwd      *pacer
 }
 
 func New(cfg Config) (*Relay, error) {
@@ -106,7 +117,10 @@ func New(cfg Config) (*Relay, error) {
 // can keep Close from reaching the keys
 const handshakeTimeout = 5 * time.Second
 
-var errDuplicate = errors.New("relay: circuit id already in use")
+var (
+	errDuplicate = errors.New("relay: circuit id already in use")
+	errQueueFull = errors.New("relay: send queue full")
+)
 
 func (r *Relay) Stats() *Stats { return &r.stats }
 
@@ -254,6 +268,12 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		return err
 	}
 	out.SetCircuit(c.nextID)
+	if c.fwd != nil {
+		if !c.fwd.push(out, true) {
+			return errQueueFull
+		}
+		return nil
+	}
 	if err := c.write(out); err != nil {
 		return fmt.Errorf("%w: %v", errFatal, err)
 	}
@@ -270,6 +290,12 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 	cell, err := c.hop.SealReply(c.inbound, counter, payload)
 	if err != nil {
 		return err
+	}
+	if c.bwd != nil {
+		if !c.bwd.push(cell, false) {
+			return errQueueFull
+		}
+		return nil
 	}
 	return c.writeBack(cell)
 }
@@ -294,9 +320,11 @@ func (r *Relay) teardown(from *link.Conn) {
 func (r *Relay) release(c *circuit) {
 	if c.next != nil {
 		_ = c.next.Close()
+		c.fwd.close()
 		<-c.done
 		r.drop(c.nextRaw)
 	}
+	c.bwd.close()
 	c.hop.Close()
 }
 
@@ -325,6 +353,12 @@ func (r *Relay) backward(c *circuit) {
 		out, err := c.hop.Wrap(&cell, c.inbound)
 		if err != nil {
 			r.stats.add(&r.stats.Dropped)
+			continue
+		}
+		if c.bwd != nil {
+			if !c.bwd.push(out, true) {
+				r.stats.add(&r.stats.Dropped)
+			}
 			continue
 		}
 		if err := c.writeBack(out); err != nil {
@@ -375,6 +409,9 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	r.circuits[hdr.Circuit] = c
 	r.mu.Unlock()
 
+	if r.cfg.Period > 0 {
+		c.bwd = newPacer(from, r.cfg.Period, r.cfg.QueueCells, &r.stats)
+	}
 	if c.isExit {
 		return nil
 	}
@@ -382,6 +419,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 		r.mu.Lock()
 		delete(r.circuits, hdr.Circuit)
 		r.mu.Unlock()
+		c.bwd.close()
 		hop.Close()
 		return err
 	}
@@ -424,6 +462,9 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 
 	c.next = conn
 	c.nextRaw = raw
+	if r.cfg.Period > 0 {
+		c.fwd = newPacer(conn, r.cfg.Period, r.cfg.QueueCells, &r.stats)
+	}
 	go r.backward(c)
 	return nil
 }

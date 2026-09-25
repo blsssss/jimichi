@@ -25,8 +25,10 @@ type Config struct {
 	Mode       client.Mode
 	Rate       time.Duration
 	Jitter     time.Duration
-	Payload    int
-	Seed       int64
+	// every relay sends on its own clock with this period; zero forwards at once
+	RelayPeriod time.Duration
+	Payload     int
+	Seed        int64
 }
 
 func (c Config) withDefaults() Config {
@@ -106,7 +108,7 @@ func Execute(cfg Config) (*Run, error) {
 	nodes := make([]*node, cfg.Hops)
 	for i := cfg.Hops - 1; i >= 0; i-- {
 		observed := i == cfg.Hops-2
-		n, err := startNode(provider, observed, lastHopDial)
+		n, err := startNode(provider, cfg.RelayPeriod, observed, lastHopDial)
 		if err != nil {
 			return nil, err
 		}
@@ -252,7 +254,7 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector) i
 	return sent
 }
 
-func startNode(provider jcrypto.CryptoProvider, observed bool, dial func(string, string) (net.Conn, error)) (*node, error) {
+func startNode(provider jcrypto.CryptoProvider, period time.Duration, observed bool, dial func(string, string) (net.Conn, error)) (*node, error) {
 	priv, pub, err := provider.GenerateEphemeral()
 	if err != nil {
 		return nil, err
@@ -262,6 +264,7 @@ func startNode(provider jcrypto.CryptoProvider, observed bool, dial func(string,
 		StaticPriv: priv,
 		// the exit echoes, which is what lets a run measure delivery latency
 		Deliver: func(_ uint64, payload []byte) []byte { return payload },
+		Period:  period,
 	}
 	if observed {
 		cfg.Dial = dial

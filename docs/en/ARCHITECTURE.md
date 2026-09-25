@@ -42,7 +42,7 @@ Every cell is 512 bytes, payload and cover cells alike.
 | Field | Size | Purpose |
 |---|---|---|
 | version | 1 | format version |
-| kind | 1 | payload, cover, control |
+| kind | 1 | payload, cover, control, link padding |
 | circuit | 8 | circuit identifier, different on every link |
 | counter | 8 | cell number, the source of the nonce and of replay protection |
 | body | 494 | layers: three 16-byte tags, the length prefix and the payload |
@@ -77,6 +77,9 @@ observer at the entry and at the exit would link a flow by matching numbers, wit
   only frames of one size: no identifiers, no counters.
 - The link layer takes its primitives from the same CryptoProvider, so it works on the GOST suite
   as well.
+- A link padding cell lives on one link only: the sender of the frame makes it and the receiving
+  end of the link drops it before it reaches a circuit. From the outside it looks like any other
+  frame.
 
 ## Sending modes
 
@@ -87,6 +90,25 @@ observer at the entry and at the exit would link a flow by matching numbers, wit
 
 The second mode is the countermeasure against flow linking. Its price is queueing: a message waits
 for its slot, so latency grows at a low schedule rate and shrinks at a high one.
+
+A constant rate at the client is not enough: a node that forwards a cell at once carries the phase
+of the client's schedule onto the next link, and it reaches the exit. So a node can send on its own
+clock.
+
+- Node parameter: the send period. Zero means forwarding at once, as without the measure.
+- Each circuit and each direction gets its own queue and timer on the node. Every tick sends one
+  cell from the queue, or a link padding cell when the queue is empty.
+- The first tick falls at a random moment within the period. Otherwise the timer would start with
+  the circuit setup, which crosses the chain almost at once, and the client's phase would match
+  the node's again.
+- The queue is bounded, so neither the node's memory nor the latency grows without limit when a
+  client sends faster than the node's period. A cell that arrives at a full queue is dropped and
+  counted as dropped. The loss is not visible on the wire: frames leave on every tick either way.
+- There is no shuffling across circuits: every circuit runs over its own TCP connections, so
+  there is nothing to mix on a link.
+
+The price: on each of the three nodes a cell waits half a period on average in each direction, and
+the links between nodes carry a constant stream per circuit even while the client is silent.
 
 ## Return path
 

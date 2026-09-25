@@ -21,15 +21,19 @@ type result struct {
 	Cells      int     `json:"cells"`
 	Messages   int     `json:"messages"`
 	Multiplier float64 `json:"bandwidth_multiplier"`
-	AUC        float64 `json:"auc"`
-	AUCLow     float64 `json:"auc_ci_low"`
-	AUCHigh    float64 `json:"auc_ci_high"`
-	CIMethod   string  `json:"auc_ci_method"`
-	TPR        float64 `json:"tpr_at_fpr_0.01"`
-	TopOne     float64 `json:"top1_accuracy"`
-	DropRate   float64 `json:"drop_rate"`
-	P50        string  `json:"latency_p50"`
-	P95        string  `json:"latency_p95"`
+	// the same ratio on the observed link between relays, where pacing adds its
+	// padding
+	RelayCells      int     `json:"relay_link_cells"`
+	RelayMultiplier float64 `json:"relay_link_multiplier"`
+	AUC             float64 `json:"auc"`
+	AUCLow          float64 `json:"auc_ci_low"`
+	AUCHigh         float64 `json:"auc_ci_high"`
+	CIMethod        string  `json:"auc_ci_method"`
+	TPR             float64 `json:"tpr_at_fpr_0.01"`
+	TopOne          float64 `json:"top1_accuracy"`
+	DropRate        float64 `json:"drop_rate"`
+	P50             string  `json:"latency_p50"`
+	P95             string  `json:"latency_p95"`
 }
 
 type variant struct {
@@ -48,6 +52,20 @@ type detail struct {
 }
 
 func variantSet(name string) []variant {
+	if name == "paced" {
+		// 70 and 35 ms are the client rates that leaked their phase to the exit
+		// when relays forwarded at once
+		out := []variant{{"none", lab.Config{}}}
+		for _, ms := range []int{70, 35} {
+			d := time.Duration(ms) * time.Millisecond
+			out = append(out,
+				variant{fmt.Sprintf("fixed-%dms", ms), lab.Config{Mode: client.ConstantRate, Rate: d}},
+				variant{fmt.Sprintf("relay-%dms", ms), lab.Config{RelayPeriod: d}},
+				variant{fmt.Sprintf("both-%dms", ms), lab.Config{Mode: client.ConstantRate, Rate: d, RelayPeriod: d}},
+			)
+		}
+		return out
+	}
 	if name == "rates" {
 		out := []variant{{"none", lab.Config{}}}
 		for _, ms := range []int{200, 140, 100, 70, 50, 35, 25} {
@@ -77,7 +95,7 @@ func main() {
 	bin := flag.Duration("bin", 100*time.Millisecond, "observation window for the attack")
 	repeats := flag.Int("repeats", 1, "runs per configuration")
 	out := flag.String("out", "artifacts", "directory for the json report")
-	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds")
+	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks")
 	flag.Parse()
 
 	stamp := time.Now().UTC().Format("20060102-150405")
@@ -86,8 +104,8 @@ func main() {
 	variants := variantSet(*set)
 
 	results := make([]result, 0, len(variants)*(*repeats))
-	fmt.Printf("%-9s %6s %11s %24s %7s %6s %7s %9s %9s\n",
-		"traffic", "cells", "multiplier", "auc [95% ci]", "tpr@1%", "top1", "drops", "p50", "p95")
+	fmt.Printf("%-11s %6s %11s %8s %24s %7s %6s %7s %9s %9s\n",
+		"traffic", "cells", "multiplier", "relay-x", "auc [95% ci]", "tpr@1%", "top1", "drops", "p50", "p95")
 
 	for _, v := range variants {
 		for r := 0; r < *repeats; r++ {
@@ -108,8 +126,8 @@ func main() {
 			if r == 0 {
 				details = append(details, d)
 			}
-			fmt.Printf("%-9s %6d %11.2f     %.3f [%.3f, %.3f] %7.3f %6.3f %7.3f %9s %9s\n",
-				res.Traffic, res.Cells, res.Multiplier,
+			fmt.Printf("%-11s %6d %11.2f %8.2f     %.3f [%.3f, %.3f] %7.3f %6.3f %7.3f %9s %9s\n",
+				res.Traffic, res.Cells, res.Multiplier, res.RelayMultiplier,
 				res.AUC, res.AUCLow, res.AUCHigh, res.TPR, res.TopOne,
 				res.DropRate, res.P50, res.P95)
 		}
@@ -154,17 +172,12 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 
 	// only cells inside the observation window count, the drain after the
 	// deadline is not something the observer was scored on
-	cells := 0
-	for _, t := range run.Entry {
-		for _, e := range t.Events() {
-			if e < run.Config.Duration {
-				cells++
-			}
-		}
-	}
-	multiplier := 0.0
+	cells := cellsWithin(run.Entry, run.Config.Duration)
+	relayCells := cellsWithin(run.Exit, run.Config.Duration)
+	multiplier, relayMultiplier := 0.0, 0.0
 	if run.Sent > 0 {
 		multiplier = float64(cells) / float64(run.Sent)
+		relayMultiplier = float64(relayCells) / float64(run.Sent)
 	}
 
 	p50, p95 := percentiles(run.Latency)
@@ -180,17 +193,32 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		Cells:      cells,
 		Messages:   run.Sent,
 		Multiplier: multiplier,
-		AUC:        ci.Point,
-		AUCLow:     ci.Low,
-		AUCHigh:    ci.High,
-		CIMethod:   ci.Method + "-10000",
-		TPR:        metrics.TPRAtFPR(scores, 0.01),
-		TopOne:     metrics.TopOneAccuracy(scores, len(entry)),
-		DropRate:   drops,
-		P50:        p50.Round(time.Microsecond).String(),
-		P95:        p95.Round(time.Microsecond).String(),
+
+		RelayCells:      relayCells,
+		RelayMultiplier: relayMultiplier,
+		AUC:             ci.Point,
+		AUCLow:          ci.Low,
+		AUCHigh:         ci.High,
+		CIMethod:        ci.Method + "-10000",
+		TPR:             metrics.TPRAtFPR(scores, 0.01),
+		TopOne:          metrics.TopOneAccuracy(scores, len(entry)),
+		DropRate:        drops,
+		P50:             p50.Round(time.Microsecond).String(),
+		P95:             p95.Round(time.Microsecond).String(),
 	}
 	return res, detail{Traffic: traffic, Bin: bin.String(), Entry: entry, Exit: exit, Scores: matrix}
+}
+
+func cellsWithin(traces []*lab.Trace, window time.Duration) int {
+	n := 0
+	for _, t := range traces {
+		for _, e := range t.Events() {
+			if e < window {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 func percentiles(samples []time.Duration) (p50, p95 time.Duration) {

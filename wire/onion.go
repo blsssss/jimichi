@@ -71,6 +71,9 @@ func (c *Circuit) Seal(kind Kind, counter uint64, payload []byte) (*Cell, error)
 	if len(c.hops) == 0 {
 		return nil, fmt.Errorf("wire: circuit closed")
 	}
+	if kind != KindPayload && kind != KindCover {
+		return nil, ErrKind
+	}
 	if len(payload) > c.MaxPayload() {
 		return nil, fmt.Errorf("%w: %d > %d", ErrPayloadSize, len(payload), c.MaxPayload())
 	}

@@ -12,6 +12,8 @@ English | [Русский](../ru/GLOSSARY.md)
 | UKM | the value binding an agreed secret to a session |
 | AEAD | authenticated encryption with associated data |
 | Cover traffic | cells with no payload that hide when a real message is sent |
+| Link padding | a frame a node sends to its neighbour on an empty tick of its schedule; the neighbour drops it |
+| Own-clock sending | a node sends one cell per tick of its own timer, not at the moment the cell arrives |
 | Padding | bytes added to reach the constant cell size |
 | Correlation attack | linking sender and recipient by timings and volumes |
 | Unlinkability | the property that an observer cannot link sender and recipient |

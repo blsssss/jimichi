@@ -136,15 +136,15 @@ func TestCoverCellsAreNotDelivered(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	accepted, forwarded, deliveredCount, _ := exit.r.Stats().Snapshot()
-	if accepted < 6 {
-		t.Fatalf("exit saw %d cells, want at least 6", accepted)
+	s := exit.r.Stats().Snapshot()
+	if s.Accepted < 6 {
+		t.Fatalf("exit saw %d cells, want at least 6", s.Accepted)
 	}
-	if forwarded != 0 {
-		t.Fatalf("exit forwarded %d cells", forwarded)
+	if s.Forwarded != 0 {
+		t.Fatalf("exit forwarded %d cells", s.Forwarded)
 	}
-	if deliveredCount < 6 {
-		t.Fatalf("exit opened %d cells, want at least 6", deliveredCount)
+	if s.Delivered < 6 {
+		t.Fatalf("exit opened %d cells, want at least 6", s.Delivered)
 	}
 }
 
@@ -221,7 +221,7 @@ func TestRelayRejectsReplay(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	if _, _, _, dropped := entry.r.Stats().Snapshot(); dropped == 0 {
+	if entry.r.Stats().Snapshot().Dropped == 0 {
 		t.Fatal("entry did not count the replay as dropped")
 	}
 }
@@ -415,7 +415,64 @@ func TestDuplicateSetupIsRefused(t *testing.T) {
 	if n := dials.Load(); n != 1 {
 		t.Fatalf("entry dialled the next hop %d times", n)
 	}
-	if _, _, _, dropped := entry.r.Stats().Snapshot(); dropped == 0 {
+	if entry.r.Stats().Snapshot().Dropped == 0 {
 		t.Fatal("the repeated setup was not counted as dropped")
+	}
+}
+
+// with every node on its own clock the chain still carries messages both ways,
+// and the links between nodes stay busy while the client is silent
+func TestPacedChainDeliversAndReplies(t *testing.T) {
+	p := c25519.New()
+	period := 5 * time.Millisecond
+	delivered := make(chan []byte, 4)
+
+	exit := startRelay(t, p, relay.Config{Period: period, Deliver: func(_ uint64, payload []byte) []byte {
+		delivered <- append([]byte(nil), payload...)
+		return append([]byte("echo:"), payload...)
+	}})
+	middle := startRelay(t, p, relay.Config{Period: period})
+	entry := startRelay(t, p, relay.Config{Period: period})
+
+	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+
+	for i := 0; i < 3; i++ {
+		if err := cl.SendCover(); err != nil {
+			t.Fatalf("SendCover: %v", err)
+		}
+	}
+	if err := cl.Send([]byte("ping")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case got := <-delivered:
+		if string(got) != "ping" {
+			t.Fatalf("delivered %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("message never reached the exit")
+	}
+	select {
+	case reply := <-cl.Replies():
+		if string(reply) != "echo:ping" {
+			t.Fatalf("reply %q", reply)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no reply came back")
+	}
+
+	time.Sleep(10 * period)
+	for name, n := range map[string]*node{"entry": entry, "middle": middle, "exit": exit} {
+		if s := n.r.Stats().Snapshot(); s.Padding == 0 {
+			t.Fatalf("%s sent no padding while idle: %+v", name, s)
+		}
+	}
+	if s := exit.r.Stats().Snapshot(); s.Delivered < 4 {
+		t.Fatalf("exit opened %d cells, want 4", s.Delivered)
 	}
 }
