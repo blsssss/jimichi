@@ -57,6 +57,8 @@ Decisions taken:
 - KeySize reports the AEAD key length so that wire never hardcodes 32 bytes.
 - Nonces are assigned by wire: the provider neither stores nor counts them. The cell format rules
   out a nonce repeating under one key.
+  In a 16-byte nonce the top bit is always zero, as MGM requires: the counter with the direction
+  comes first and the random circuit id last.
 - GenerateSigning issues the long-term pair for node authentication, separate from the ephemeral
   one.
 
