@@ -21,6 +21,10 @@ const (
 	LabelCell  = "jimichi/cell"
 )
 
+// no suite fits more layers into one setup cell; the bound also keeps a
+// hostile index from reaching slice arithmetic
+const MaxHops = 8
+
 var (
 	ErrAddrSize  = errors.New("wire: address too long")
 	ErrSetupSize = errors.New("wire: chain does not fit in a setup cell")
@@ -184,6 +188,9 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 	}
 	if hdr.Kind != KindControl {
 		return nil, fmt.Errorf("wire: not a setup cell")
+	}
+	if hdr.Counter >= MaxHops {
+		return nil, ErrSetupSize
 	}
 	index := int(hdr.Counter)
 

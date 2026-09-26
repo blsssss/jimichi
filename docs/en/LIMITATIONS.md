@@ -8,8 +8,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   commercial data, not to state information systems or significant critical infrastructure. The
   algorithms are the same and conformance is checked against the test vectors from the standards,
   but no protection class is claimed.
-- Go runtime: cipher libraries expand the key into a round key schedule on the heap and the garbage
-  collector may copy it. secmem protects only its own buffers.
+- Go runtime: libraries keep their own copies of keys on the heap, and the AEAD working key in
+  x/crypto stays there for the life of the circuit. secmem protects only its own buffers; CRYPTO
+  lists the copies.
 - mlock prevents swapping, not reading by a process with sufficient privileges. Against root on the
   machine hosting a node, process-level measures do not work; that is the expected result.
 - Sending on a node's own clock requires the node's period to be shorter than the client's, with a
@@ -22,9 +23,16 @@ English | [Русский](../ru/LIMITATIONS.md)
 - Every circuit runs over a connection of its own, and a second setup on a link that already
   carries a circuit is dropped. Otherwise a second timer on the same link would double its frame
   rate and give away the number of circuits.
+- Without own-clock sending the exit's reply leaves after the message is delivered, and at once for
+  a cover cell. The delivery time enters the moment of the reply; on the testbed delivery is an
+  echo taking microseconds, a real recipient would make it noticeable.
 - The circuit setup cell leaves at once, not on the node's clock. Together with the TCP connection
   opening it marks the start of the circuit on every link, which is the same signal as the moment
   the connection opens.
+- The circuit layers have no forward secrecy against a neighbour: the node key lives until the node
+  restarts and takes part in the layer agreement. A neighbour that kept the setup cells can, once
+  the key is stolen, open that node's layers for the time it ran. A wire capture cannot be read
+  without the links' ephemeral keys.
 - The cell format uses constant size and replay protection but is not full Sphinx: beyond the
   constant size there is no processing that hides the position of a node in the chain.
 - Each circuit opens its own TCP connections between nodes and closes them in a cascade when it

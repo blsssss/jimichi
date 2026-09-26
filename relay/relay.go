@@ -27,8 +27,9 @@ type Config struct {
 	Deliver    Deliver
 	Dialer     net.Dialer
 	// lets the testbed observe the link to the next hop the way a passive
-	// network adversary would; nil means a plain dial
-	Dial func(network, addr string) (net.Conn, error)
+	// network adversary would; nil means a plain dial. The context carries the
+	// deadline a plain dial gets, so a hook cannot hold Close either
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Period sends one frame per tick on each circuit and direction, padding
 	// when there is nothing queued; zero forwards every cell at once
 	Period     time.Duration
@@ -128,6 +129,7 @@ var (
 	errDuplicate = errors.New("relay: circuit id already in use")
 	errLinkTaken = errors.New("relay: link already carries a circuit")
 	errQueueFull = errors.New("relay: send queue full")
+	errReplay    = errors.New("relay: replayed counter")
 )
 
 func (r *Relay) Stats() *Stats { return &r.stats }
@@ -251,27 +253,36 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	if c == nil || c.in != from {
 		return fmt.Errorf("relay: unknown circuit")
 	}
-	if !c.replay.Accept(hdr.Counter) {
-		return fmt.Errorf("relay: replayed counter")
+	// recorded only once the layer opens, so a forged far counter cannot push
+	// genuine cells out of the window
+	if !c.replay.Check(hdr.Counter) {
+		return errReplay
 	}
 
 	if c.isExit {
-		payload, err := c.hop.OpenLast(cell, wire.Forward)
+		payload, cover, err := c.hop.OpenLast(cell, wire.Forward)
 		if err != nil {
 			return err
 		}
-		r.stats.add(&r.stats.Delivered)
-		if hdr.Kind == wire.KindPayload && r.cfg.Deliver != nil {
-			if reply := r.cfg.Deliver(c.inbound, payload); reply != nil {
-				return r.reply(c, reply)
-			}
+		if !c.replay.Commit(hdr.Counter) {
+			return errReplay
 		}
-		return nil
+		r.stats.add(&r.stats.Delivered)
+		var reply []byte
+		if !cover && r.cfg.Deliver != nil {
+			reply = r.cfg.Deliver(c.inbound, payload)
+		}
+		// one backward cell for every data cell, cover for cover: replies only to
+		// messages would show every node on the way back which cells were real
+		return r.reply(c, reply)
 	}
 
 	out, err := c.hop.Peel(cell, wire.Forward)
 	if err != nil {
 		return err
+	}
+	if !c.replay.Commit(hdr.Counter) {
+		return errReplay
 	}
 	out.SetCircuit(c.nextID)
 	if c.fwd != nil {
@@ -287,13 +298,20 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	return nil
 }
 
+// a nil payload goes back as cover
 func (r *Relay) reply(c *circuit, payload []byte) error {
 	c.writeMu.Lock()
 	counter := c.replies
 	c.replies++
 	c.writeMu.Unlock()
 
-	cell, err := c.hop.SealReply(c.inbound, counter, payload)
+	var cell *wire.Cell
+	var err error
+	if payload == nil {
+		cell, err = c.hop.SealCoverReply(c.inbound, counter)
+	} else {
+		cell, err = c.hop.SealReply(c.inbound, counter, payload)
+	}
 	if err != nil {
 		return err
 	}
@@ -376,14 +394,14 @@ func (r *Relay) backward(c *circuit) {
 func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	layer, err := wire.OpenSetup(r.cfg.Provider, r.cfg.StaticPriv, cell)
 	if err != nil {
-		return err
+		return r.setupFailed(from, err)
 	}
 	index := int(hdr.Counter)
 
 	hop, err := wire.NewHop(r.cfg.Provider, layer.CellKey, index)
 	layer.CellKey.Release()
 	if err != nil {
-		return err
+		return r.setupFailed(from, err)
 	}
 
 	c := &circuit{
@@ -409,7 +427,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	if _, taken := r.circuits[hdr.Circuit]; taken {
 		r.mu.Unlock()
 		hop.Close()
-		return errDuplicate
+		return r.setupFailed(from, errDuplicate)
 	}
 	if _, taken := r.owners[from]; taken {
 		r.mu.Unlock()
@@ -430,9 +448,21 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 		delete(r.owners, from)
 		r.mu.Unlock()
 		hop.Close()
-		return err
+		return r.setupFailed(from, err)
 	}
 	return nil
+}
+
+// a link that carries no circuit is of no use to its peer; closing it is how
+// the client learns that its setup went nowhere instead of sending into silence
+func (r *Relay) setupFailed(from *link.Conn, err error) error {
+	r.mu.Lock()
+	_, owned := r.owners[from]
+	r.mu.Unlock()
+	if owned {
+		return err
+	}
+	return fmt.Errorf("%w: %v", errFatal, err)
 }
 
 func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
@@ -487,14 +517,12 @@ func (r *Relay) newPacer(out *link.Conn) *pacer {
 }
 
 func (r *Relay) dial(addr string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, handshakeTimeout)
+	defer cancel()
 	if r.cfg.Dial != nil {
-		return r.cfg.Dial("tcp", addr)
+		return r.cfg.Dial(ctx, "tcp", addr)
 	}
-	d := r.cfg.Dialer
-	if d.Timeout == 0 {
-		d.Timeout = handshakeTimeout
-	}
-	return d.DialContext(r.ctx, "tcp", addr)
+	return r.cfg.Dialer.DialContext(ctx, "tcp", addr)
 }
 
 func (c *circuit) write(cell *wire.Cell) error {

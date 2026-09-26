@@ -2,7 +2,9 @@ package relay_test
 
 import (
 	"bytes"
+	"context"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -198,7 +200,7 @@ func TestRelayRejectsReplay(t *testing.T) {
 		t.Fatalf("write setup: %v", err)
 	}
 
-	cell, err := circuit.Seal(wire.KindPayload, 1, []byte("once"))
+	cell, err := circuit.Seal(1, []byte("once"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -361,9 +363,10 @@ func TestDuplicateSetupIsRefused(t *testing.T) {
 	})
 
 	var dials atomic.Int32
-	entry := startRelay(t, p, relay.Config{Dial: func(network, addr string) (net.Conn, error) {
+	entry := startRelay(t, p, relay.Config{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dials.Add(1)
-		return net.Dial(network, addr)
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
 	}})
 
 	links := []uint64{31, 42}
@@ -400,7 +403,7 @@ func TestDuplicateSetupIsRefused(t *testing.T) {
 			t.Fatalf("write setup: %v", err)
 		}
 	}
-	cell, err := circuit.Seal(wire.KindPayload, 0, []byte("still here"))
+	cell, err := circuit.Seal(0, []byte("still here"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -583,9 +586,10 @@ func TestSecondCircuitOnOneLinkIsRefused(t *testing.T) {
 		return nil
 	})
 	var dials atomic.Int32
-	entry := startRelay(t, p, relay.Config{Dial: func(network, addr string) (net.Conn, error) {
+	entry := startRelay(t, p, relay.Config{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dials.Add(1)
-		return net.Dial(network, addr)
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
 	}})
 
 	build := func(in, out uint64) (*wire.SetupResult, *wire.Circuit) {
@@ -625,7 +629,7 @@ func TestSecondCircuitOnOneLinkIsRefused(t *testing.T) {
 			t.Fatalf("write setup: %v", err)
 		}
 	}
-	cell, err := circuit.Seal(wire.KindPayload, 0, []byte("first only"))
+	cell, err := circuit.Seal(0, []byte("first only"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -660,5 +664,241 @@ func TestQueueSizeIsBounded(t *testing.T) {
 		if _, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, QueueCells: n}); err == nil {
 			t.Fatalf("relay.New accepted a queue of %d cells", n)
 		}
+	}
+}
+
+// a setup that cannot reach the next node must not leave the client sending
+// into a circuit that was never built
+func TestClientLearnsFailedSetup(t *testing.T) {
+	p := c25519.New()
+	gone, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := gone.Addr().String()
+	_ = gone.Close()
+	_, gonePub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry := startNode(t, p, nil)
+	cl, err := client.Dial(client.Config{Provider: p, Chain: []client.Node{
+		{Addr: entry.addr, StaticPub: entry.pub},
+		{Addr: addr, StaticPub: gonePub},
+	}})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+
+	select {
+	case _, open := <-cl.Replies():
+		if open {
+			t.Fatal("a reply came through a circuit that was never built")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client was not told that its setup failed")
+	}
+}
+
+// what the entry sees on the way back: frames on the client's link after the
+// handshake, which is every reply the exit sent
+type backCounter struct {
+	net.Conn
+	mu    sync.Mutex
+	bytes int
+}
+
+func (b *backCounter) Read(p []byte) (int, error) {
+	n, err := b.Conn.Read(p)
+	b.mu.Lock()
+	b.bytes += n
+	b.mu.Unlock()
+	return n, err
+}
+
+func (b *backCounter) total() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.bytes
+}
+
+// a flow of cover only and a flow with one real message among the same number
+// of cells must look the same on the way back: one reply per cell either way
+func TestRepliesDoNotRevealPayload(t *testing.T) {
+	p := c25519.New()
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte { return payload })
+	middle := startNode(t, p, nil)
+	entry := startNode(t, p, nil)
+	frame, _ := link.FrameSize(p)
+
+	run := func(real bool) int {
+		var seen *backCounter
+		cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit),
+			Dial: func(network, addr string) (net.Conn, error) {
+				conn, err := net.Dial(network, addr)
+				if err != nil {
+					return nil, err
+				}
+				seen = &backCounter{Conn: conn}
+				return seen, nil
+			}})
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer cl.Close()
+		for i := 0; i < 4; i++ {
+			if err := cl.SendCover(); err != nil {
+				t.Fatalf("SendCover: %v", err)
+			}
+		}
+		if real {
+			if err := cl.Send([]byte("the one real message")); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+		} else if err := cl.SendCover(); err != nil {
+			t.Fatalf("SendCover: %v", err)
+		}
+		hello, _ := link.InitiatorHandshakeSize(p)
+		want := (hello - 1) + 5*frame
+		deadline := time.Now().Add(3 * time.Second)
+		for seen.total() < want && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(50 * time.Millisecond)
+		return (seen.total() - (hello - 1)) / frame
+	}
+
+	cover, withMessage := run(false), run(true)
+	if cover != 5 || withMessage != 5 {
+		t.Fatalf("replies seen at the client: %d for cover only, %d with a message; want 5 and 5", cover, withMessage)
+	}
+}
+
+// a cell with a far counter and a body that does not open must not move the
+// window: the genuine cell after it still gets through
+func TestForgedFarCounterDoesNotBlockTheCircuit(t *testing.T) {
+	p := c25519.New()
+	delivered := make(chan []byte, 4)
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+		delivered <- append([]byte(nil), payload...)
+		return nil
+	})
+	links := []uint64{81, 82}
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{{StaticPub: exit.pub, Link: links[0]}})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, links[:1])
+	if err != nil {
+		t.Fatalf("NewCircuit: %v", err)
+	}
+	defer circuit.Close()
+
+	raw, err := net.Dial("tcp", exit.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn, err := link.Dial(raw, p, exit.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteCell(setup.Cell); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	forged, err := wire.NewCell(wire.Header{Kind: wire.KindData, Circuit: links[0], Counter: 1 << 40}, make([]byte, wire.BodySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteCell(forged); err != nil {
+		t.Fatalf("forged: %v", err)
+	}
+	genuine, err := circuit.Seal(1, []byte("still counted"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := conn.WriteCell(genuine); err != nil {
+		t.Fatalf("genuine: %v", err)
+	}
+	select {
+	case got := <-delivered:
+		if string(got) != "still counted" {
+			t.Fatalf("delivered %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a forged far counter pushed the genuine cell out of the window")
+	}
+}
+
+// the same at a relay that forwards: the middle peels before it commits, so a
+// forged far counter on its inbound link must not stall the circuit either
+func TestForgedFarCounterAtAForwardingRelay(t *testing.T) {
+	p := c25519.New()
+	delivered := make(chan []byte, 4)
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+		delivered <- append([]byte(nil), payload...)
+		return nil
+	})
+	entry := startNode(t, p, nil)
+	links := []uint64{91, 92}
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{
+		{StaticPub: entry.pub, Link: links[0], NextAddr: exit.addr, NextCircuit: links[1]},
+		{StaticPub: exit.pub, Link: links[1]},
+	})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, links)
+	if err != nil {
+		t.Fatalf("NewCircuit: %v", err)
+	}
+	defer circuit.Close()
+
+	raw, err := net.Dial("tcp", entry.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn, err := link.Dial(raw, p, entry.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteCell(setup.Cell); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	forged, err := wire.NewCell(wire.Header{Kind: wire.KindData, Circuit: links[0], Counter: 1 << 40}, make([]byte, wire.BodySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteCell(forged); err != nil {
+		t.Fatalf("forged: %v", err)
+	}
+	genuine, err := circuit.Seal(1, []byte("through the middle"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := conn.WriteCell(genuine); err != nil {
+		t.Fatalf("genuine: %v", err)
+	}
+	select {
+	case got := <-delivered:
+		if string(got) != "through the middle" {
+			t.Fatalf("delivered %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a forged far counter at the entry pushed the genuine cell out of its window")
 	}
 }

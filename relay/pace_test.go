@@ -120,7 +120,7 @@ func TestBurstLeavesOnePerTick(t *testing.T) {
 
 	body := make([]byte, wire.BodySize)
 	for i := 0; i < 30; i++ {
-		cell, err := wire.NewCell(wire.Header{Kind: wire.KindPayload, Counter: uint64(i)}, body)
+		cell, err := wire.NewCell(wire.Header{Kind: wire.KindData, Counter: uint64(i)}, body)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +159,7 @@ func TestFullQueueRefuses(t *testing.T) {
 	p, _, _ := pacedPipe(t, time.Hour, 2)
 
 	body := make([]byte, wire.BodySize)
-	cell, _ := wire.NewCell(wire.Header{Kind: wire.KindPayload}, body)
+	cell, _ := wire.NewCell(wire.Header{Kind: wire.KindData}, body)
 	if !p.push(cell, true) || !p.push(cell, true) {
 		t.Fatal("queue refused a cell below its size")
 	}
@@ -194,7 +194,7 @@ func TestOverfullQueueKeepsOneFramePerTick(t *testing.T) {
 	body := make([]byte, wire.BodySize)
 	accepted := 0
 	for i := 0; i < 30; i++ {
-		cell, _ := wire.NewCell(wire.Header{Kind: wire.KindPayload, Counter: uint64(i)}, body)
+		cell, _ := wire.NewCell(wire.Header{Kind: wire.KindData, Counter: uint64(i)}, body)
 		if p.push(cell, true) {
 			accepted++
 		}

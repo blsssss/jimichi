@@ -23,8 +23,9 @@ const (
 type Kind uint8
 
 const (
-	KindPayload Kind = 1
-	KindCover   Kind = 2 // carries nothing, exists to hide when payload flows
+	// payload and cover alike: whether a cell carries anything is sealed inside
+	// the innermost layer, where only the exit reads it
+	KindData    Kind = 1
 	KindControl Kind = 3
 	// never enters a circuit: the receiving end of a link drops it
 	KindPadding Kind = 4
@@ -32,10 +33,8 @@ const (
 
 func (k Kind) String() string {
 	switch k {
-	case KindPayload:
-		return "payload"
-	case KindCover:
-		return "cover"
+	case KindData:
+		return "data"
 	case KindControl:
 		return "control"
 	case KindPadding:
@@ -46,7 +45,7 @@ func (k Kind) String() string {
 }
 
 func (k Kind) valid() bool {
-	return k == KindPayload || k == KindCover || k == KindControl || k == KindPadding
+	return k == KindData || k == KindControl || k == KindPadding
 }
 
 var (

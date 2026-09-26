@@ -33,7 +33,8 @@ client-a -> relay-1 -> relay-2 -> relay-3 -> client-b
 3. The client wraps the message in three layers: the outer one for relay-1, the inner one for
    relay-3.
 4. Each node strips exactly its own layer and learns only the next hop.
-5. Session keys live until the circuit is torn down and are then zeroed.
+5. Session keys live until the circuit is torn down, and their buffers are then zeroed. Copies the
+   libraries keep are described in CRYPTO.
 
 ## Cell format
 
@@ -42,7 +43,7 @@ Every cell is 512 bytes, payload and cover cells alike.
 | Field | Size | Purpose |
 |---|---|---|
 | version | 1 | format version |
-| kind | 1 | payload, cover, control, link padding |
+| kind | 1 | data, control, link padding |
 | circuit | 8 | circuit identifier, different on every link |
 | counter | 8 | cell number, the source of the nonce and of replay protection |
 | body | 494 | layers: three 16-byte tags, the length prefix and the payload |
@@ -55,6 +56,9 @@ Every cell is 512 bytes, payload and cover cells alike.
 - The layer of hop i occupies the first 494 - 16 * i bytes of the body. After stripping its layer
   a node refills the body with random bytes, so every link carries the same size and the position
   in the chain is invisible on the wire.
+- Payload and cover cells share one outer kind, "data". The cover flag sits inside the innermost
+  layer, in the top bit of the length field, where only the exit sees it. Nodes on the way,
+  including the entry that knows the client, cannot tell a cover cell from a payload cell.
 - Inside the innermost layer: two bytes of length, the data, random padding. Three hops leave 444
   bytes for a message.
 - A node keeps a window of accepted counters and drops a replay: forwarding one would hand an
@@ -122,6 +126,11 @@ client adds its own, and only the client strips them all. The direction enters t
 forward and a backward cell never share one under the same key. The backward counter is separate,
 and each relay keeps its own replay window per direction.
 
+The exit answers every data cell with exactly one backward cell: a message with its reply, a cover
+cell with a cover reply. Replies to messages only would show every node on the way back, by their
+number and timing, which cells were real. The count is the same in every mode; the timing matches
+only when the delivery at the exit takes constant time or the nodes send on their own clocks.
+
 ## Circuit setup
 
 Setup takes one control cell of the same 512 bytes, with no extra round trips.
@@ -154,8 +163,8 @@ Circuit teardown:
 - Every node has a long-term signing pair and a certificate from the testbed CA.
 - The CA is run by lab, lives outside the cluster and exists only for the testbed.
 - The client checks the node's signature during key agreement. A compromised CA does not expose
-  the content of past sessions: layers are encrypted with ephemeral keys and the client picks the
-  chain.
+  the content of past sessions: the CA key takes no part in the layer agreement, and the client
+  picks the chain.
 
 ## What is recorded during measurements
 
@@ -187,13 +196,14 @@ adversary with several snapshots) are stated in LIMITATIONS.
 | crypto/gost, crypto/c25519 | primitive suites | crypto, secmem, external libraries |
 | crypto/secmem | key memory | x/sys/unix |
 | crypto/providertest | contract conformance tests | crypto |
-| wire | cell format, layers, replay window | crypto |
-| relay | relay node | crypto, wire |
-| client | send, receive, cover traffic | crypto, wire |
+| wire | cell format, layers, replay window | crypto, crypto/secmem |
+| link | link encryption between neighbours, frames of one size | crypto, crypto/secmem, wire |
+| relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
+| client | send, receive, cover traffic | crypto, crypto/secmem, link, wire |
 | vault | container with two volumes | crypto, crypto/secmem |
-| lab/* | scenarios, observer, metrics, reports | client, relay, wire |
+| lab/* | scenarios, observer, metrics, reports | client, relay, link, crypto/c25519 |
 | web | testbed dashboard | lab |
-| cmd/* | entry points and configuration | the packages above |
+| cmd/relay, cmd/client, cmd/lab | entry points and configuration | the packages above |
 
 Rule: relay, client and wire know nothing about lab. The experiment harness depends on the system,
 not the other way round.

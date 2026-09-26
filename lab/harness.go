@@ -1,6 +1,7 @@
 package lab
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -113,8 +114,9 @@ func Execute(cfg Config) (*Run, error) {
 	var exitMu sync.Mutex
 	// the last link carries the cells of one circuit only, so a new connection
 	// on it marks a new flow for the observer
-	lastHopDial := func(network, addr string) (net.Conn, error) {
-		conn, err := net.Dial(network, addr)
+	lastHopDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
@@ -344,7 +346,7 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector) i
 	return sent
 }
 
-func startNode(provider jcrypto.CryptoProvider, period time.Duration, observed bool, dial func(string, string) (net.Conn, error)) (*node, error) {
+func startNode(provider jcrypto.CryptoProvider, period time.Duration, observed bool, dial func(context.Context, string, string) (net.Conn, error)) (*node, error) {
 	priv, pub, err := provider.GenerateEphemeral()
 	if err != nil {
 		return nil, err

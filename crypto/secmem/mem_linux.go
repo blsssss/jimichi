@@ -8,7 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func alloc(size int) ([]byte, bool, error) {
+func alloc(size int, p Policy) ([]byte, bool, error) {
+	if !p.OffHeap {
+		return make([]byte, size), false, nil
+	}
 	mem, err := unix.Mmap(-1, 0, size,
 		unix.PROT_READ|unix.PROT_WRITE,
 		unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
@@ -17,24 +20,33 @@ func alloc(size int) ([]byte, bool, error) {
 	}
 
 	// keeps the pages out of core dumps even when dumping is on for the process
-	if err := unix.Madvise(mem, unix.MADV_DONTDUMP); err != nil {
-		_ = unix.Munmap(mem)
-		return nil, false, fmt.Errorf("secmem: madvise: %w", err)
+	if p.DontDump {
+		if err := unix.Madvise(mem, unix.MADV_DONTDUMP); err != nil {
+			_ = unix.Munmap(mem)
+			return nil, false, fmt.Errorf("secmem: madvise: %w", err)
+		}
 	}
 
+	if !p.Lock {
+		return mem, false, nil
+	}
 	if err := unix.Mlock(mem); err != nil {
 		_ = unix.Munmap(mem)
 		return nil, false, fmt.Errorf("secmem: mlock %d bytes (check RLIMIT_MEMLOCK): %w", size, err)
 	}
-
 	return mem, true, nil
 }
 
-func free(mem []byte, locked bool) {
+func free(mem []byte, locked bool, p Policy) {
 	if mem == nil {
 		return
 	}
-	zero(mem)
+	if p.Zero {
+		zero(mem)
+	}
+	if !p.OffHeap {
+		return
+	}
 	if locked {
 		_ = unix.Munlock(mem)
 	}
