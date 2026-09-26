@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"io"
+	"sync"
 	"testing"
 
 	jcrypto "github.com/blsssss/jimichi/crypto"
@@ -21,6 +22,7 @@ func Run(t *testing.T, newProvider func() jcrypto.CryptoProvider) {
 	t.Run("DeriveKeyLabelSeparates", func(t *testing.T) { testDeriveKey(t, newProvider()) })
 	t.Run("AEADRoundTrip", func(t *testing.T) { testAEADRoundTrip(t, newProvider()) })
 	t.Run("AEADDetectsTampering", func(t *testing.T) { testAEADTamper(t, newProvider()) })
+	t.Run("AEADIsSafeForConcurrentUse", func(t *testing.T) { testAEADConcurrent(t, newProvider()) })
 	t.Run("Signatures", func(t *testing.T) { testSignatures(t, newProvider()) })
 	t.Run("HashIsStable", func(t *testing.T) { testHash(t, newProvider()) })
 }
@@ -285,4 +287,52 @@ func allZero(b []byte) bool {
 		}
 	}
 	return true
+}
+
+// a relay seals backward cells and opens forward ones under one hop key from
+// different goroutines; every result must match what one goroutine gets alone
+func testAEADConcurrent(t *testing.T, p jcrypto.CryptoProvider) {
+	key := mustKey(t, p)
+	defer key.Release()
+	a, err := p.NewAEAD(key)
+	if err != nil {
+		t.Fatalf("NewAEAD: %v", err)
+	}
+	defer a.Destroy()
+
+	const cells = 32
+	nonces := make([][]byte, cells)
+	plains := make([][]byte, cells)
+	sealed := make([][]byte, cells)
+	for i := range nonces {
+		nonces[i] = wireNonce(t, a.NonceSize())
+		plains[i] = randomBytes(t, 494-a.Overhead())
+		sealed[i] = a.Seal(nil, nonces[i], plains[i], []byte{byte(i)})
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan string, 8*cells)
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for r := 0; r < 20; r++ {
+				i := (w*7 + r) % cells
+				if got := a.Seal(nil, nonces[i], plains[i], []byte{byte(i)}); !bytes.Equal(got, sealed[i]) {
+					errs <- "concurrent Seal differs from the sequential result"
+					return
+				}
+				out, err := a.Open(nil, nonces[i], sealed[i], []byte{byte(i)})
+				if err != nil || !bytes.Equal(out, plains[i]) {
+					errs <- "concurrent Open failed on a genuine cell"
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatal(e)
+	}
 }

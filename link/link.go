@@ -39,12 +39,20 @@ type Conn struct {
 	buf     []byte
 }
 
+// the provider has no size query, so a key pair is made once per suite and
+// the length remembered; a GOST key pair per accepted link would be wasted work
+var pubSizes sync.Map
+
 func pubSize(p jcrypto.CryptoProvider) (int, error) {
+	if n, ok := pubSizes.Load(p.Suite()); ok {
+		return n.(int), nil
+	}
 	priv, pub, err := p.GenerateEphemeral()
 	if err != nil {
 		return 0, err
 	}
 	priv.Release()
+	pubSizes.Store(p.Suite(), len(pub))
 	return len(pub), nil
 }
 

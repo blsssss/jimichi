@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -168,4 +169,78 @@ func TestDeriveKeyRefusesMoreThanOneBlock(t *testing.T) {
 	}
 	short.Release()
 	full.Release()
+}
+
+// the 4-torsion of paramSetA, built in Edwards coordinates where it is easy to
+// write down: (0, -1) has order 2, (1, 0) and (-1, 0) have order 4 since e = 1
+func TestLowOrderPointsAreRefused(t *testing.T) {
+	c := curve()
+	p := New()
+	priv, _, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer priv.Release()
+
+	minusOne := new(big.Int).Sub(c.P, big.NewInt(1))
+	points := []struct {
+		name string
+		u, v *big.Int
+	}{
+		{"order 2", big.NewInt(0), minusOne},
+		{"order 4", big.NewInt(1), big.NewInt(0)},
+		{"order 4, mirrored", minusOne, big.NewInt(0)},
+	}
+	for _, pt := range points {
+		x, y := gost3410.UV2XY(c, pt.u, pt.v)
+		if !c.Contains(x, y) {
+			t.Fatalf("%s: the test point is not on the curve", pt.name)
+		}
+		raw := (&gost3410.PublicKey{C: c, X: x, Y: y}).Raw()
+		if _, err := p.Agree(priv, raw, []byte("ukm")); !errors.Is(err, jcrypto.ErrBadPublicKey) {
+			t.Fatalf("%s: Agree gave %v, want ErrBadPublicKey", pt.name, err)
+		}
+		if p.Verify(raw, []byte("m"), make([]byte, 64)) {
+			t.Fatalf("%s: Verify accepted it", pt.name)
+		}
+	}
+}
+
+// the curve the provider runs on is tc26 paramSetA-256 (R 1323565.1.024-2019):
+// p = 2^256 - 617, the prime subgroup order q below and cofactor 4; the base
+// point must have order q, so (q-1)G is -G
+func TestCurveIsParamSetA(t *testing.T) {
+	c := curve()
+	p := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(617))
+	q, _ := new(big.Int).SetString("400000000000000000000000000000000fd8cddfc87b6635c115af556c360c67", 16)
+	if c.P.Cmp(p) != 0 || c.Q.Cmp(q) != 0 || c.Co.Cmp(big.NewInt(4)) != 0 {
+		t.Fatalf("curve p=%x q=%x cofactor %v is not paramSetA-256", c.P, c.Q, c.Co)
+	}
+	if !c.Q.ProbablyPrime(32) || !c.Contains(c.X, c.Y) {
+		t.Fatal("q is not prime or the base point is off the curve")
+	}
+	x, y, err := c.Exp(new(big.Int).Sub(c.Q, big.NewInt(1)), c.X, c.Y)
+	if err != nil {
+		t.Fatal(err)
+	}
+	negY := new(big.Int).Sub(c.P, c.Y)
+	if x.Cmp(c.X) != 0 || y.Cmp(negY) != 0 {
+		t.Fatal("(q-1)G is not -G: the base point does not have order q")
+	}
+}
+
+// 8 bytes go in as they are; anything longer is hashed down to 8 first, so the
+// factor stays a 64-bit number; a zero factor becomes one
+func TestVKOFactor(t *testing.T) {
+	short := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	if got, want := vkoFactor(short), gost3410.NewUKM(short); got.Cmp(want) != 0 {
+		t.Fatalf("8-byte UKM changed: %v, want %v", got, want)
+	}
+	long := bytes.Repeat([]byte{9}, 64)
+	if got := vkoFactor(long); got.BitLen() > 64 {
+		t.Fatalf("64-byte UKM gave a %d-bit factor", got.BitLen())
+	}
+	if got := vkoFactor(make([]byte, 8)); got.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("zero UKM gave %v, want 1", got)
+	}
 }

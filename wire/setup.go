@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	jcrypto "github.com/blsssss/jimichi/crypto"
 	"github.com/blsssss/jimichi/crypto/secmem"
@@ -50,6 +51,36 @@ type SetupResult struct {
 
 func setupLayerLen(index, perHop int) int { return BodySize - index*perHop }
 
+type suiteSizes struct{ pub, overhead int }
+
+// the provider has no size query; one probe per suite is enough, where a probe
+// per setup cell would cost a relay a GOST key pair for every circuit
+var sizeCache sync.Map
+
+func sizesOf(p jcrypto.CryptoProvider) (suiteSizes, error) {
+	if v, ok := sizeCache.Load(p.Suite()); ok {
+		return v.(suiteSizes), nil
+	}
+	priv, pub, err := p.GenerateEphemeral()
+	if err != nil {
+		return suiteSizes{}, err
+	}
+	priv.Release()
+	probe, err := secmem.New(p.KeySize())
+	if err != nil {
+		return suiteSizes{}, err
+	}
+	defer probe.Release()
+	a, err := p.NewAEAD(probe)
+	if err != nil {
+		return suiteSizes{}, err
+	}
+	sz := suiteSizes{pub: len(pub), overhead: a.Overhead()}
+	a.Destroy()
+	sizeCache.Store(p.Suite(), sz)
+	return sz, nil
+}
+
 func perHopCost(pubLen, overhead int) int { return pubLen + overhead + setupHdr }
 
 // builds the nested setup and returns the per-hop cell keys the client keeps
@@ -58,18 +89,11 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 		return nil, fmt.Errorf("wire: empty chain")
 	}
 
-	probe, err := secmem.New(p.KeySize())
+	sz, err := sizesOf(p)
 	if err != nil {
 		return nil, err
 	}
-	probeAEAD, err := p.NewAEAD(probe)
-	if err != nil {
-		probe.Release()
-		return nil, err
-	}
-	overhead := probeAEAD.Overhead()
-	probeAEAD.Destroy()
-	probe.Release()
+	overhead := sz.overhead
 
 	pubLen := len(chain[0].StaticPub)
 	perHop := perHopCost(pubLen, overhead)
@@ -194,25 +218,11 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 	}
 	index := int(hdr.Counter)
 
-	probePriv, pub, err := p.GenerateEphemeral()
+	sz, err := sizesOf(p)
 	if err != nil {
 		return nil, err
 	}
-	probePriv.Release()
-	pubLen := len(pub)
-
-	probe, err := secmem.New(p.KeySize())
-	if err != nil {
-		return nil, err
-	}
-	probeAEAD, err := p.NewAEAD(probe)
-	if err != nil {
-		probe.Release()
-		return nil, err
-	}
-	overhead := probeAEAD.Overhead()
-	probeAEAD.Destroy()
-	probe.Release()
+	pubLen, overhead := sz.pub, sz.overhead
 
 	perHop := perHopCost(pubLen, overhead)
 	layerLen := setupLayerLen(index, perHop)

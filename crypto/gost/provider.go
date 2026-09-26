@@ -20,6 +20,8 @@ import (
 const (
 	keySize = 32
 	tagSize = 16
+	// MGM takes a nonce of one Kuznyechik block
+	nonceSize = 16
 )
 
 // tc26 paramSetA: the 256-bit twisted Edwards curve TC26 recommends for new
@@ -42,8 +44,8 @@ func (p *Provider) GenerateSigning() (*secmem.Buffer, []byte, error) {
 	return generate(curve())
 }
 
-// rejection sampling keeps the scalar uniform below q; reducing a random
-// 256-bit value modulo a q near 2^254 would favour the low quarter
+// rejection sampling keeps the scalar exactly uniform below q; with q just
+// above 2^254 about one draw in four is kept
 func generate(c *gost3410.Curve) (*secmem.Buffer, []byte, error) {
 	size := c.PointSize()
 	priv, err := secmem.New(size)
@@ -87,7 +89,9 @@ func (p *Provider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buff
 	if err != nil {
 		return nil, err
 	}
-	defer secmem.Zero(kek)
+	// the library hashes the shared point into the front of the same array, so
+	// the tail still holds half of it
+	defer secmem.Zero(kek[:cap(kek)])
 
 	out, err := secmem.New(keySize)
 	if err != nil {
@@ -110,20 +114,32 @@ func vko(c *gost3410.Curve, priv, peerPub, ukm []byte) ([]byte, error) {
 	}
 	defer wipe(prv.Key)
 
-	u := gost3410.NewUKM(ukm)
-	// RFC 7836 replaces a zero factor by one
-	if u.Sign() == 0 {
-		u.SetInt64(1)
-	}
-	kek, err := prv.KEK2012256(pub, u)
+	kek, err := prv.KEK2012256(pub, vkoFactor(ukm))
 	if err != nil {
 		return nil, fmt.Errorf("gost: vko: %w", err)
 	}
 	return kek, nil
 }
 
+// RFC 7836 takes a 64-bit UKM; a longer one, such as the link handshake's
+// public key, would turn the factor into a 512-bit number and double the cost,
+// so it is hashed down first. The full value still seeds the KDF
+func vkoFactor(ukm []byte) *big.Int {
+	short := ukm
+	if len(short) > 8 {
+		short = streebog(ukm)[:8]
+	}
+	u := gost3410.NewUKM(short)
+	// RFC 7836 replaces a zero factor by one
+	if u.Sign() == 0 {
+		u.SetInt64(1)
+	}
+	return u
+}
+
 // an off-curve point would let a peer run the static key through a weaker
-// curve and learn it piece by piece
+// curve and learn it piece by piece; a point of order 2 or 4 would make the
+// shared point degenerate, and the library computes on it without complaint
 func publicKey(c *gost3410.Curve, raw []byte) (*gost3410.PublicKey, error) {
 	if len(raw) != 2*c.PointSize() {
 		return nil, jcrypto.ErrBadPublicKey
@@ -133,6 +149,15 @@ func publicKey(c *gost3410.Curve, raw []byte) (*gost3410.PublicKey, error) {
 		return nil, jcrypto.ErrBadPublicKey
 	}
 	if pub.X.Cmp(c.P) >= 0 || pub.Y.Cmp(c.P) >= 0 || !c.Contains(pub.X, pub.Y) {
+		return nil, jcrypto.ErrBadPublicKey
+	}
+	// in Weierstrass form a point of order 2 has y = 0, and one of order 4
+	// doubles to such a point; together they are the whole 4-torsion
+	if pub.Y.Sign() == 0 {
+		return nil, jcrypto.ErrBadPublicKey
+	}
+	_, y2, err := c.Exp(big.NewInt(2), pub.X, pub.Y)
+	if err != nil || y2.Sign() == 0 {
 		return nil, jcrypto.ErrBadPublicKey
 	}
 	return pub, nil
@@ -186,6 +211,8 @@ func (p *Provider) Sign(priv *secmem.Buffer, msg []byte) ([]byte, error) {
 		return nil, fmt.Errorf("gost: private key: %w", err)
 	}
 	defer wipe(prv.Key)
+	// the digest goes in in gogost's byte order; nothing outside this system
+	// verifies these signatures, so interoperability is not claimed
 	sig, err := prv.SignDigest(streebog(msg), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("gost: sign: %w", err)
@@ -234,14 +261,19 @@ func littleEndian(raw []byte) *big.Int {
 	return k
 }
 
+// gogost's MGM keeps per-call state in the struct, while a relay seals and
+// opens with one hop key from several goroutines; the lock makes it safe
 type aead struct {
+	mu    sync.Mutex
 	inner cipher.AEAD
 }
 
-func (a *aead) NonceSize() int { return a.inner.NonceSize() }
-func (a *aead) Overhead() int  { return a.inner.Overhead() }
+func (a *aead) NonceSize() int { return nonceSize }
+func (a *aead) Overhead() int  { return tagSize }
 
 func (a *aead) Seal(dst, nonce, plaintext, ad []byte) []byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.inner.Seal(dst, nonce, plaintext, ad)
 }
 
@@ -251,6 +283,8 @@ func (a *aead) Open(dst, nonce, ciphertext, ad []byte) ([]byte, error) {
 	if !a.nonceOK(nonce) || len(ciphertext) < tagSize {
 		return nil, jcrypto.ErrOpen
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	out, err := a.inner.Open(dst, nonce, ciphertext, ad)
 	if err != nil {
 		return nil, jcrypto.ErrOpen
@@ -259,9 +293,13 @@ func (a *aead) Open(dst, nonce, ciphertext, ad []byte) ([]byte, error) {
 }
 
 func (a *aead) nonceOK(nonce []byte) bool {
-	return len(nonce) == a.inner.NonceSize() && nonce[0]&0x80 == 0
+	return len(nonce) == nonceSize && nonce[0]&0x80 == 0
 }
 
 // the Kuznyechik round keys sit in the library's cipher on the Go heap and have
 // no wipe, so this only drops the reference; listed in CRYPTO under known gaps
-func (a *aead) Destroy() { a.inner = nil }
+func (a *aead) Destroy() {
+	a.mu.Lock()
+	a.inner = nil
+	a.mu.Unlock()
+}

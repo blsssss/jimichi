@@ -94,11 +94,12 @@ revision.
 
 ## Cryptography
 
-All primitives sit behind a single `CryptoProvider` interface. The primary suite is GOST
-(VKO GOST R 34.10-2012, Kuznyechik-MGM, Streebog); a second suite (X25519, XChaCha20-Poly1305,
-Ed25519) implements the same contract, so results are comparable with international work and a
-difference points at the suite, not at the harness. Both must pass the same conformance tests.
-See [docs/en/CRYPTO.md](docs/en/CRYPTO.md).
+All primitives sit behind a single `CryptoProvider` interface. The default suite is X25519,
+XChaCha20-Poly1305 and Ed25519, so results are comparable with international work. A second suite
+implements the Russian standards (VKO GOST R 34.10-2012, Kuznyechik-MGM, Streebog) behind the same
+contract and is switched on with `-suite gost`; a difference between the two points at the suite,
+not at the harness. Both pass the same conformance tests and known-answer tests from the
+standards. See [docs/en/CRYPTO.md](docs/en/CRYPTO.md).
 
 ## Layout
 

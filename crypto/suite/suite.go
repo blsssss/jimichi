@@ -10,8 +10,9 @@ import (
 	"github.com/blsssss/jimichi/crypto/gost"
 )
 
-// GOST is the primary suite; c25519 is there to compare against
-const Default = jcrypto.SuiteGOST
+// c25519 keeps results comparable with work outside Russia; GOST runs behind
+// the same interface for the comparison
+const Default = jcrypto.SuiteC25519
 
 func Parse(name string) (jcrypto.Suite, error) {
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteGOST, jcrypto.SuiteC25519} {

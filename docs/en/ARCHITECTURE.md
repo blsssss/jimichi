@@ -60,7 +60,9 @@ Every cell is 512 bytes, payload and cover cells alike.
   layer, in the top bit of the length field, where only the exit sees it. Nodes on the way,
   including the entry that knows the client, cannot tell a cover cell from a payload cell.
 - Inside the innermost layer: two bytes of length, the data, random padding. Three hops leave 444
-  bytes for a message.
+  bytes for a message, in both suites.
+- The setup cell holds four hops on c25519 and three on GOST: a GOST public key is 64 bytes
+  against 32, and every setup layer grows by the difference.
 - A node keeps a window of accepted counters and drops a replay: forwarding one would hand an
   active observer a free timing mark.
 

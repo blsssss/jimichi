@@ -225,6 +225,7 @@ func main() {
 // runs of one configuration at one window, reduced to the median and the range
 // across repeats; the rows stay in the report for anything finer
 type summary struct {
+	Suite          string  `json:"suite"`
 	Traffic        string  `json:"traffic"`
 	Bin            string  `json:"bin"`
 	Runs           int     `json:"runs"`
@@ -267,7 +268,7 @@ func summarise(rows []result) []summary {
 			}
 		}
 		out = append(out, summary{
-			Traffic: k.traffic, Bin: k.bin, Runs: len(g),
+			Suite: g[0].Suite, Traffic: k.traffic, Bin: k.bin, Runs: len(g),
 			AUC: metrics.Median(auc), AUCMin: slices.Min(auc), AUCMax: slices.Max(auc),
 			TopOne: metrics.Median(top), Multiplier: metrics.Median(mult), RelayMult: metrics.Median(relay),
 			LatencyP50Ms: metrics.Median(p50), DegenerateRuns: degenerate,
@@ -277,6 +278,9 @@ func summarise(rows []result) []summary {
 }
 
 func printSummary(sum []summary) {
+	if len(sum) > 0 {
+		fmt.Printf("\nsuite %s", sum[0].Suite)
+	}
 	fmt.Printf("\n%-11s %6s %4s %20s %6s %8s %8s %10s %4s\n",
 		"traffic", "bin", "runs", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
 	for _, s := range sum {
