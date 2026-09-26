@@ -103,13 +103,14 @@ See [docs/en/CRYPTO.md](docs/en/CRYPTO.md).
 ## Layout
 
 ```
-cmd/          entry points: relay, client, jimichi
+cmd/          entry points: relay, client, lab
 crypto/       CryptoProvider interface
   gost/       GOST suite
   c25519/     X25519 / XChaCha20-Poly1305 / Ed25519 suite
   secmem/     mlocked, non-dumpable, self-zeroing key buffers
   providertest/ conformance suite both suites must pass
 wire/         fixed-size cells, nested layers, replay window
+link/         link encryption between neighbours, frames of one size
 relay/        relay node
 client/       sender, receiver, cover traffic
 vault/        client container with two volumes

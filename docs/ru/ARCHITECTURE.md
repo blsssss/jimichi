@@ -175,13 +175,14 @@ client-a -> relay-1 -> relay-2 -> relay-3 -> client-b
 | crypto/gost, crypto/c25519 | наборы примитивов | crypto, secmem, внешние библиотеки |
 | crypto/secmem | память под ключи | x/sys/unix |
 | crypto/providertest | тесты соответствия контракту | crypto |
-| wire | формат ячейки, слои, окно повторов | crypto |
-| relay | узел-ретранслятор | crypto, wire |
-| client | отправка, приём, фоновый трафик | crypto, wire |
+| wire | формат ячейки, слои, окно повторов | crypto, crypto/secmem |
+| link | канальное шифрование между соседями, кадры одного размера | crypto, crypto/secmem, wire |
+| relay | узел-ретранслятор, отправка по своим часам | crypto, crypto/secmem, link, wire |
+| client | отправка, приём, фоновый трафик | crypto, crypto/secmem, link, wire |
 | vault | контейнер с двумя томами | crypto, crypto/secmem |
-| lab/* | сценарии, наблюдатель, метрики, отчёты | client, relay, wire |
+| lab/* | сценарии, наблюдатель, метрики, отчёты | client, relay, link, crypto/c25519 |
 | web | дашборд стенда | lab |
-| cmd/* | точки входа и конфигурация | пакеты выше |
+| cmd/relay, cmd/client, cmd/lab | точки входа и конфигурация | пакеты выше |
 
 Правило: relay, client и wire ничего не знают о lab. Экспериментальная обвязка зависит от системы,
 не наоборот.

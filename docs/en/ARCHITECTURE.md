@@ -190,13 +190,14 @@ adversary with several snapshots) are stated in LIMITATIONS.
 | crypto/gost, crypto/c25519 | primitive suites | crypto, secmem, external libraries |
 | crypto/secmem | key memory | x/sys/unix |
 | crypto/providertest | contract conformance tests | crypto |
-| wire | cell format, layers, replay window | crypto |
-| relay | relay node | crypto, wire |
-| client | send, receive, cover traffic | crypto, wire |
+| wire | cell format, layers, replay window | crypto, crypto/secmem |
+| link | link encryption between neighbours, frames of one size | crypto, crypto/secmem, wire |
+| relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
+| client | send, receive, cover traffic | crypto, crypto/secmem, link, wire |
 | vault | container with two volumes | crypto, crypto/secmem |
-| lab/* | scenarios, observer, metrics, reports | client, relay, wire |
+| lab/* | scenarios, observer, metrics, reports | client, relay, link, crypto/c25519 |
 | web | testbed dashboard | lab |
-| cmd/* | entry points and configuration | the packages above |
+| cmd/relay, cmd/client, cmd/lab | entry points and configuration | the packages above |
 
 Rule: relay, client and wire know nothing about lab. The experiment harness depends on the system,
 not the other way round.
