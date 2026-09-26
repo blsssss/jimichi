@@ -107,6 +107,7 @@ cmd/          entry points: relay, client, lab
 crypto/       CryptoProvider interface
   gost/       GOST suite
   c25519/     X25519 / XChaCha20-Poly1305 / Ed25519 suite
+  suite/      picks a suite by name
   secmem/     mlocked, non-dumpable, self-zeroing key buffers
   providertest/ conformance suite both suites must pass
 wire/         fixed-size cells, nested layers, replay window

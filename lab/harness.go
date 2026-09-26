@@ -11,8 +11,8 @@ import (
 
 	"github.com/blsssss/jimichi/client"
 	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/c25519"
 	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/blsssss/jimichi/crypto/suite"
 	"github.com/blsssss/jimichi/link"
 	"github.com/blsssss/jimichi/relay"
 )
@@ -28,8 +28,10 @@ type Config struct {
 	Jitter     time.Duration
 	// every relay sends on its own clock with this period; zero forwards at once
 	RelayPeriod time.Duration
-	Payload     int
-	Seed        int64
+	// timing does not depend on the suite, but its cost does; zero is c25519
+	Suite   jcrypto.Suite
+	Payload int
+	Seed    int64
 }
 
 func (c Config) withDefaults() Config {
@@ -44,6 +46,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.SendEvery == 0 {
 		c.SendEvery = 200 * time.Millisecond
+	}
+	if c.Suite == 0 {
+		c.Suite = jcrypto.SuiteC25519
 	}
 	if c.Payload == 0 {
 		c.Payload = 128
@@ -86,7 +91,10 @@ type node struct {
 // Execute runs one configuration end to end and returns what the adversary saw
 func Execute(cfg Config) (*Run, error) {
 	cfg = cfg.withDefaults()
-	provider := c25519.New()
+	provider, err := suite.New(cfg.Suite)
+	if err != nil {
+		return nil, err
+	}
 	start := time.Now()
 
 	frame, err := link.FrameSize(provider)

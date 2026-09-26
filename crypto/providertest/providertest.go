@@ -127,7 +127,7 @@ func testAEADRoundTrip(t *testing.T, p jcrypto.CryptoProvider) {
 	}
 	defer a.Destroy()
 
-	nonce := randomBytes(t, a.NonceSize())
+	nonce := wireNonce(t, a.NonceSize())
 	plaintext := []byte("cell payload of fixed size")
 	ad := []byte("hop-1")
 
@@ -158,7 +158,7 @@ func testAEADTamper(t *testing.T, p jcrypto.CryptoProvider) {
 	}
 	defer a.Destroy()
 
-	nonce := randomBytes(t, a.NonceSize())
+	nonce := wireNonce(t, a.NonceSize())
 	ad := []byte("hop-1")
 	ciphertext := a.Seal(nil, nonce, []byte("payload"), ad)
 
@@ -172,10 +172,24 @@ func testAEADTamper(t *testing.T, p jcrypto.CryptoProvider) {
 		t.Fatal("Open must reject wrong associated data")
 	}
 
-	otherNonce := randomBytes(t, a.NonceSize())
+	otherNonce := wireNonce(t, a.NonceSize())
 	if _, err := a.Open(nil, otherNonce, ciphertext, ad); err == nil {
 		t.Fatal("Open must reject a wrong nonce")
 	}
+
+	// wire never builds such a nonce, but an open must fail, not take the node down
+	topBit := bytes.Clone(nonce)
+	topBit[0] |= 0x80
+	if _, err := a.Open(nil, topBit, ciphertext, ad); err == nil {
+		t.Fatal("Open must reject a nonce with the top bit set")
+	}
+}
+
+// the nonce wire builds: random here, but with the top bit clear, as MGM needs
+func wireNonce(t *testing.T, size int) []byte {
+	n := randomBytes(t, size)
+	n[0] &= 0x7f
+	return n
 }
 
 func testSignatures(t *testing.T, p jcrypto.CryptoProvider) {

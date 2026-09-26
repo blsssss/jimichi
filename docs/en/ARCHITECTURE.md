@@ -194,6 +194,7 @@ adversary with several snapshots) are stated in LIMITATIONS.
 |---|---|---|
 | crypto | CryptoProvider interface | crypto/secmem |
 | crypto/gost, crypto/c25519 | primitive suites | crypto, secmem, external libraries |
+| crypto/suite | picks a suite by name for entry points and the testbed | crypto/gost, crypto/c25519 |
 | crypto/secmem | key memory | x/sys/unix |
 | crypto/providertest | contract conformance tests | crypto |
 | wire | cell format, layers, replay window | crypto, crypto/secmem |

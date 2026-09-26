@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/blsssss/jimichi/client"
+	"github.com/blsssss/jimichi/crypto/suite"
 	"github.com/blsssss/jimichi/lab"
 	"github.com/blsssss/jimichi/lab/metrics"
 )
@@ -138,6 +139,7 @@ func main() {
 	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks")
 	rev := flag.String("rev", "unknown", "code revision recorded in every row")
 	seed := flag.Int64("seed", 1, "base seed; every repeat derives its own from it")
+	suiteName := flag.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
 	flag.Parse()
 
 	if *flows < 2 || *hops < 2 {
@@ -148,6 +150,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning: no -rev given, rows cannot be traced to a revision")
 	}
 
+	chosen, err := suite.Parse(*suiteName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	bins, err := parseBins(*binList)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bins: %v\n", err)
@@ -169,6 +176,7 @@ func main() {
 			cfg.Duration = *duration
 			cfg.SendEvery = *send
 			cfg.Seed = lab.Derive(*seed, uint64(r))
+			cfg.Suite = chosen
 
 			before := loadavg()
 			run, err := lab.Execute(cfg)
@@ -346,7 +354,7 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		Traffic:     traffic,
 		Bin:         bin.String(),
 		Seed:        cfg.Seed,
-		Suite:       "c25519",
+		Suite:       cfg.Suite.String(),
 		Mode:        modeName(cfg.Mode),
 		Rate:        cfg.Rate.String(),
 		CoverEvery:  cfg.CoverEvery.String(),

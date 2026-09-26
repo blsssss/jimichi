@@ -12,6 +12,7 @@ import (
 	"github.com/blsssss/jimichi/client"
 	jcrypto "github.com/blsssss/jimichi/crypto"
 	"github.com/blsssss/jimichi/crypto/c25519"
+	"github.com/blsssss/jimichi/crypto/suite"
 	"github.com/blsssss/jimichi/link"
 	"github.com/blsssss/jimichi/relay"
 	"github.com/blsssss/jimichi/wire"
@@ -900,5 +901,46 @@ func TestForgedFarCounterAtAForwardingRelay(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("a forged far counter at the entry pushed the genuine cell out of its window")
+	}
+}
+
+// the chain runs unchanged on either suite: GOST brings 64-byte public keys to
+// the setup layers and 16-byte MGM nonces to every cell
+func TestChainOnEverySuite(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteGOST, jcrypto.SuiteC25519} {
+		t.Run(s.String(), func(t *testing.T) {
+			p, err := suite.New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+				return append([]byte("echo:"), payload...)
+			})
+			middle := startNode(t, p, nil)
+			entry := startNode(t, p, nil)
+
+			cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer cl.Close()
+			if err := cl.SendCover(); err != nil {
+				t.Fatalf("SendCover: %v", err)
+			}
+			if err := cl.Send([]byte("ping")); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			select {
+			case reply := <-cl.Replies():
+				if string(reply) != "echo:ping" {
+					t.Fatalf("reply %q", reply)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("no reply came back")
+			}
+			if cl.MaxPayload() != 444 {
+				t.Fatalf("payload limit %d, want 444", cl.MaxPayload())
+			}
+		})
 	}
 }

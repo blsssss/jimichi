@@ -180,6 +180,7 @@ client-a -> relay-1 -> relay-2 -> relay-3 -> client-b
 |---|---|---|
 | crypto | интерфейс CryptoProvider | crypto/secmem |
 | crypto/gost, crypto/c25519 | наборы примитивов | crypto, secmem, внешние библиотеки |
+| crypto/suite | выбор набора по имени для точек входа и стенда | crypto/gost, crypto/c25519 |
 | crypto/secmem | память под ключи | x/sys/unix |
 | crypto/providertest | тесты соответствия контракту | crypto |
 | wire | формат ячейки, слои, окно повторов | crypto, crypto/secmem |
