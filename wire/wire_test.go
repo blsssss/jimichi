@@ -269,6 +269,44 @@ func TestReplayWindow(t *testing.T) {
 	}
 }
 
+// window 64: top 200 accepts 137..200 and refuses 136, which is 64 behind;
+// jumping to 300 drops every mark, so 250 is new but 236 is too old
+func TestReplayWindowEdges(t *testing.T) {
+	w := wire.NewReplayWindow(64)
+	for _, c := range []uint64{200, 137} {
+		if !w.Accept(c) {
+			t.Fatalf("counter %d must be accepted", c)
+		}
+	}
+	if w.Accept(136) || w.Accept(137) {
+		t.Fatal("a counter 64 behind and a repeat must both be refused")
+	}
+	if !w.Accept(300) || !w.Accept(250) {
+		t.Fatal("a jump and a counter inside the new window must be accepted")
+	}
+	if w.Accept(236) {
+		t.Fatal("236 is 64 behind 300 and must be refused")
+	}
+}
+
+// a forged cell with a far counter fails authentication; if its counter were
+// recorded anyway, every genuine cell after it would look too old
+func TestCheckDoesNotMoveTheWindow(t *testing.T) {
+	w := wire.NewReplayWindow(64)
+	if !w.Commit(10) {
+		t.Fatal("first counter must be committed")
+	}
+	if !w.Check(1 << 40) {
+		t.Fatal("a far counter must pass the check")
+	}
+	if !w.Check(11) || !w.Commit(11) {
+		t.Fatal("the next genuine counter must still pass after a check alone")
+	}
+	if w.Commit(11) {
+		t.Fatal("a committed counter must not commit twice")
+	}
+}
+
 func TestMaxPayloadShrinksWithChain(t *testing.T) {
 	p := provider()
 	short := newCircuit(t, p, hopKeys(t, p, 1))

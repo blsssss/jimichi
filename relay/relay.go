@@ -128,6 +128,7 @@ var (
 	errDuplicate = errors.New("relay: circuit id already in use")
 	errLinkTaken = errors.New("relay: link already carries a circuit")
 	errQueueFull = errors.New("relay: send queue full")
+	errReplay    = errors.New("relay: replayed counter")
 )
 
 func (r *Relay) Stats() *Stats { return &r.stats }
@@ -251,14 +252,19 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	if c == nil || c.in != from {
 		return fmt.Errorf("relay: unknown circuit")
 	}
-	if !c.replay.Accept(hdr.Counter) {
-		return fmt.Errorf("relay: replayed counter")
+	// recorded only once the layer opens, so a forged far counter cannot push
+	// genuine cells out of the window
+	if !c.replay.Check(hdr.Counter) {
+		return errReplay
 	}
 
 	if c.isExit {
 		payload, cover, err := c.hop.OpenLast(cell, wire.Forward)
 		if err != nil {
 			return err
+		}
+		if !c.replay.Commit(hdr.Counter) {
+			return errReplay
 		}
 		r.stats.add(&r.stats.Delivered)
 		if !cover && r.cfg.Deliver != nil {
@@ -272,6 +278,9 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	out, err := c.hop.Peel(cell, wire.Forward)
 	if err != nil {
 		return err
+	}
+	if !c.replay.Commit(hdr.Counter) {
+		return errReplay
 	}
 	out.SetCircuit(c.nextID)
 	if c.fwd != nil {
