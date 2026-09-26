@@ -2,6 +2,7 @@ package relay_test
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -361,9 +362,10 @@ func TestDuplicateSetupIsRefused(t *testing.T) {
 	})
 
 	var dials atomic.Int32
-	entry := startRelay(t, p, relay.Config{Dial: func(network, addr string) (net.Conn, error) {
+	entry := startRelay(t, p, relay.Config{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dials.Add(1)
-		return net.Dial(network, addr)
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
 	}})
 
 	links := []uint64{31, 42}
@@ -583,9 +585,10 @@ func TestSecondCircuitOnOneLinkIsRefused(t *testing.T) {
 		return nil
 	})
 	var dials atomic.Int32
-	entry := startRelay(t, p, relay.Config{Dial: func(network, addr string) (net.Conn, error) {
+	entry := startRelay(t, p, relay.Config{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dials.Add(1)
-		return net.Dial(network, addr)
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
 	}})
 
 	build := func(in, out uint64) (*wire.SetupResult, *wire.Circuit) {
@@ -660,5 +663,40 @@ func TestQueueSizeIsBounded(t *testing.T) {
 		if _, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, QueueCells: n}); err == nil {
 			t.Fatalf("relay.New accepted a queue of %d cells", n)
 		}
+	}
+}
+
+// a setup that cannot reach the next node must not leave the client sending
+// into a circuit that was never built
+func TestClientLearnsFailedSetup(t *testing.T) {
+	p := c25519.New()
+	gone, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := gone.Addr().String()
+	_ = gone.Close()
+	_, gonePub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry := startNode(t, p, nil)
+	cl, err := client.Dial(client.Config{Provider: p, Chain: []client.Node{
+		{Addr: entry.addr, StaticPub: entry.pub},
+		{Addr: addr, StaticPub: gonePub},
+	}})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+
+	select {
+	case _, open := <-cl.Replies():
+		if open {
+			t.Fatal("a reply came through a circuit that was never built")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the client was not told that its setup failed")
 	}
 }

@@ -27,8 +27,9 @@ type Config struct {
 	Deliver    Deliver
 	Dialer     net.Dialer
 	// lets the testbed observe the link to the next hop the way a passive
-	// network adversary would; nil means a plain dial
-	Dial func(network, addr string) (net.Conn, error)
+	// network adversary would; nil means a plain dial. The context carries the
+	// deadline a plain dial gets, so a hook cannot hold Close either
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Period sends one frame per tick on each circuit and direction, padding
 	// when there is nothing queued; zero forwards every cell at once
 	Period     time.Duration
@@ -385,7 +386,7 @@ func (r *Relay) backward(c *circuit) {
 func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	layer, err := wire.OpenSetup(r.cfg.Provider, r.cfg.StaticPriv, cell)
 	if err != nil {
-		return err
+		return r.setupFailed(from, err)
 	}
 	index := int(hdr.Counter)
 
@@ -439,9 +440,21 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 		delete(r.owners, from)
 		r.mu.Unlock()
 		hop.Close()
-		return err
+		return r.setupFailed(from, err)
 	}
 	return nil
+}
+
+// a link that carries no circuit is of no use to its peer; closing it is how
+// the client learns that its setup went nowhere instead of sending into silence
+func (r *Relay) setupFailed(from *link.Conn, err error) error {
+	r.mu.Lock()
+	_, owned := r.owners[from]
+	r.mu.Unlock()
+	if owned {
+		return err
+	}
+	return fmt.Errorf("%w: %v", errFatal, err)
 }
 
 func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
@@ -496,14 +509,12 @@ func (r *Relay) newPacer(out *link.Conn) *pacer {
 }
 
 func (r *Relay) dial(addr string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, handshakeTimeout)
+	defer cancel()
 	if r.cfg.Dial != nil {
-		return r.cfg.Dial("tcp", addr)
+		return r.cfg.Dial(ctx, "tcp", addr)
 	}
-	d := r.cfg.Dialer
-	if d.Timeout == 0 {
-		d.Timeout = handshakeTimeout
-	}
-	return d.DialContext(r.ctx, "tcp", addr)
+	return r.cfg.Dialer.DialContext(ctx, "tcp", addr)
 }
 
 func (c *circuit) write(cell *wire.Cell) error {
