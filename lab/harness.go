@@ -70,6 +70,8 @@ type Run struct {
 	Origin time.Duration
 	// delivery latency of every message that came back, in order
 	Latency []time.Duration
+	// messages whose echo had not come back when the run was read
+	Unanswered int
 }
 
 type node struct {
@@ -164,7 +166,7 @@ func Execute(cfg Config) (*Run, error) {
 	// real clients start at unrelated moments, so each schedule gets a random
 	// phase; dialling back to back instead would put every client in phase and
 	// hand the attack ties that no real network produces
-	phases := rand.New(rand.NewSource(cfg.Seed))
+	phases := rand.New(rand.NewSource(Derive(cfg.Seed, streamPhases)))
 	schedule := max(cfg.Rate, cfg.CoverEvery)
 	for i := 0; i < cfg.Flows; i++ {
 		if schedule > 0 {
@@ -204,10 +206,12 @@ func Execute(cfg Config) (*Run, error) {
 	origin := time.Since(start)
 	sent := runFlows(cfg, clients, latency)
 
-	// let the last cells drain before the traces are read
-	time.Sleep(300 * time.Millisecond)
+	// a fixed drain would cut the latency tail of a slow schedule; a message
+	// lost on the way never answers, so the wait is bounded by the configuration
+	drain := 300*time.Millisecond + time.Duration(4*cfg.Hops)*(cfg.Rate+cfg.RelayPeriod+cfg.Jitter)
+	_ = waitFor(func() bool { return latency.pending() == 0 }, drain)
 
-	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin}
+	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin, Unanswered: latency.pending()}
 	for _, c := range clients {
 		run.Dropped += c.Dropped()
 	}
@@ -276,6 +280,16 @@ func (l *latencyCollector) mark(flow int, seq uint64) {
 	l.mu.Unlock()
 }
 
+func (l *latencyCollector) pending() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, m := range l.sent {
+		n += len(m)
+	}
+	return n
+}
+
 func (l *latencyCollector) samples() []time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -294,7 +308,7 @@ func runFlows(cfg Config, clients []*client.Client, latency *latencyCollector) i
 		wg.Add(1)
 		go func(flow int, c *client.Client) {
 			defer wg.Done()
-			rng := rand.New(rand.NewSource(cfg.Seed + int64(flow)))
+			rng := rand.New(rand.NewSource(Derive(cfg.Seed, streamGaps, uint64(flow))))
 			payload := make([]byte, max(cfg.Payload, flowField+seqField))
 			binary.BigEndian.PutUint16(payload[:flowField], uint16(flow))
 			local := 0

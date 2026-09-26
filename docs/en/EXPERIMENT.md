@@ -13,6 +13,12 @@ Real clients start at unrelated moments, so on the testbed each client's schedul
 phase drawn from the run's seed. Clients started back to back would tick almost in phase and hand
 the attack ties that a real network does not produce.
 
+Seeds: each repeat's seed is derived from the series' base seed, and separate streams for client
+phases and for each flow's gaps are derived from it (splitmix64). Neighbouring repeats and flows
+share no random sequence. The phases of node clocks come from the node's own generator, not from
+the seed, as in a real deployment. Every report row records the configuration, the seeds, the code
+revision and the host load before and after the run.
+
 ## Adversary models
 
 The codes are used in every results table.

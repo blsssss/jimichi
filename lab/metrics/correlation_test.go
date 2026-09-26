@@ -78,13 +78,17 @@ func TestPearsonUndefinedWithoutVariation(t *testing.T) {
 	}
 }
 
-func TestBinCountsEveryEventOnce(t *testing.T) {
-	events := []time.Duration{0, 50 * time.Millisecond, 100 * time.Millisecond, 950 * time.Millisecond}
-	bins := metrics.Bin(events, time.Second, 100*time.Millisecond)
-	if len(bins) != 11 {
-		t.Fatalf("bins = %d, want 11", len(bins))
+// window 1 s, bin 100 ms: ten bins over [0, 1 s). 0 and 50 ms land in bin 0,
+// 100 ms in bin 1, 950 ms and 1 s minus 1 ns in bin 9; 1 s itself and 1.05 s
+// are outside the window, as they are for CellsWithin. 5 of 7 are counted
+func TestBinCountsInsideTheWindowOnly(t *testing.T) {
+	ms := time.Millisecond
+	events := []time.Duration{0, 50 * ms, 100 * ms, 950 * ms, time.Second - 1, time.Second, 1050 * ms}
+	bins := metrics.Bin(events, time.Second, 100*ms)
+	if len(bins) != 10 {
+		t.Fatalf("bins = %d, want 10", len(bins))
 	}
-	want := map[int]float64{0: 2, 1: 1, 9: 1}
+	want := map[int]float64{0: 2, 1: 1, 9: 2}
 	total := 0.0
 	for i, v := range bins {
 		total += v
@@ -92,8 +96,33 @@ func TestBinCountsEveryEventOnce(t *testing.T) {
 			t.Errorf("bin %d = %v, want %v", i, v, want[i])
 		}
 	}
-	if total != float64(len(events)) {
-		t.Fatalf("binned %v events, want %d", total, len(events))
+	if total != 5 {
+		t.Fatalf("binned %v events, want 5", total)
+	}
+	if n := metrics.CellsWithin([][]time.Duration{events}, time.Second); n != 5 {
+		t.Fatalf("CellsWithin counts %d of the same events, want 5", n)
+	}
+}
+
+// window 250 ms, bin 100 ms: three bins, the last covering [200, 250) ms only;
+// 240 ms is in it and 260 ms is not
+func TestBinShortLastBin(t *testing.T) {
+	ms := time.Millisecond
+	bins := metrics.Bin([]time.Duration{240 * ms, 260 * ms}, 250*ms, 100*ms)
+	if len(bins) != 3 || bins[2] != 1 || bins[0]+bins[1] != 0 {
+		t.Fatalf("bins = %v, want [0 0 1]", bins)
+	}
+}
+
+// one flow of each kind: entry 0 varies and pairs with a varying exit (defined)
+// and with a constant exit (undefined); entry 1 is constant, so both of its
+// pairs are undefined. 3 of 4
+func TestUndefinedPairsKnownAnswer(t *testing.T) {
+	entry := [][]float64{{1, 2, 3}, {5, 5, 5}}
+	exit := [][]float64{{1, 2, 4}, {7, 7, 7}}
+	scores := metrics.ScorePairs(entry, exit, map[int]int{0: 0, 1: 1})
+	if n := metrics.UndefinedPairs(scores); n != 3 {
+		t.Fatalf("UndefinedPairs = %d, want 3", n)
 	}
 }
 

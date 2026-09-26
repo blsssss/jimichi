@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,17 +22,27 @@ type result struct {
 	Traffic     string `json:"traffic"`
 	Bin         string `json:"bin"`
 	Repeat      int    `json:"repeat"`
+	BaseSeed    int64  `json:"base_seed"`
 	Seed        int64  `json:"seed"`
+	Suite       string `json:"suite"`
 	Mode        string `json:"mode"`
 	Rate        string `json:"rate"`
 	CoverEvery  string `json:"cover_every"`
 	RelayPeriod string `json:"relay_period"`
+	Jitter      string `json:"jitter"`
 	Send        string `json:"send_mean_gap"`
+	Payload     int    `json:"payload_bytes"`
 	Duration    string `json:"duration"`
 	Flows       int    `json:"flows"`
 	Hops        int    `json:"hops"`
 	Rev         string `json:"rev"`
 	GOOS        string `json:"goos"`
+	// a busy host delays ticks and lowers the scores, so every row says how
+	// loaded the machine was around its run
+	NumCPU     int    `json:"num_cpu"`
+	GOMAXPROCS int    `json:"gomaxprocs"`
+	LoadBefore string `json:"loadavg_before,omitempty"`
+	LoadAfter  string `json:"loadavg_after,omitempty"`
 
 	Cells      int     `json:"cells"`
 	Messages   int     `json:"messages"`
@@ -48,10 +59,16 @@ type result struct {
 	CIMethod string  `json:"auc_ci_method"`
 	TPR      float64 `json:"tpr_at_fpr_0.01"`
 	TopOne   float64 `json:"top1_accuracy"`
+	// how many pairs had no defined correlation, and whether the bootstrap
+	// collapsed to a single value; together they tell a 0.5 that means
+	// "nothing to rank" from one that means "ranked at chance"
+	UndefinedPairs int  `json:"undefined_pairs"`
+	CIDegenerate   bool `json:"ci_degenerate"`
 
 	DropRate          float64 `json:"drop_rate"`
 	RelayDroppedCells uint64  `json:"relay_dropped_cells"`
 	LatencySamples    int     `json:"latency_samples"`
+	Unanswered        int     `json:"unanswered"`
 	P50               string  `json:"latency_p50,omitempty"`
 	P95               string  `json:"latency_p95,omitempty"`
 	P99               string  `json:"latency_p99,omitempty"`
@@ -120,7 +137,16 @@ func main() {
 	out := flag.String("out", "artifacts", "directory for the json report")
 	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks")
 	rev := flag.String("rev", "unknown", "code revision recorded in every row")
+	seed := flag.Int64("seed", 1, "base seed; every repeat derives its own from it")
 	flag.Parse()
+
+	if *flows < 2 || *hops < 2 {
+		fmt.Fprintln(os.Stderr, "need at least 2 flows and 2 hops: the attack pairs flows seen before and after a relay")
+		os.Exit(2)
+	}
+	if *rev == "unknown" {
+		fmt.Fprintln(os.Stderr, "warning: no -rev given, rows cannot be traced to a revision")
+	}
 
 	bins, err := parseBins(*binList)
 	if err != nil {
@@ -142,8 +168,9 @@ func main() {
 			cfg.Flows = *flows
 			cfg.Duration = *duration
 			cfg.SendEvery = *send
-			cfg.Seed = int64(1000 + r)
+			cfg.Seed = lab.Derive(*seed, uint64(r))
 
+			before := loadavg()
 			run, err := lab.Execute(cfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "run failed: %v\n", err)
@@ -153,9 +180,12 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%s: no message was sent, nothing to score\n", v.label)
 				os.Exit(1)
 			}
+			after := loadavg()
 			for _, bin := range bins {
 				res, d := analyse(run, v.label, bin)
-				res.Repeat, res.Rev, res.GOOS = r, *rev, runtime.GOOS
+				res.Repeat, res.BaseSeed, res.Rev = r, *seed, *rev
+				res.GOOS, res.NumCPU, res.GOMAXPROCS = runtime.GOOS, runtime.NumCPU(), runtime.GOMAXPROCS(0)
+				res.LoadBefore, res.LoadAfter = before, after
 				results = append(results, res)
 				if r == 0 {
 					details = append(details, d)
@@ -176,6 +206,88 @@ func main() {
 		fmt.Fprintf(os.Stderr, "report: %v\n", err)
 		os.Exit(1)
 	}
+	sum := summarise(results)
+	printSummary(sum)
+	if err := write(*out, "summary-"+*set+"-"+stamp, sum); err != nil {
+		fmt.Fprintf(os.Stderr, "summary: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runs of one configuration at one window, reduced to the median and the range
+// across repeats; the rows stay in the report for anything finer
+type summary struct {
+	Traffic        string  `json:"traffic"`
+	Bin            string  `json:"bin"`
+	Runs           int     `json:"runs"`
+	AUC            float64 `json:"auc_median"`
+	AUCMin         float64 `json:"auc_min"`
+	AUCMax         float64 `json:"auc_max"`
+	TopOne         float64 `json:"top1_median"`
+	Multiplier     float64 `json:"bandwidth_multiplier_median"`
+	RelayMult      float64 `json:"relay_link_multiplier_median"`
+	LatencyP50Ms   float64 `json:"latency_p50_ms_median"`
+	DegenerateRuns int     `json:"ci_degenerate_runs"`
+}
+
+func summarise(rows []result) []summary {
+	type key struct{ traffic, bin string }
+	order := []key{}
+	groups := map[key][]result{}
+	for _, r := range rows {
+		k := key{r.Traffic, r.Bin}
+		if _, seen := groups[k]; !seen {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], r)
+	}
+	out := make([]summary, 0, len(order))
+	for _, k := range order {
+		g := groups[k]
+		var auc, top, mult, relay, p50 []float64
+		degenerate := 0
+		for _, r := range g {
+			auc = append(auc, r.AUC)
+			top = append(top, r.TopOne)
+			mult = append(mult, r.Multiplier)
+			relay = append(relay, r.RelayMultiplier)
+			if d, err := time.ParseDuration(r.P50); err == nil {
+				p50 = append(p50, float64(d)/float64(time.Millisecond))
+			}
+			if r.CIDegenerate {
+				degenerate++
+			}
+		}
+		out = append(out, summary{
+			Traffic: k.traffic, Bin: k.bin, Runs: len(g),
+			AUC: metrics.Median(auc), AUCMin: slices.Min(auc), AUCMax: slices.Max(auc),
+			TopOne: metrics.Median(top), Multiplier: metrics.Median(mult), RelayMult: metrics.Median(relay),
+			LatencyP50Ms: metrics.Median(p50), DegenerateRuns: degenerate,
+		})
+	}
+	return out
+}
+
+func printSummary(sum []summary) {
+	fmt.Printf("\n%-11s %6s %4s %20s %6s %8s %8s %10s %4s\n",
+		"traffic", "bin", "runs", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
+	for _, s := range sum {
+		fmt.Printf("%-11s %6s %4d %6.3f [%.3f, %.3f] %6.3f %8.2f %8.2f %10.2f %4d\n",
+			s.Traffic, s.Bin, s.Runs, s.AUC, s.AUCMin, s.AUCMax, s.TopOne, s.Multiplier, s.RelayMult, s.LatencyP50Ms, s.DegenerateRuns)
+	}
+}
+
+// the first three fields of /proc/loadavg; empty where there is no such file
+func loadavg() string {
+	b, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(string(b))
+	if len(f) < 3 {
+		return ""
+	}
+	return strings.Join(f[:3], " ")
 }
 
 func parseBins(list string) ([]time.Duration, error) {
@@ -234,11 +346,14 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		Traffic:     traffic,
 		Bin:         bin.String(),
 		Seed:        cfg.Seed,
+		Suite:       "c25519",
 		Mode:        modeName(cfg.Mode),
 		Rate:        cfg.Rate.String(),
 		CoverEvery:  cfg.CoverEvery.String(),
 		RelayPeriod: cfg.RelayPeriod.String(),
+		Jitter:      cfg.Jitter.String(),
 		Send:        cfg.SendEvery.String(),
+		Payload:     cfg.Payload,
 		Duration:    cfg.Duration.String(),
 		Flows:       cfg.Flows,
 		Hops:        cfg.Hops,
@@ -257,9 +372,13 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		TPR:      metrics.TPRAtFPR(scores, 0.01),
 		TopOne:   metrics.TopOneAccuracy(scores, len(entry)),
 
+		UndefinedPairs: metrics.UndefinedPairs(scores),
+		CIDegenerate:   ci.Low == ci.High,
+
 		DropRate:          float64(run.Dropped) / float64(run.Sent),
 		RelayDroppedCells: run.RelayDropped,
 		LatencySamples:    len(run.Latency),
+		Unanswered:        run.Unanswered,
 		P50:               percentile(run.Latency, 0.5),
 		P95:               percentile(run.Latency, 0.95),
 		P99:               percentile(run.Latency, 0.99),

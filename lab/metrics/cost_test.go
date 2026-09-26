@@ -77,3 +77,20 @@ func TestPercentileKnownAnswer(t *testing.T) {
 		t.Fatal("Percentile of no samples must report false")
 	}
 }
+
+// 0.9, 0.5, 0.7 sorts to 0.5 0.7 0.9, median 0.7; adding 0.6 gives
+// 0.5 0.6 0.7 0.9, median (0.6 + 0.7) / 2 = 0.65; none is undefined
+func TestMedianKnownAnswer(t *testing.T) {
+	if got := metrics.Median([]float64{0.9, 0.5, 0.7}); !near(got, 0.7) {
+		t.Fatalf("odd median = %v, want 0.7", got)
+	}
+	if got := metrics.Median([]float64{0.9, 0.5, 0.7, 0.6}); !near(got, 0.65) {
+		t.Fatalf("even median = %v, want 0.65", got)
+	}
+	if got := metrics.Median(nil); !math.IsNaN(got) {
+		t.Fatalf("median of nothing = %v, want NaN", got)
+	}
+	if _, ok := metrics.Percentile([]time.Duration{1}, math.NaN()); ok {
+		t.Fatal("Percentile accepted a NaN quantile")
+	}
+}

@@ -9,18 +9,18 @@ import (
 	"time"
 )
 
-// counts cells per time bin, which is all a passive observer can build from a
-// link that carries fixed-size cells
+// counts cells per time bin over [0, window), which is all a passive observer
+// can build from a link that carries fixed-size cells; the last bin is short
+// when the window is not a multiple of the bin
 func Bin(events []time.Duration, window, bin time.Duration) []float64 {
 	if bin <= 0 {
 		bin = 100 * time.Millisecond
 	}
-	n := int(window/bin) + 1
+	n := int((window + bin - 1) / bin)
 	out := make([]float64, n)
 	for _, e := range events {
-		idx := int(e / bin)
-		if idx >= 0 && idx < n {
-			out[idx]++
+		if e >= 0 && e < window {
+			out[int(e/bin)]++
 		}
 	}
 	return out
@@ -83,6 +83,18 @@ func ScorePairs(entry, exit [][]float64, truth map[int]int) []Score {
 		}
 	}
 	return scores
+}
+
+// pairs whose correlation was undefined, all tied at the bottom of the ranking;
+// when every pair is one, an AUC of 0.5 says the attack had nothing to rank
+func UndefinedPairs(scores []Score) int {
+	n := 0
+	for _, s := range scores {
+		if s.Value == undefined {
+			n++
+		}
+	}
+	return n
 }
 
 // ties between a positive and a negative count as half a pair

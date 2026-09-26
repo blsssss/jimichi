@@ -106,8 +106,8 @@ func New(cfg Config) (*Relay, error) {
 	if cfg.StaticPriv == nil {
 		return nil, errors.New("relay: no static key")
 	}
-	if cfg.QueueCells > maxQueueCells {
-		return nil, fmt.Errorf("relay: queue of %d cells exceeds %d", cfg.QueueCells, maxQueueCells)
+	if cfg.QueueCells < 0 || cfg.QueueCells > maxQueueCells {
+		return nil, fmt.Errorf("relay: queue of %d cells outside 0..%d", cfg.QueueCells, maxQueueCells)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Relay{
