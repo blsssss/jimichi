@@ -204,7 +204,7 @@ adversary with several snapshots) are stated in LIMITATIONS.
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
 | client | send, receive, cover traffic | crypto, crypto/secmem, link, wire |
 | vault | container with two volumes | crypto, crypto/secmem |
-| lab/* | scenarios, observer, metrics, reports | client, relay, link, crypto/c25519 |
+| lab/* | scenarios, observer, metrics, reports | client, relay, link, crypto/suite |
 | web | testbed dashboard | lab |
 | cmd/relay, cmd/client, cmd/lab | entry points and configuration | the packages above |
 

@@ -118,7 +118,7 @@ some of them live long:
 | crypto/ecdh | the X25519 scalar, the node's long-term key included, and the shared secret | until the freed heap memory is reused |
 | x/crypto hkdf, crypto/hmac | the PRK, the HMAC pads (key XOR a constant), the last derived block | until the heap memory is reused |
 | Ed25519 signing | the SHA-512 state with the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; signing always wipes its own scalars and digests, -keymem none included |
-| gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link, never wiped |
+| gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them, except under -keymem none |
 | gogost, KDF | the HMAC-Streebog pads holding the VKO secret and the circuit secret | until the heap memory is reused |
 | gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points | until the heap memory is reused; the provider wipes the number, not the copies made inside the computation |
 

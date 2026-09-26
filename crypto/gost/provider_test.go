@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/pedroalbanese/gogost/gost3410"
+	"github.com/pedroalbanese/gogost/gost3412128"
 
 	jcrypto "github.com/blsssss/jimichi/crypto"
 	"github.com/blsssss/jimichi/crypto/providertest"
@@ -242,5 +243,71 @@ func TestVKOFactor(t *testing.T) {
 	}
 	if got := vkoFactor(make([]byte, 8)); got.Cmp(big.NewInt(1)) != 0 {
 		t.Fatalf("zero UKM gave %v, want 1", got)
+	}
+}
+
+// Destroy clears the Kuznyechik round keys under the protected policy; the
+// library keeps them until the memory is reused otherwise
+func TestDestroyWipesRoundKeys(t *testing.T) {
+	key, err := secmem.NewFrom(bytes.Repeat([]byte{0x5a}, keySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer key.Release()
+	a, err := New().NewAEAD(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := a.(*aead).block
+	if *block == (gost3412128.Cipher{}) {
+		t.Fatal("round keys are empty before Destroy")
+	}
+	a.Destroy()
+	if *block != (gost3412128.Cipher{}) {
+		t.Fatal("round keys survived Destroy")
+	}
+}
+
+// adding a point of order 4 to a key gives a different point with the same
+// shared secret: VKO multiplies by the cofactor and the torsion part drops out.
+// With e = 1, (u, v) + (1, 0) = (v, -u) in Edwards coordinates
+func TestCofactorIsClearedForMixedPoints(t *testing.T) {
+	c := curve()
+	p := New()
+	peerPriv, peerPub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerPriv.Release()
+	priv, _, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer priv.Release()
+
+	q, err := gost3410.NewPublicKey(c, peerPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, v := gost3410.XY2UV(c, q.X, q.Y)
+	x, y := gost3410.UV2XY(c, v, new(big.Int).Sub(c.P, u))
+	if !c.Contains(x, y) || (x.Cmp(q.X) == 0 && y.Cmp(q.Y) == 0) {
+		t.Fatal("the shifted point is off the curve or equal to the original")
+	}
+	mixed := (&gost3410.PublicKey{C: c, X: x, Y: y}).Raw()
+
+	ukm := []byte("12345678")
+	plain, err := p.Agree(priv, peerPub, ukm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Release()
+	shifted, err := p.Agree(priv, mixed, ukm)
+	if err != nil {
+		t.Fatalf("Agree on a mixed point: %v", err)
+	}
+	defer shifted.Release()
+	if !bytes.Equal(plain.Bytes(), shifted.Bytes()) {
+		t.Fatal("the torsion part changed the shared secret")
 	}
 }

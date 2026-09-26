@@ -194,11 +194,12 @@ func (p *Provider) NewAEAD(key *secmem.Buffer) (jcrypto.AEAD, error) {
 	if key == nil || key.Len() != keySize {
 		return nil, jcrypto.ErrBadKeySize
 	}
-	inner, err := mgm.NewMGM(gost3412128.NewCipher(key.Bytes()), tagSize)
+	block := gost3412128.NewCipher(key.Bytes())
+	inner, err := mgm.NewMGM(block, tagSize)
 	if err != nil {
 		return nil, fmt.Errorf("gost: new aead: %w", err)
 	}
-	return &aead{inner: inner}, nil
+	return &aead{inner: inner, block: block}, nil
 }
 
 func (p *Provider) Sign(priv *secmem.Buffer, msg []byte) ([]byte, error) {
@@ -247,7 +248,9 @@ func streebog(msg []byte) []byte {
 // big.Int keeps its words after SetInt64, so they are cleared first; copies
 // the library made during the computation are out of reach
 func wipe(k *big.Int) {
-	clear(k.Bits())
+	if secmem.CurrentPolicy().Zero {
+		clear(k.Bits())
+	}
 	k.SetInt64(0)
 }
 
@@ -266,6 +269,9 @@ func littleEndian(raw []byte) *big.Int {
 type aead struct {
 	mu    sync.Mutex
 	inner cipher.AEAD
+	// the round keys, the first two of them the key itself; kept so Destroy can
+	// clear them, which the library has no call for
+	block *gost3412128.Cipher
 }
 
 func (a *aead) NonceSize() int { return nonceSize }
@@ -296,10 +302,11 @@ func (a *aead) nonceOK(nonce []byte) bool {
 	return len(nonce) == nonceSize && nonce[0]&0x80 == 0
 }
 
-// the Kuznyechik round keys sit in the library's cipher on the Go heap and have
-// no wipe, so this only drops the reference; listed in CRYPTO under known gaps
 func (a *aead) Destroy() {
 	a.mu.Lock()
-	a.inner = nil
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+	if a.block != nil && secmem.CurrentPolicy().Zero {
+		*a.block = gost3412128.Cipher{}
+	}
+	a.block, a.inner = nil, nil
 }

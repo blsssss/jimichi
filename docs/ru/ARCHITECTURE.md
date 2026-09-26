@@ -190,7 +190,7 @@ client-a -> relay-1 -> relay-2 -> relay-3 -> client-b
 | relay | узел-ретранслятор, отправка по своим часам | crypto, crypto/secmem, link, wire |
 | client | отправка, приём, фоновый трафик | crypto, crypto/secmem, link, wire |
 | vault | контейнер с двумя томами | crypto, crypto/secmem |
-| lab/* | сценарии, наблюдатель, метрики, отчёты | client, relay, link, crypto/c25519 |
+| lab/* | сценарии, наблюдатель, метрики, отчёты | client, relay, link, crypto/suite |
 | web | дашборд стенда | lab |
 | cmd/relay, cmd/client, cmd/lab | точки входа и конфигурация | пакеты выше |
 

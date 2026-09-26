@@ -98,8 +98,8 @@ All primitives sit behind a single `CryptoProvider` interface. The default suite
 XChaCha20-Poly1305 and Ed25519, so results are comparable with international work. A second suite
 implements the Russian standards (VKO GOST R 34.10-2012, Kuznyechik-MGM, Streebog) behind the same
 contract and is switched on with `-suite gost`; a difference between the two points at the suite,
-not at the harness. Both pass the same conformance tests and known-answer tests from the
-standards. See [docs/en/CRYPTO.md](docs/en/CRYPTO.md).
+not at the harness. Both pass the same conformance tests; GOST is also checked against the
+known-answer examples of its standards, and c25519 signing against RFC 8032. See [docs/en/CRYPTO.md](docs/en/CRYPTO.md).
 
 ## Layout
 
