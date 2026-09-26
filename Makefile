@@ -51,10 +51,10 @@ down:
 	kind delete cluster --name $(CLUSTER)
 
 sweep:
-	bash scripts/sweep.sh -flows 10 -duration 30s -repeats 3
+	bash scripts/sweep.sh -flows 10 -duration 30s -repeats 3 -bins 10ms,100ms
 
 logs:
 	kubectl logs -n $(NAMESPACE) -l app=relay --prefix --tail=20
 
 stats:
-	kubectl exec -n $(NAMESPACE) deployment/client-a -- wget -qO- http://relay-1:9100/stats
+	bash scripts/stats.sh

@@ -2,6 +2,7 @@ package wire_test
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	jcrypto "github.com/blsssss/jimichi/crypto"
@@ -280,4 +281,16 @@ func TestMaxPayloadShrinksWithChain(t *testing.T) {
 		t.Fatal("three hops must still leave room for a payload")
 	}
 	t.Logf("payload per cell: 1 hop %d bytes, 3 hops %d bytes", short.MaxPayload(), long.MaxPayload())
+}
+
+// only data kinds travel inside a circuit: control is built by BuildSetup and
+// padding belongs to a single link
+func TestSealRefusesNonDataKinds(t *testing.T) {
+	p := provider()
+	circuit := newCircuit(t, p, hopKeys(t, p, hops))
+	for _, k := range []wire.Kind{wire.KindControl, wire.KindPadding, wire.Kind(9)} {
+		if _, err := circuit.Seal(k, 1, nil); !errors.Is(err, wire.ErrKind) {
+			t.Fatalf("Seal(%v): %v, want ErrKind", k, err)
+		}
+	}
 }

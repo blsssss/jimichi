@@ -36,29 +36,39 @@ func (t *Trace) Len() int {
 	return len(t.events)
 }
 
-// counts whole frames as they pass: after the link handshake the wire carries
-// nothing but encrypted frames of one size, so a frame is all the observer sees
+// counts whole frames as they pass in each direction: after the link handshake
+// the wire carries nothing but encrypted frames of one size, so a frame is all
+// the observer sees
 type tappedConn struct {
 	net.Conn
+	out, in *counter
+}
+
+func (c *tappedConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	c.out.count(n)
+	return n, err
+}
+
+func (c *tappedConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.in.count(n)
+	return n, err
+}
+
+// one direction of a link; the dialling side writes and reads from its own
+// goroutines, so each direction keeps its own state
+type counter struct {
 	trace   *Trace
 	skip    int
 	frame   int
 	pending int
 }
 
-func (c *tappedConn) Write(b []byte) (int, error) {
-	n, err := c.Conn.Write(b)
-	c.count(n)
-	return n, err
-}
-
-func (c *tappedConn) count(n int) {
+func (c *counter) count(n int) {
 	now := time.Now()
 	if c.skip > 0 {
-		used := n
-		if used > c.skip {
-			used = c.skip
-		}
+		used := min(n, c.skip)
 		c.skip -= used
 		n -= used
 	}

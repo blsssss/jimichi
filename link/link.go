@@ -55,6 +55,11 @@ func InitiatorHandshakeSize(p jcrypto.CryptoProvider) (int, error) {
 	return n + 1, err
 }
 
+// the responder answers with its public key alone, without the mode byte
+func ResponderHandshakeSize(p jcrypto.CryptoProvider) (int, error) {
+	return pubSize(p)
+}
+
 // FrameSize is what one cell costs on the wire once the link layer wraps it
 func FrameSize(p jcrypto.CryptoProvider) (int, error) {
 	probe, err := secmem.New(p.KeySize())
@@ -217,7 +222,19 @@ func (c *Conn) WriteCell(cell *wire.Cell) error {
 	return err
 }
 
+// padding is a property of this link only, so it never reaches the caller
 func (c *Conn) ReadCell(cell *wire.Cell) error {
+	for {
+		if err := c.readFrame(cell); err != nil {
+			return err
+		}
+		if !cell.IsPadding() {
+			return nil
+		}
+	}
+}
+
+func (c *Conn) readFrame(cell *wire.Cell) error {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
 	if _, err := io.ReadFull(c.raw, c.buf); err != nil {

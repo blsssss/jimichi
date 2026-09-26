@@ -158,3 +158,32 @@ func TestWrongStaticKeyFails(t *testing.T) {
 		t.Fatal("a client holding the wrong static key must not get through")
 	}
 }
+
+// padding costs a frame of the same size on the wire and never reaches the reader
+func TestPaddingIsDroppedByTheReceiver(t *testing.T) {
+	client, server, rec := pair(t, false)
+	p := c25519.New()
+	hs, _ := link.InitiatorHandshakeSize(p)
+	frame, _ := link.FrameSize(p)
+
+	go func() {
+		_ = client.WriteCell(wire.NewPadding())
+		_ = client.WriteCell(sample(7))
+		_ = client.WriteCell(wire.NewPadding())
+		_ = client.WriteCell(wire.NewPadding())
+		_ = client.WriteCell(sample(8))
+	}()
+	for _, want := range []uint64{7, 8} {
+		var got wire.Cell
+		if err := server.ReadCell(&got); err != nil {
+			t.Fatalf("ReadCell: %v", err)
+		}
+		h, err := got.Header()
+		if err != nil || h.Counter != want || h.Kind != wire.KindPayload {
+			t.Fatalf("got %+v, err %v, want payload %d", h, err, want)
+		}
+	}
+	if n := rec.seen.Len() - hs; n != 5*frame {
+		t.Fatalf("wire carried %d bytes after the handshake, want %d", n, 5*frame)
+	}
+}

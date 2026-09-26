@@ -9,6 +9,18 @@ working**. Everything else serves that answer.
 Every run is reproducible: the configuration, the generator seed, the code version and the time
 go into the report. Results live in artifacts/ and the figures are produced from those files.
 
+Real clients start at unrelated moments, so on the testbed each client's schedule gets a random
+phase drawn from the run's seed. Clients started back to back would tick almost in phase and hand
+the attack ties that a real network does not produce. The observation window also opens at a
+random moment relative to the schedules; otherwise the last client to start would tick in step with
+the windows.
+
+Seeds: each repeat's seed is derived from the series' base seed, and separate streams for client
+phases and for each flow's gaps are derived from it (splitmix64). Neighbouring repeats and flows
+share no random sequence. The phases of node clocks come from the node's own generator, not from
+the seed, as in a real deployment. Every report row records the configuration, the seeds, the code
+revision and the host load before and after the run.
+
 ## Adversary models
 
 The codes are used in every results table.
@@ -49,9 +61,9 @@ indistinguishability, not on the secrecy of the implementation.
 
 | Metric | Definition |
 |---|---|
-| Bandwidth multiplier | cells sent over cells carrying payload |
+| Bandwidth multiplier | frames on a link within the observation window over messages handed to the clients. Reported separately for the client-entry link and for the observed link between nodes, in each direction. The window opens when the flows start sending: circuit setup and anything sent before it are excluded. A frame on the window boundary is excluded |
 | Goodput | payload bytes per second per client |
-| Latency | median, 95th and 99th percentile of delivery |
+| Latency | median, 95th and 99th percentile. The testbed measures the round trip: from handing a message to the client to the exit's echo coming back, matched to its message by sequence number, not by order |
 | Cost per cell | nanoseconds of CPU and allocations to strip a layer |
 | Cost per session | nanoseconds to agree a key, per suite |
 
@@ -84,7 +96,7 @@ autocorrelation). The adversary trains on one sample and is evaluated on another
 |---|---|
 | Cover traffic | none, 0.5 of payload, 1.0, 2.0 |
 | Cell size | constant, variable with message length |
-| Node delay | none, uniform, exponential, batching by k cells |
+| Node delay | none, sending on the node's own clock, uniform, exponential, batching by k cells |
 | Concurrent flows | 2, 5, 10, 20 |
 | Primitive suite | GOST, X25519 |
 

@@ -136,15 +136,19 @@ func TestCoverCellsAreNotDelivered(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	accepted, forwarded, deliveredCount, _ := exit.r.Stats().Snapshot()
-	if accepted < 6 {
-		t.Fatalf("exit saw %d cells, want at least 6", accepted)
+	s := exit.r.Stats().Snapshot()
+	if s.Accepted < 6 {
+		t.Fatalf("exit saw %d cells, want at least 6", s.Accepted)
 	}
-	if forwarded != 0 {
-		t.Fatalf("exit forwarded %d cells", forwarded)
+	if s.Forwarded != 0 {
+		t.Fatalf("exit forwarded %d cells", s.Forwarded)
 	}
-	if deliveredCount < 6 {
-		t.Fatalf("exit opened %d cells, want at least 6", deliveredCount)
+	if s.Delivered < 6 {
+		t.Fatalf("exit opened %d cells, want at least 6", s.Delivered)
+	}
+	// without a period the node forwards at once and adds nothing of its own
+	if s.Padding != 0 {
+		t.Fatalf("unpaced exit sent %d padding frames", s.Padding)
 	}
 }
 
@@ -221,7 +225,7 @@ func TestRelayRejectsReplay(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	if _, _, _, dropped := entry.r.Stats().Snapshot(); dropped == 0 {
+	if entry.r.Stats().Snapshot().Dropped == 0 {
 		t.Fatal("entry did not count the replay as dropped")
 	}
 }
@@ -415,7 +419,246 @@ func TestDuplicateSetupIsRefused(t *testing.T) {
 	if n := dials.Load(); n != 1 {
 		t.Fatalf("entry dialled the next hop %d times", n)
 	}
-	if _, _, _, dropped := entry.r.Stats().Snapshot(); dropped == 0 {
+	if entry.r.Stats().Snapshot().Dropped == 0 {
 		t.Fatal("the repeated setup was not counted as dropped")
+	}
+}
+
+// with every node on its own clock the chain still carries messages both ways,
+// and the links between nodes stay busy while the client is silent
+func TestPacedChainDeliversAndReplies(t *testing.T) {
+	p := c25519.New()
+	period := 5 * time.Millisecond
+	delivered := make(chan []byte, 4)
+
+	exit := startRelay(t, p, relay.Config{Period: period, Deliver: func(_ uint64, payload []byte) []byte {
+		delivered <- append([]byte(nil), payload...)
+		return append([]byte("echo:"), payload...)
+	}})
+	middle := startRelay(t, p, relay.Config{Period: period})
+	entry := startRelay(t, p, relay.Config{Period: period})
+
+	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+
+	for i := 0; i < 3; i++ {
+		if err := cl.SendCover(); err != nil {
+			t.Fatalf("SendCover: %v", err)
+		}
+	}
+	if err := cl.Send([]byte("ping")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	select {
+	case got := <-delivered:
+		if string(got) != "ping" {
+			t.Fatalf("delivered %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("message never reached the exit")
+	}
+	select {
+	case reply := <-cl.Replies():
+		if string(reply) != "echo:ping" {
+			t.Fatalf("reply %q", reply)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no reply came back")
+	}
+
+	time.Sleep(10 * period)
+	for name, n := range map[string]*node{"entry": entry, "middle": middle, "exit": exit} {
+		if s := n.r.Stats().Snapshot(); s.Padding == 0 {
+			t.Fatalf("%s sent no padding while idle: %+v", name, s)
+		}
+	}
+	if s := exit.r.Stats().Snapshot(); s.Delivered < 4 {
+		t.Fatalf("exit opened %d cells, want 4", s.Delivered)
+	}
+}
+
+// a node sends nothing back on a link until the circuit is complete on its
+// side: a pacer started before extend would write to a peer that may never
+// read, and the failed setup would have to wait for it
+func TestPacedNodeIsSilentWhileExtending(t *testing.T) {
+	p := c25519.New()
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer silent.Close()
+	go func() {
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+		}
+	}()
+	_, silentPub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := startRelay(t, p, relay.Config{Period: 5 * time.Millisecond})
+
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{
+		{StaticPub: entry.pub, Link: 71, NextAddr: silent.Addr().String(), NextCircuit: 72},
+		{StaticPub: silentPub, Link: 72},
+	})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+
+	raw, err := net.Dial("tcp", entry.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer raw.Close()
+	conn, err := link.Dial(raw, p, entry.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if err := conn.WriteCell(setup.Cell); err != nil {
+		t.Fatalf("write setup: %v", err)
+	}
+
+	// 60 periods while the next hop never answers its handshake
+	_ = raw.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 1)
+	if n, err := raw.Read(buf); n > 0 || err == nil {
+		t.Fatal("the node wrote to the previous hop before its circuit was complete")
+	}
+}
+
+// the exit opened the cell whether or not its reply found room in the queue
+func TestExitCountsDeliveryWhenReplyIsDropped(t *testing.T) {
+	p := c25519.New()
+	exit := startRelay(t, p, relay.Config{
+		Period:     time.Hour,
+		QueueCells: 1,
+		Deliver:    func(_ uint64, payload []byte) []byte { return payload },
+	})
+	middle := startNode(t, p, nil)
+	entry := startNode(t, p, nil)
+
+	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+	for i := 0; i < 5; i++ {
+		if err := cl.Send([]byte("ping")); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for exit.r.Stats().Snapshot().Delivered < 5 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	s := exit.r.Stats().Snapshot()
+	// the first reply may already be on its way or waiting in the one slot
+	if s.Delivered != 5 || s.Dropped < 3 {
+		t.Fatalf("delivered %d, dropped %d; want 5 delivered and at least 3 replies dropped", s.Delivered, s.Dropped)
+	}
+}
+
+// a second circuit on a link that already carries one is refused even with a
+// fresh id: its pacer would double the frames on the link and count circuits
+func TestSecondCircuitOnOneLinkIsRefused(t *testing.T) {
+	p := c25519.New()
+	delivered := make(chan []byte, 4)
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+		delivered <- append([]byte(nil), payload...)
+		return nil
+	})
+	var dials atomic.Int32
+	entry := startRelay(t, p, relay.Config{Dial: func(network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		return net.Dial(network, addr)
+	}})
+
+	build := func(in, out uint64) (*wire.SetupResult, *wire.Circuit) {
+		setup, err := wire.BuildSetup(p, []wire.SetupHop{
+			{StaticPub: entry.pub, Link: in, NextAddr: exit.addr, NextCircuit: out},
+			{StaticPub: exit.pub, Link: out},
+		})
+		if err != nil {
+			t.Fatalf("BuildSetup: %v", err)
+		}
+		t.Cleanup(func() {
+			for _, k := range setup.CellKeys {
+				k.Release()
+			}
+		})
+		c, err := wire.NewCircuit(p, setup.CellKeys, []uint64{in, out})
+		if err != nil {
+			t.Fatalf("NewCircuit: %v", err)
+		}
+		t.Cleanup(c.Close)
+		return setup, c
+	}
+	first, circuit := build(31, 42)
+	second, _ := build(51, 62)
+
+	raw, err := net.Dial("tcp", entry.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn, err := link.Dial(raw, p, entry.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	defer conn.Close()
+	for _, s := range []*wire.SetupResult{first, second} {
+		if err := conn.WriteCell(s.Cell); err != nil {
+			t.Fatalf("write setup: %v", err)
+		}
+	}
+	cell, err := circuit.Seal(wire.KindPayload, 0, []byte("first only"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := conn.WriteCell(cell); err != nil {
+		t.Fatalf("write cell: %v", err)
+	}
+
+	select {
+	case got := <-delivered:
+		if string(got) != "first only" {
+			t.Fatalf("delivered %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the first circuit stopped working")
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("entry dialled the next hop %d times, want 1", n)
+	}
+	if entry.r.Stats().Snapshot().Dropped == 0 {
+		t.Fatal("the second setup was not counted as dropped")
+	}
+}
+
+func TestQueueSizeIsBounded(t *testing.T) {
+	p := c25519.New()
+	priv, _, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer priv.Release()
+	for _, n := range []int{-1, 4097} {
+		if _, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, QueueCells: n}); err == nil {
+			t.Fatalf("relay.New accepted a queue of %d cells", n)
+		}
 	}
 }

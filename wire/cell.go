@@ -26,6 +26,8 @@ const (
 	KindPayload Kind = 1
 	KindCover   Kind = 2 // carries nothing, exists to hide when payload flows
 	KindControl Kind = 3
+	// never enters a circuit: the receiving end of a link drops it
+	KindPadding Kind = 4
 )
 
 func (k Kind) String() string {
@@ -36,13 +38,15 @@ func (k Kind) String() string {
 		return "cover"
 	case KindControl:
 		return "control"
+	case KindPadding:
+		return "padding"
 	default:
 		return "unknown"
 	}
 }
 
 func (k Kind) valid() bool {
-	return k == KindPayload || k == KindCover || k == KindControl
+	return k == KindPayload || k == KindCover || k == KindControl || k == KindPadding
 }
 
 var (
@@ -99,6 +103,17 @@ func (c *Cell) Header() (Header, error) {
 }
 
 func (c *Cell) Body() []byte { return c[headerSize:] }
+
+// the body stays zero: the link encryption alone makes the frame look like any
+// other on the wire, and the neighbour reads the kind and drops it anyway
+func NewPadding() *Cell {
+	var c Cell
+	c[0] = Version
+	c[1] = byte(KindPadding)
+	return &c
+}
+
+func (c *Cell) IsPadding() bool { return c[0] == Version && Kind(c[1]) == KindPadding }
 
 // authenticated fields are the ones that stay the same end to end, plus the hop
 // index; the circuit identifier is excluded because every link rewrites it
