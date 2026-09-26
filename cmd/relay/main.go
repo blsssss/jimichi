@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/blsssss/jimichi/crypto/c25519"
 	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/blsssss/jimichi/crypto/suite"
 	"github.com/blsssss/jimichi/relay"
 )
 
@@ -24,6 +24,7 @@ func main() {
 	statsAddr := flag.String("stats", "127.0.0.1:9101", "loopback address for the counters")
 	logEvery := flag.Duration("log-every", time.Minute, "print aggregated counters to stdout this often; 0 disables")
 	harden := flag.Bool("harden", true, "disable core dumps and ptrace access for the process")
+	suiteName := flag.String("suite", suite.Default.String(), "primitive suite: gost or c25519")
 	keymem := flag.String("keymem", "all", "key memory measures: all, none, or a list of offheap, lock, dontdump, zero")
 	echo := flag.Bool("echo", true, "as an exit, send the payload back along the circuit")
 	period := flag.Duration("period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
@@ -50,7 +51,14 @@ func main() {
 		}
 	}
 
-	provider := c25519.New()
+	chosen, err := suite.Parse(*suiteName)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	provider, err := suite.New(chosen)
+	if err != nil {
+		logger.Fatal(err)
+	}
 	staticPriv, staticPub, err := provider.GenerateEphemeral()
 	if err != nil {
 		logger.Fatalf("static key: %v", err)
@@ -86,14 +94,14 @@ func main() {
 	}
 	defer ln.Close()
 
-	go serveInfo(*info, staticPub, logger)
+	go serveInfo(*info, staticPub, chosen.String(), logger)
 	go serveStats(*statsAddr, r, logger)
 	if *logEvery > 0 {
 		go logCounters(r, *logEvery, logger)
 	}
 
-	logger.Printf("relay listening on %s, info on %s, keymem=%s, locked=%v, harden=%v, period=%v",
-		*listen, *info, policy, staticPriv.Locked(), *harden, *period)
+	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v",
+		*listen, *info, chosen, policy, staticPriv.Locked(), *harden, *period)
 	go func() {
 		if err := r.Serve(ln); err != nil {
 			logger.Printf("serve: %v", err)
@@ -121,13 +129,13 @@ func checkMemlock() error {
 	return nil
 }
 
-func serveInfo(addr string, pub []byte, logger *log.Logger) {
+func serveInfo(addr string, pub []byte, suiteName string, logger *log.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/key", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]string{"pub": base64.StdEncoding.EncodeToString(pub)})
+		writeJSON(w, map[string]string{"pub": base64.StdEncoding.EncodeToString(pub), "suite": suiteName})
 	})
 	serve(addr, mux, logger)
 }

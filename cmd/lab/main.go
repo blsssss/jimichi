@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/blsssss/jimichi/client"
+	"github.com/blsssss/jimichi/crypto/suite"
 	"github.com/blsssss/jimichi/lab"
 	"github.com/blsssss/jimichi/lab/metrics"
 )
@@ -138,6 +139,7 @@ func main() {
 	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks")
 	rev := flag.String("rev", "unknown", "code revision recorded in every row")
 	seed := flag.Int64("seed", 1, "base seed; every repeat derives its own from it")
+	suiteName := flag.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
 	flag.Parse()
 
 	if *flows < 2 || *hops < 2 {
@@ -148,6 +150,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning: no -rev given, rows cannot be traced to a revision")
 	}
 
+	chosen, err := suite.Parse(*suiteName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	bins, err := parseBins(*binList)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bins: %v\n", err)
@@ -169,6 +176,7 @@ func main() {
 			cfg.Duration = *duration
 			cfg.SendEvery = *send
 			cfg.Seed = lab.Derive(*seed, uint64(r))
+			cfg.Suite = chosen
 
 			before := loadavg()
 			run, err := lab.Execute(cfg)
@@ -217,6 +225,7 @@ func main() {
 // runs of one configuration at one window, reduced to the median and the range
 // across repeats; the rows stay in the report for anything finer
 type summary struct {
+	Suite          string  `json:"suite"`
 	Traffic        string  `json:"traffic"`
 	Bin            string  `json:"bin"`
 	Runs           int     `json:"runs"`
@@ -259,7 +268,7 @@ func summarise(rows []result) []summary {
 			}
 		}
 		out = append(out, summary{
-			Traffic: k.traffic, Bin: k.bin, Runs: len(g),
+			Suite: g[0].Suite, Traffic: k.traffic, Bin: k.bin, Runs: len(g),
 			AUC: metrics.Median(auc), AUCMin: slices.Min(auc), AUCMax: slices.Max(auc),
 			TopOne: metrics.Median(top), Multiplier: metrics.Median(mult), RelayMult: metrics.Median(relay),
 			LatencyP50Ms: metrics.Median(p50), DegenerateRuns: degenerate,
@@ -269,6 +278,9 @@ func summarise(rows []result) []summary {
 }
 
 func printSummary(sum []summary) {
+	if len(sum) > 0 {
+		fmt.Printf("\nsuite %s", sum[0].Suite)
+	}
 	fmt.Printf("\n%-11s %6s %4s %20s %6s %8s %8s %10s %4s\n",
 		"traffic", "bin", "runs", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
 	for _, s := range sum {
@@ -346,7 +358,7 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		Traffic:     traffic,
 		Bin:         bin.String(),
 		Seed:        cfg.Seed,
-		Suite:       "c25519",
+		Suite:       cfg.Suite.String(),
 		Mode:        modeName(cfg.Mode),
 		Rate:        cfg.Rate.String(),
 		CoverEvery:  cfg.CoverEvery.String(),

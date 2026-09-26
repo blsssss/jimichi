@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/blsssss/jimichi/client"
-	"github.com/blsssss/jimichi/crypto/c25519"
 	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/blsssss/jimichi/crypto/suite"
 )
 
 func main() {
@@ -27,6 +27,7 @@ func main() {
 	mode := flag.String("mode", "immediate", "immediate or fixed: fixed sends one cell per tick and a payload takes a cover slot")
 	rate := flag.Duration("rate", 200*time.Millisecond, "cell period in fixed mode")
 	jitter := flag.Duration("jitter", 0, "random delay added before each cell")
+	suiteName := flag.String("suite", suite.Default.String(), "primitive suite: gost or c25519, must match the nodes")
 	harden := flag.Bool("harden", true, "disable core dumps and ptrace access for the process")
 	keymem := flag.String("keymem", "all", "key memory measures: all, none, or a list of offheap, lock, dontdump, zero")
 	flag.Parse()
@@ -64,12 +65,22 @@ func main() {
 		logger.Fatal("no nodes given")
 	}
 
-	provider := c25519.New()
+	chosen, err := suite.Parse(*suiteName)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	provider, err := suite.New(chosen)
+	if err != nil {
+		logger.Fatal(err)
+	}
 	chain := make([]client.Node, 0, len(addrs))
 	for _, addr := range addrs {
-		pub, err := fetchKey(addr, *infoPort)
+		pub, nodeSuite, err := fetchKey(addr, *infoPort)
 		if err != nil {
 			logger.Fatalf("key of %s: %v", addr, err)
+		}
+		if nodeSuite != chosen.String() {
+			logger.Fatalf("%s runs suite %q, this client %q", addr, nodeSuite, chosen)
 		}
 		chain = append(chain, client.Node{Addr: addr, StaticPub: pub})
 	}
@@ -133,10 +144,10 @@ func splitList(s string) []string {
 
 // a node publishes only its public key, so fetching it over plain http leaks
 // nothing an observer could not derive from the directory anyway
-func fetchKey(addr, infoPort string) ([]byte, error) {
+func fetchKey(addr, infoPort string) (pub []byte, suiteName string, err error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	url := fmt.Sprintf("http://%s/key", net.JoinHostPort(host, infoPort))
 
@@ -149,14 +160,16 @@ func fetchKey(addr, infoPort string) ([]byte, error) {
 			continue
 		}
 		var body struct {
-			Pub string `json:"pub"`
+			Pub   string `json:"pub"`
+			Suite string `json:"suite"`
 		}
 		err = json.NewDecoder(resp.Body).Decode(&body)
 		resp.Body.Close()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return base64.StdEncoding.DecodeString(body.Pub)
+		pub, err := base64.StdEncoding.DecodeString(body.Pub)
+		return pub, body.Suite, err
 	}
-	return nil, lastErr
+	return nil, "", lastErr
 }

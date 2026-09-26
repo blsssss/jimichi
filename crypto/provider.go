@@ -57,7 +57,8 @@ type CryptoProvider interface {
 }
 
 // nonce management belongs to the caller: wire assigns one per cell and never
-// reuses it under the same key
+// reuses it under the same key. An AEAD must be safe for concurrent use: a
+// relay opens forward and seals backward cells under one hop key at once
 type AEAD interface {
 	NonceSize() int
 	Overhead() int
