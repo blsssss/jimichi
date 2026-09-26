@@ -75,6 +75,7 @@ type AEAD interface {
 |---|---|
 | -keymem all | все меры, по умолчанию |
 | -keymem none | базовая сборка: ключи на куче Go, без блокировки, без запрета дампов, без зануления |
+| -keymem offheap,lock,dontdump | всё, кроме зануления: вклад зануления в дамп процесса виден только с ключами на куче (none против zero), страницы вне кучи после munmap процессу уже не видны |
 | -keymem offheap,lock,dontdump,zero | любое подмножество; lock и dontdump требуют offheap |
 | -harden | prctl(PR_SET_DUMPABLE, 0) и RLIMIT_CORE=0 для процесса |
 

@@ -78,6 +78,7 @@ Decisions taken:
 |---|---|
 | -keymem all | every measure, the default |
 | -keymem none | baseline build: keys on the Go heap, no locking, no dump exclusion, no zeroing |
+| -keymem offheap,lock,dontdump | everything but zeroing: zeroing's effect on a process dump shows only with keys on the heap (none against zero), since off-heap pages are gone from the process after munmap |
 | -keymem offheap,lock,dontdump,zero | any subset; lock and dontdump need offheap |
 | -harden | prctl(PR_SET_DUMPABLE, 0) and RLIMIT_CORE=0 for the process |
 

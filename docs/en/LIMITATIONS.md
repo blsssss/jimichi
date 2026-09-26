@@ -23,6 +23,9 @@ English | [Русский](../ru/LIMITATIONS.md)
 - Every circuit runs over a connection of its own, and a second setup on a link that already
   carries a circuit is dropped. Otherwise a second timer on the same link would double its frame
   rate and give away the number of circuits.
+- Without own-clock sending the exit's reply leaves after the message is delivered, and at once for
+  a cover cell. The delivery time enters the moment of the reply; on the testbed delivery is an
+  echo taking microseconds, a real recipient would make it noticeable.
 - The circuit setup cell leaves at once, not on the node's clock. Together with the TCP connection
   opening it marks the start of the circuit on every link, which is the same signal as the moment
   the connection opens.

@@ -128,7 +128,8 @@ and each relay keeps its own replay window per direction.
 
 The exit answers every data cell with exactly one backward cell: a message with its reply, a cover
 cell with a cover reply. Replies to messages only would show every node on the way back, by their
-number and timing, which cells were real.
+number and timing, which cells were real. The count is the same in every mode; the timing matches
+only when the delivery at the exit takes constant time or the nodes send on their own clocks.
 
 ## Circuit setup
 

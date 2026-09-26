@@ -837,3 +837,68 @@ func TestForgedFarCounterDoesNotBlockTheCircuit(t *testing.T) {
 		t.Fatal("a forged far counter pushed the genuine cell out of the window")
 	}
 }
+
+// the same at a relay that forwards: the middle peels before it commits, so a
+// forged far counter on its inbound link must not stall the circuit either
+func TestForgedFarCounterAtAForwardingRelay(t *testing.T) {
+	p := c25519.New()
+	delivered := make(chan []byte, 4)
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+		delivered <- append([]byte(nil), payload...)
+		return nil
+	})
+	entry := startNode(t, p, nil)
+	links := []uint64{91, 92}
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{
+		{StaticPub: entry.pub, Link: links[0], NextAddr: exit.addr, NextCircuit: links[1]},
+		{StaticPub: exit.pub, Link: links[1]},
+	})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, links)
+	if err != nil {
+		t.Fatalf("NewCircuit: %v", err)
+	}
+	defer circuit.Close()
+
+	raw, err := net.Dial("tcp", entry.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn, err := link.Dial(raw, p, entry.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteCell(setup.Cell); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	forged, err := wire.NewCell(wire.Header{Kind: wire.KindData, Circuit: links[0], Counter: 1 << 40}, make([]byte, wire.BodySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteCell(forged); err != nil {
+		t.Fatalf("forged: %v", err)
+	}
+	genuine, err := circuit.Seal(1, []byte("through the middle"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := conn.WriteCell(genuine); err != nil {
+		t.Fatalf("genuine: %v", err)
+	}
+	select {
+	case got := <-delivered:
+		if string(got) != "through the middle" {
+			t.Fatalf("delivered %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a forged far counter at the entry pushed the genuine cell out of its window")
+	}
+}
