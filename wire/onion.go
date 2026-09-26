@@ -151,8 +151,8 @@ type Hop struct {
 // index must match the position the client used, or the associated data will
 // not verify
 func NewHop(p jcrypto.CryptoProvider, key *secmem.Buffer, index int) (*Hop, error) {
-	if index < 0 {
-		return nil, fmt.Errorf("wire: negative hop index")
+	if index < 0 || index >= MaxHops {
+		return nil, fmt.Errorf("wire: hop index %d outside 0..%d", index, MaxHops-1)
 	}
 	a, err := p.NewAEAD(key)
 	if err != nil {
@@ -246,11 +246,21 @@ func unframe(inner []byte) (payload []byte, cover bool, err error) {
 // exit builds the first backward layer; the reply travels the chain in reverse,
 // every relay adding its own layer instead of stripping one
 func (h *Hop) SealReply(inboundCircuit, counter uint64, payload []byte) (*Cell, error) {
+	return h.sealReply(inboundCircuit, counter, payload, false)
+}
+
+// the exit answers every data cell, cover included, so the replies a node sees
+// on the way back say nothing about which cells carried a message
+func (h *Hop) SealCoverReply(inboundCircuit, counter uint64) (*Cell, error) {
+	return h.sealReply(inboundCircuit, counter, nil, true)
+}
+
+func (h *Hop) sealReply(inboundCircuit, counter uint64, payload []byte, cover bool) (*Cell, error) {
 	if h.aead == nil {
 		return nil, fmt.Errorf("wire: hop closed")
 	}
 	inner := make([]byte, layerLen(h.index, h.overhead)-h.overhead)
-	if err := frame(inner, payload, false); err != nil {
+	if err := frame(inner, payload, cover); err != nil {
 		return nil, err
 	}
 

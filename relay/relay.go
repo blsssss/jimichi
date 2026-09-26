@@ -268,12 +268,13 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 			return errReplay
 		}
 		r.stats.add(&r.stats.Delivered)
+		var reply []byte
 		if !cover && r.cfg.Deliver != nil {
-			if reply := r.cfg.Deliver(c.inbound, payload); reply != nil {
-				return r.reply(c, reply)
-			}
+			reply = r.cfg.Deliver(c.inbound, payload)
 		}
-		return nil
+		// one backward cell for every data cell, cover for cover: replies only to
+		// messages would show every node on the way back which cells were real
+		return r.reply(c, reply)
 	}
 
 	out, err := c.hop.Peel(cell, wire.Forward)
@@ -297,13 +298,20 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	return nil
 }
 
+// a nil payload goes back as cover
 func (r *Relay) reply(c *circuit, payload []byte) error {
 	c.writeMu.Lock()
 	counter := c.replies
 	c.replies++
 	c.writeMu.Unlock()
 
-	cell, err := c.hop.SealReply(c.inbound, counter, payload)
+	var cell *wire.Cell
+	var err error
+	if payload == nil {
+		cell, err = c.hop.SealCoverReply(c.inbound, counter)
+	} else {
+		cell, err = c.hop.SealReply(c.inbound, counter, payload)
+	}
 	if err != nil {
 		return err
 	}
@@ -393,7 +401,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	hop, err := wire.NewHop(r.cfg.Provider, layer.CellKey, index)
 	layer.CellKey.Release()
 	if err != nil {
-		return err
+		return r.setupFailed(from, err)
 	}
 
 	c := &circuit{
@@ -419,7 +427,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	if _, taken := r.circuits[hdr.Circuit]; taken {
 		r.mu.Unlock()
 		hop.Close()
-		return errDuplicate
+		return r.setupFailed(from, errDuplicate)
 	}
 	if _, taken := r.owners[from]; taken {
 		r.mu.Unlock()

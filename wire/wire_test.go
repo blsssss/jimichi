@@ -244,7 +244,7 @@ func TestCircuitIDIsPerLink(t *testing.T) {
 }
 
 func TestReplayWindow(t *testing.T) {
-	w := wire.NewReplayWindow(8)
+	w := wire.NewReplayWindow(64)
 
 	if !w.Accept(100) {
 		t.Fatal("first counter must be accepted")

@@ -45,6 +45,7 @@ type AEAD interface {
 	Overhead() int
 	Seal(dst, nonce, plaintext, ad []byte) []byte
 	Open(dst, nonce, ciphertext, ad []byte) ([]byte, error)
+	// Destroy drops the cipher; whether its key copy is wiped depends on the library.
 	Destroy()
 }
 ```
@@ -99,7 +100,7 @@ some of them live long:
 | x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct | the whole life of the circuit or link, never wiped |
 | crypto/ecdh | the X25519 scalar, the node's long-term key included, and the shared secret | until the freed heap memory is reused |
 | x/crypto hkdf, crypto/hmac | the PRK, the HMAC pads (key XOR a constant), the last derived block | until the heap memory is reused |
-| Ed25519 signing | the SHA-512 state with the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused |
+| Ed25519 signing | the SHA-512 state with the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; signing always wipes its own scalars and digests, -keymem none included |
 
 The Go heap does not move objects, but freed memory is not wiped, and goroutine stacks are copied
 when they grow. Locking and dump exclusion do not reach these copies. Measuring how many copies

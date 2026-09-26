@@ -33,7 +33,8 @@ client-a -> relay-1 -> relay-2 -> relay-3 -> client-b
 3. The client wraps the message in three layers: the outer one for relay-1, the inner one for
    relay-3.
 4. Each node strips exactly its own layer and learns only the next hop.
-5. Session keys live until the circuit is torn down and are then zeroed.
+5. Session keys live until the circuit is torn down, and their buffers are then zeroed. Copies the
+   libraries keep are described in CRYPTO.
 
 ## Cell format
 
@@ -125,6 +126,10 @@ client adds its own, and only the client strips them all. The direction enters t
 forward and a backward cell never share one under the same key. The backward counter is separate,
 and each relay keeps its own replay window per direction.
 
+The exit answers every data cell with exactly one backward cell: a message with its reply, a cover
+cell with a cover reply. Replies to messages only would show every node on the way back, by their
+number and timing, which cells were real.
+
 ## Circuit setup
 
 Setup takes one control cell of the same 512 bytes, with no extra round trips.
@@ -157,8 +162,8 @@ Circuit teardown:
 - Every node has a long-term signing pair and a certificate from the testbed CA.
 - The CA is run by lab, lives outside the cluster and exists only for the testbed.
 - The client checks the node's signature during key agreement. A compromised CA does not expose
-  the content of past sessions: layers are encrypted with ephemeral keys and the client picks the
-  chain.
+  the content of past sessions: the CA key takes no part in the layer agreement, and the client
+  picks the chain.
 
 ## What is recorded during measurements
 

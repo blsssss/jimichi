@@ -73,7 +73,7 @@ indistinguishability, not on the secrecy of the implementation.
 |---|---|
 | Extraction success rate | in what fraction of N attempts the key is found in a dump |
 | Key lifetime window | time from the end of a session until the key no longer appears in memory |
-| Decrypted fraction after a long-term key theft | forward secrecy check, zero expected |
+| Decrypted fraction after a long-term key theft | forward secrecy check: zero for a wire capture (links run on ephemeral keys); for a neighbour that kept the setup cells, the node's layers are expected to open for the time it ran |
 
 ### Client container
 

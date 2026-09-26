@@ -1,6 +1,7 @@
 package wire_test
 
 import (
+	"encoding/binary"
 	"strings"
 	"sync"
 	"testing"
@@ -157,5 +158,25 @@ func TestBuildSetupKeepsOnlyCellKeys(t *testing.T) {
 	}
 	if n := tp.live(setup.CellKeys...); n != 0 {
 		t.Fatalf("%d key buffers still held besides the cell keys, want 0", n)
+	}
+}
+
+// the hop index rides in the counter field; a hostile client must not reach the
+// slice arithmetic with a value that no chain could have
+func TestOpenSetupRefusesAnImpossibleHopIndex(t *testing.T) {
+	privs, pubs := staticKeys(t, provider(), hops)
+	setup, err := wire.BuildSetup(provider(), chainTo(pubs))
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	for _, k := range setup.CellKeys {
+		t.Cleanup(k.Release)
+	}
+	for _, counter := range []uint64{wire.MaxHops, 1 << 40, 1 << 63, ^uint64(0)} {
+		cell := *setup.Cell
+		binary.BigEndian.PutUint64(cell[10:18], counter)
+		if _, err := wire.OpenSetup(provider(), privs[0], &cell); err == nil {
+			t.Fatalf("OpenSetup accepted hop index %d", counter)
+		}
 	}
 }

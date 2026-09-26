@@ -26,6 +26,10 @@ English | [Русский](../ru/LIMITATIONS.md)
 - The circuit setup cell leaves at once, not on the node's clock. Together with the TCP connection
   opening it marks the start of the circuit on every link, which is the same signal as the moment
   the connection opens.
+- The circuit layers have no forward secrecy against a neighbour: the node key lives until the node
+  restarts and takes part in the layer agreement. A neighbour that kept the setup cells can, once
+  the key is stolen, open that node's layers for the time it ran. A wire capture cannot be read
+  without the links' ephemeral keys.
 - The cell format uses constant size and replay protection but is not full Sphinx: beyond the
   constant size there is no processing that hides the position of a node in the chain.
 - Each circuit opens its own TCP connections between nodes and closes them in a cascade when it
