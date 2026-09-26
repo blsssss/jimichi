@@ -11,7 +11,9 @@ go into the report. Results live in artifacts/ and the figures are produced from
 
 Real clients start at unrelated moments, so on the testbed each client's schedule gets a random
 phase drawn from the run's seed. Clients started back to back would tick almost in phase and hand
-the attack ties that a real network does not produce.
+the attack ties that a real network does not produce. The observation window also opens at a
+random moment relative to the schedules; otherwise the last client to start would tick in step with
+the windows.
 
 Seeds: each repeat's seed is derived from the series' base seed, and separate streams for client
 phases and for each flow's gaps are derived from it (splitmix64). Neighbouring repeats and flows

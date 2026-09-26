@@ -203,6 +203,11 @@ func Execute(cfg Config) (*Run, error) {
 	}
 
 	latency := newLatency(clients)
+	// the last client started its schedule a moment ago, so a window opening
+	// now would sit in phase with it and not with the others
+	if schedule > 0 {
+		time.Sleep(time.Duration(phases.Int63n(int64(schedule))))
+	}
 	origin := time.Since(start)
 	sent := runFlows(cfg, clients, latency)
 
