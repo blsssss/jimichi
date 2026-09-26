@@ -44,7 +44,7 @@ func BenchmarkSeal(b *testing.B) {
 	b.SetBytes(wire.CellSize)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := c.Seal(wire.KindPayload, uint64(i), payload); err != nil {
+		if _, err := c.Seal(uint64(i), payload); err != nil {
 			b.Fatalf("Seal: %v", err)
 		}
 	}
@@ -69,7 +69,7 @@ func BenchmarkPeel(b *testing.B) {
 	cells := make([]*wire.Cell, 256)
 	payload := bytes.Repeat([]byte("x"), 128)
 	for i := range cells {
-		cell, err := c.Seal(wire.KindPayload, uint64(i), payload)
+		cell, err := c.Seal(uint64(i), payload)
 		if err != nil {
 			b.Fatalf("Seal: %v", err)
 		}

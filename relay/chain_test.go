@@ -198,7 +198,7 @@ func TestRelayRejectsReplay(t *testing.T) {
 		t.Fatalf("write setup: %v", err)
 	}
 
-	cell, err := circuit.Seal(wire.KindPayload, 1, []byte("once"))
+	cell, err := circuit.Seal(1, []byte("once"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestDuplicateSetupIsRefused(t *testing.T) {
 			t.Fatalf("write setup: %v", err)
 		}
 	}
-	cell, err := circuit.Seal(wire.KindPayload, 0, []byte("still here"))
+	cell, err := circuit.Seal(0, []byte("still here"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -625,7 +625,7 @@ func TestSecondCircuitOnOneLinkIsRefused(t *testing.T) {
 			t.Fatalf("write setup: %v", err)
 		}
 	}
-	cell, err := circuit.Seal(wire.KindPayload, 0, []byte("first only"))
+	cell, err := circuit.Seal(0, []byte("first only"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}

@@ -256,12 +256,12 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	}
 
 	if c.isExit {
-		payload, err := c.hop.OpenLast(cell, wire.Forward)
+		payload, cover, err := c.hop.OpenLast(cell, wire.Forward)
 		if err != nil {
 			return err
 		}
 		r.stats.add(&r.stats.Delivered)
-		if hdr.Kind == wire.KindPayload && r.cfg.Deliver != nil {
+		if !cover && r.cfg.Deliver != nil {
 			if reply := r.cfg.Deliver(c.inbound, payload); reply != nil {
 				return r.reply(c, reply)
 			}

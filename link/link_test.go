@@ -61,7 +61,7 @@ func pair(t *testing.T, authenticate bool) (*link.Conn, *link.Conn, *recorder) {
 
 func sample(counter uint64) *wire.Cell {
 	body := bytes.Repeat([]byte{0x5A}, wire.BodySize)
-	c, _ := wire.NewCell(wire.Header{Kind: wire.KindPayload, Circuit: 0xCAFE, Counter: counter}, body)
+	c, _ := wire.NewCell(wire.Header{Kind: wire.KindData, Circuit: 0xCAFE, Counter: counter}, body)
 	return c
 }
 
@@ -179,7 +179,7 @@ func TestPaddingIsDroppedByTheReceiver(t *testing.T) {
 			t.Fatalf("ReadCell: %v", err)
 		}
 		h, err := got.Header()
-		if err != nil || h.Counter != want || h.Kind != wire.KindPayload {
+		if err != nil || h.Counter != want || h.Kind != wire.KindData {
 			t.Fatalf("got %+v, err %v, want payload %d", h, err, want)
 		}
 	}

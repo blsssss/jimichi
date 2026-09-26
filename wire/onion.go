@@ -10,7 +10,11 @@ import (
 	"github.com/blsssss/jimichi/crypto/secmem"
 )
 
-const lengthPrefix = 2
+const (
+	lengthPrefix = 2
+	// the top bit of the length marks cover; no payload comes near 32 KiB
+	coverFlag = 0x8000
+)
 
 // client side of a chain: one AEAD per hop, ordered from the first hop to the
 // exit
@@ -65,14 +69,19 @@ func (c *Circuit) Close() {
 	c.hops = nil
 }
 
-// a cover cell is built the same way with an empty payload, so the two are
-// indistinguishable once encrypted
-func (c *Circuit) Seal(kind Kind, counter uint64, payload []byte) (*Cell, error) {
+func (c *Circuit) Seal(counter uint64, payload []byte) (*Cell, error) {
+	return c.seal(counter, payload, false)
+}
+
+// a cover cell goes through the same layers with the same header, so no relay
+// on the way can tell it from a payload cell; only the exit reads the flag
+func (c *Circuit) SealCover(counter uint64) (*Cell, error) {
+	return c.seal(counter, nil, true)
+}
+
+func (c *Circuit) seal(counter uint64, payload []byte, cover bool) (*Cell, error) {
 	if len(c.hops) == 0 {
 		return nil, fmt.Errorf("wire: circuit closed")
-	}
-	if kind != KindPayload && kind != KindCover {
-		return nil, ErrKind
 	}
 	if len(payload) > c.MaxPayload() {
 		return nil, fmt.Errorf("%w: %d > %d", ErrPayloadSize, len(payload), c.MaxPayload())
@@ -81,13 +90,11 @@ func (c *Circuit) Seal(kind Kind, counter uint64, payload []byte) (*Cell, error)
 	// random padding to the full width the layers leave, so the wire length
 	// never depends on the message
 	inner := make([]byte, BodySize-len(c.hops)*c.overhead)
-	binary.BigEndian.PutUint16(inner[:lengthPrefix], uint16(len(payload)))
-	copy(inner[lengthPrefix:], payload)
-	if _, err := io.ReadFull(rand.Reader, inner[lengthPrefix+len(payload):]); err != nil {
-		return nil, fmt.Errorf("wire: pad: %w", err)
+	if err := frame(inner, payload, cover); err != nil {
+		return nil, err
 	}
 
-	cell, err := NewCell(Header{Kind: kind, Circuit: c.links[0], Counter: counter}, make([]byte, BodySize))
+	cell, err := NewCell(Header{Kind: KindData, Circuit: c.links[0], Counter: counter}, make([]byte, BodySize))
 	if err != nil {
 		return nil, err
 	}
@@ -109,20 +116,20 @@ func (c *Circuit) Seal(kind Kind, counter uint64, payload []byte) (*Cell, error)
 }
 
 // strips every layer at once, for the client side of the return path
-func (c *Circuit) OpenExit(cell *Cell, dir Direction) ([]byte, error) {
+func (c *Circuit) OpenExit(cell *Cell, dir Direction) (payload []byte, cover bool, err error) {
 	h, err := cell.Header()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	body := append([]byte(nil), cell.Body()...)
 	for i := 0; i < len(c.hops); i++ {
 		nonce, err := nonceFor(c.hops[i].NonceSize(), dir, c.links[i], h.Counter)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		body, err = c.hops[i].Open(nil, nonce, body[:layerLen(i, c.overhead)], cell.aad(i))
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	return unframe(body)
@@ -192,27 +199,48 @@ func (h *Hop) Peel(cell *Cell, dir Direction) (*Cell, error) {
 	return NewCell(hdr, body)
 }
 
-func (h *Hop) OpenLast(cell *Cell, dir Direction) ([]byte, error) {
+// cover tells the exit the cell carried nothing; no earlier hop could see that
+func (h *Hop) OpenLast(cell *Cell, dir Direction) (payload []byte, cover bool, err error) {
 	peeled, err := h.Peel(cell, dir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// the refill bytes at the tail are not plaintext: the length prefix says
 	// where the real data ends
 	return unframe(peeled.Body())
 }
 
-func unframe(inner []byte) ([]byte, error) {
-	if len(inner) < lengthPrefix {
-		return nil, ErrFraming
+// length prefix, data, random fill up to the width the layers leave, so the
+// wire length never depends on the message
+func frame(inner, payload []byte, cover bool) error {
+	if len(payload)+lengthPrefix > len(inner) || len(payload) >= coverFlag {
+		return fmt.Errorf("%w: %d > %d", ErrPayloadSize, len(payload), len(inner)-lengthPrefix)
 	}
-	n := int(binary.BigEndian.Uint16(inner[:lengthPrefix]))
-	if n > len(inner)-lengthPrefix {
-		return nil, fmt.Errorf("%w: length %d", ErrFraming, n)
+	n := uint16(len(payload))
+	if cover {
+		n |= coverFlag
+	}
+	binary.BigEndian.PutUint16(inner[:lengthPrefix], n)
+	copy(inner[lengthPrefix:], payload)
+	if _, err := io.ReadFull(rand.Reader, inner[lengthPrefix+len(payload):]); err != nil {
+		return fmt.Errorf("wire: pad: %w", err)
+	}
+	return nil
+}
+
+func unframe(inner []byte) (payload []byte, cover bool, err error) {
+	if len(inner) < lengthPrefix {
+		return nil, false, ErrFraming
+	}
+	v := binary.BigEndian.Uint16(inner[:lengthPrefix])
+	cover = v&coverFlag != 0
+	n := int(v &^ coverFlag)
+	if n > len(inner)-lengthPrefix || (cover && n != 0) {
+		return nil, false, fmt.Errorf("%w: length %d", ErrFraming, n)
 	}
 	out := make([]byte, n)
 	copy(out, inner[lengthPrefix:lengthPrefix+n])
-	return out, nil
+	return out, cover, nil
 }
 
 // exit builds the first backward layer; the reply travels the chain in reverse,
@@ -222,16 +250,11 @@ func (h *Hop) SealReply(inboundCircuit, counter uint64, payload []byte) (*Cell, 
 		return nil, fmt.Errorf("wire: hop closed")
 	}
 	inner := make([]byte, layerLen(h.index, h.overhead)-h.overhead)
-	if len(payload)+lengthPrefix > len(inner) {
-		return nil, fmt.Errorf("%w: %d > %d", ErrPayloadSize, len(payload), len(inner)-lengthPrefix)
-	}
-	binary.BigEndian.PutUint16(inner[:lengthPrefix], uint16(len(payload)))
-	copy(inner[lengthPrefix:], payload)
-	if _, err := io.ReadFull(rand.Reader, inner[lengthPrefix+len(payload):]); err != nil {
+	if err := frame(inner, payload, false); err != nil {
 		return nil, err
 	}
 
-	cell, err := NewCell(Header{Kind: KindPayload, Circuit: inboundCircuit, Counter: counter}, make([]byte, BodySize))
+	cell, err := NewCell(Header{Kind: KindData, Circuit: inboundCircuit, Counter: counter}, make([]byte, BodySize))
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +269,7 @@ func (h *Hop) SealReply(inboundCircuit, counter uint64, payload []byte) (*Cell, 
 	if _, err := io.ReadFull(rand.Reader, body[len(sealed):]); err != nil {
 		return nil, err
 	}
-	return NewCell(Header{Kind: KindPayload, Circuit: inboundCircuit, Counter: counter}, body)
+	return NewCell(Header{Kind: KindData, Circuit: inboundCircuit, Counter: counter}, body)
 }
 
 // adds this hop's layer to a cell travelling back towards the client

@@ -167,8 +167,8 @@ func (c *Client) receive() {
 		if err := c.conn.ReadCell(&cell); err != nil {
 			return
 		}
-		payload, err := c.circuit.OpenExit(&cell, wire.Backward)
-		if err != nil {
+		payload, cover, err := c.circuit.OpenExit(&cell, wire.Backward)
+		if err != nil || cover {
 			continue
 		}
 		select {
@@ -194,7 +194,7 @@ func (c *Client) Send(payload []byte) error {
 			return nil
 		}
 	}
-	return c.send(wire.KindPayload, payload)
+	return c.send(false, payload)
 }
 
 // how many messages the fixed schedule could not take
@@ -220,9 +220,9 @@ func (c *Client) startSchedule() {
 				var err error
 				select {
 				case payload := <-c.queue:
-					err = c.send(wire.KindPayload, payload)
+					err = c.send(false, payload)
 				default:
-					err = c.send(wire.KindCover, nil)
+					err = c.send(true, nil)
 				}
 				if err != nil {
 					return
@@ -233,10 +233,10 @@ func (c *Client) startSchedule() {
 }
 
 func (c *Client) SendCover() error {
-	return c.send(wire.KindCover, nil)
+	return c.send(true, nil)
 }
 
-func (c *Client) send(kind wire.Kind, payload []byte) error {
+func (c *Client) send(cover bool, payload []byte) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -248,7 +248,11 @@ func (c *Client) send(kind wire.Kind, payload []byte) error {
 	c.mu.Unlock()
 	defer c.busy.Done()
 
-	cell, err := c.circuit.Seal(kind, counter, payload)
+	seal := func() (*wire.Cell, error) { return c.circuit.Seal(counter, payload) }
+	if cover {
+		seal = func() (*wire.Cell, error) { return c.circuit.SealCover(counter) }
+	}
+	cell, err := seal()
 	if err != nil {
 		return err
 	}

@@ -42,7 +42,7 @@ Every cell is 512 bytes, payload and cover cells alike.
 | Field | Size | Purpose |
 |---|---|---|
 | version | 1 | format version |
-| kind | 1 | payload, cover, control, link padding |
+| kind | 1 | data, control, link padding |
 | circuit | 8 | circuit identifier, different on every link |
 | counter | 8 | cell number, the source of the nonce and of replay protection |
 | body | 494 | layers: three 16-byte tags, the length prefix and the payload |
@@ -55,6 +55,9 @@ Every cell is 512 bytes, payload and cover cells alike.
 - The layer of hop i occupies the first 494 - 16 * i bytes of the body. After stripping its layer
   a node refills the body with random bytes, so every link carries the same size and the position
   in the chain is invisible on the wire.
+- Payload and cover cells share one outer kind, "data". The cover flag sits inside the innermost
+  layer, in the top bit of the length field, where only the exit sees it. Nodes on the way,
+  including the entry that knows the client, cannot tell a cover cell from a payload cell.
 - Inside the innermost layer: two bytes of length, the data, random padding. Three hops leave 444
   bytes for a message.
 - A node keeps a window of accepted counters and drops a replay: forwarding one would hand an

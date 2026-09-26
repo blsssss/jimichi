@@ -58,7 +58,7 @@ func TestChainRoundTrip(t *testing.T) {
 	circuit := newCircuit(t, p, keys, links...)
 
 	msg := []byte("meet me at the usual place")
-	cell, err := circuit.Seal(wire.KindPayload, 42, msg)
+	cell, err := circuit.Seal(42, msg)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -87,9 +87,9 @@ func TestChainRoundTrip(t *testing.T) {
 	}
 	defer exit.Close()
 
-	got, err := exit.OpenLast(current, wire.Forward)
-	if err != nil {
-		t.Fatalf("OpenLast: %v", err)
+	got, cover, err := exit.OpenLast(current, wire.Forward)
+	if err != nil || cover {
+		t.Fatalf("OpenLast: cover %v, err %v", cover, err)
 	}
 	if !bytes.Equal(got, msg) {
 		t.Fatalf("got %q, want %q", got, msg)
@@ -109,13 +109,13 @@ func TestCellSizeIsConstant(t *testing.T) {
 		bytes.Repeat([]byte("x"), 100),
 		bytes.Repeat([]byte("x"), circuit.MaxPayload()),
 	} {
-		cell, err := circuit.Seal(wire.KindPayload, 1, payload)
+		cell, err := circuit.Seal(1, payload)
 		if err != nil {
 			t.Fatalf("Seal(%d): %v", len(payload), err)
 		}
 		sizes[len(cell)] = struct{}{}
 	}
-	cover, err := circuit.Seal(wire.KindCover, 2, nil)
+	cover, err := circuit.SealCover(2)
 	if err != nil {
 		t.Fatalf("Seal(cover): %v", err)
 	}
@@ -136,11 +136,11 @@ func TestCiphertextDiffersPerCounter(t *testing.T) {
 	circuit := newCircuit(t, p, hopKeys(t, p, hops))
 
 	msg := []byte("same message")
-	first, err := circuit.Seal(wire.KindPayload, 1, msg)
+	first, err := circuit.Seal(1, msg)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	second, err := circuit.Seal(wire.KindPayload, 2, msg)
+	second, err := circuit.Seal(2, msg)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestPayloadTooLarge(t *testing.T) {
 	circuit := newCircuit(t, p, hopKeys(t, p, hops))
 
 	oversized := bytes.Repeat([]byte("x"), circuit.MaxPayload()+1)
-	if _, err := circuit.Seal(wire.KindPayload, 1, oversized); err == nil {
+	if _, err := circuit.Seal(1, oversized); err == nil {
 		t.Fatal("Seal must reject an oversized payload")
 	}
 }
@@ -164,7 +164,7 @@ func TestTamperingIsDetected(t *testing.T) {
 	keys := hopKeys(t, p, hops)
 	circuit := newCircuit(t, p, keys)
 
-	cell, err := circuit.Seal(wire.KindPayload, 3, []byte("payload"))
+	cell, err := circuit.Seal(3, []byte("payload"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestTamperingIsDetected(t *testing.T) {
 	}
 
 	movedKind := *cell
-	movedKind[1] = byte(wire.KindCover)
+	movedKind[1] = byte(wire.KindControl)
 	if _, err := hop.Peel(&movedKind, wire.Forward); err == nil {
 		t.Fatal("a modified kind must not open")
 	}
@@ -201,7 +201,7 @@ func TestLayerIsBoundToHopIndex(t *testing.T) {
 	keys := hopKeys(t, p, hops)
 	circuit := newCircuit(t, p, keys)
 
-	cell, err := circuit.Seal(wire.KindPayload, 8, []byte("payload"))
+	cell, err := circuit.Seal(8, []byte("payload"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestCircuitIDIsPerLink(t *testing.T) {
 	keys := hopKeys(t, p, hops)
 	circuit := newCircuit(t, p, keys)
 
-	cell, err := circuit.Seal(wire.KindPayload, 5, []byte("payload"))
+	cell, err := circuit.Seal(5, []byte("payload"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -283,14 +283,63 @@ func TestMaxPayloadShrinksWithChain(t *testing.T) {
 	t.Logf("payload per cell: 1 hop %d bytes, 3 hops %d bytes", short.MaxPayload(), long.MaxPayload())
 }
 
-// only data kinds travel inside a circuit: control is built by BuildSetup and
-// padding belongs to a single link
-func TestSealRefusesNonDataKinds(t *testing.T) {
+// a relay before the exit sees the header and its own layer only; a cover
+// cell must look to it exactly like a payload cell with the same counter
+func TestCoverIsHiddenFromEveryHopButTheExit(t *testing.T) {
 	p := provider()
-	circuit := newCircuit(t, p, hopKeys(t, p, hops))
-	for _, k := range []wire.Kind{wire.KindControl, wire.KindPadding, wire.Kind(9)} {
-		if _, err := circuit.Seal(k, 1, nil); !errors.Is(err, wire.ErrKind) {
-			t.Fatalf("Seal(%v): %v, want ErrKind", k, err)
+	keys := hopKeys(t, p, hops)
+	links := []uint64{100, 101, 102}
+	payloadCircuit := newCircuit(t, p, keys, links...)
+
+	payload, err := payloadCircuit.Seal(9, []byte("real"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	cover, err := payloadCircuit.SealCover(9)
+	if err != nil {
+		t.Fatalf("SealCover: %v", err)
+	}
+
+	cells := []*wire.Cell{payload, cover}
+	for i := 0; i < hops-1; i++ {
+		hop, err := wire.NewHop(p, keys[i], i)
+		if err != nil {
+			t.Fatalf("NewHop %d: %v", i, err)
 		}
+		first := *cells[0]
+		for j, c := range cells {
+			if !bytes.Equal(c[:18], first[:18]) {
+				t.Fatalf("hop %d sees a different header on cell %d", i, j)
+			}
+			out, err := hop.Peel(c, wire.Forward)
+			if err != nil {
+				t.Fatalf("hop %d Peel: %v", i, err)
+			}
+			out.SetCircuit(links[i+1])
+			cells[j] = out
+		}
+		hop.Close()
+	}
+
+	exit, err := wire.NewHop(p, keys[hops-1], hops-1)
+	if err != nil {
+		t.Fatalf("NewHop exit: %v", err)
+	}
+	defer exit.Close()
+	if got, isCover, err := exit.OpenLast(cells[0], wire.Forward); err != nil || isCover || string(got) != "real" {
+		t.Fatalf("payload at the exit: %q, cover %v, err %v", got, isCover, err)
+	}
+	if got, isCover, err := exit.OpenLast(cells[1], wire.Forward); err != nil || !isCover || len(got) != 0 {
+		t.Fatalf("cover at the exit: %q, cover %v, err %v", got, isCover, err)
+	}
+}
+
+// the old cover kind no longer exists on the wire; a header carrying it is
+// malformed and dropped before any key is used
+func TestRetiredCoverKindIsRejected(t *testing.T) {
+	var c wire.Cell
+	c[0], c[1] = wire.Version, 2
+	if _, err := c.Header(); !errors.Is(err, wire.ErrKind) {
+		t.Fatalf("Header: %v, want ErrKind", err)
 	}
 }
