@@ -14,9 +14,11 @@ A confidential messaging system that protects metadata, and the measurements tha
 that protection is worth.
 
 Messages travel through a chain of three relay nodes under nested encryption: every hop strips
-exactly one layer and learns only its neighbours. Session keys are ephemeral, live in mlocked
-memory outside the Go heap, are zeroed after use, and never reach disk or swap. Every cell is
-the same size, so the length of a message says nothing about it.
+exactly one layer and learns only its neighbours. Session keys are ephemeral, the buffers that hold
+them sit in mlocked memory outside the Go heap and are zeroed after use, and nothing reaches disk.
+Copies that the crypto libraries keep on the heap are not covered, see
+[LIMITATIONS](docs/en/LIMITATIONS.md). Every cell is the same size, so the length of a message
+says nothing about it.
 
 Protecting content is the easy part. What this work measures is the harder question: how much
 an observer who sees only timings and volumes can still learn, and what it costs to take that

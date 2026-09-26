@@ -6,12 +6,14 @@ import "errors"
 
 // falls back to the Go heap and reports Locked() == false: usable for tests,
 // never for a node that must guarantee keys stay in RAM
-func alloc(size int) ([]byte, bool, error) {
+func alloc(size int, _ Policy) ([]byte, bool, error) {
 	return make([]byte, size), false, nil
 }
 
-func free(mem []byte, _ bool) {
-	zero(mem)
+func free(mem []byte, _ bool, p Policy) {
+	if p.Zero {
+		zero(mem)
+	}
 }
 
 func HardenProcess() error {

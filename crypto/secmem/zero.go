@@ -12,4 +12,10 @@ func zero(b []byte) {
 	runtime.KeepAlive(b)
 }
 
-func Zero(b []byte) { zero(b) }
+// clears a heap copy of key material unless the policy has zeroing off, which
+// only a baseline run does
+func Zero(b []byte) {
+	if CurrentPolicy().Zero {
+		zero(b)
+	}
+}

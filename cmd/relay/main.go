@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -22,7 +23,8 @@ func main() {
 	info := flag.String("info", ":9100", "address for the public key and health check")
 	statsAddr := flag.String("stats", "127.0.0.1:9101", "loopback address for the counters")
 	logEvery := flag.Duration("log-every", time.Minute, "print aggregated counters to stdout this often; 0 disables")
-	harden := flag.Bool("harden", true, "lock key memory and disable core dumps")
+	harden := flag.Bool("harden", true, "disable core dumps and ptrace access for the process")
+	keymem := flag.String("keymem", "all", "key memory measures: all, none, or a list of offheap, lock, dontdump, zero")
 	echo := flag.Bool("echo", true, "as an exit, send the payload back along the circuit")
 	period := flag.Duration("period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
 	queue := flag.Int("queue", 64, "cells a circuit may queue per direction when -period is set")
@@ -30,9 +32,21 @@ func main() {
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
 
+	policy, err := secmem.ParsePolicy(*keymem)
+	if err != nil {
+		logger.Fatalf("keymem: %v", err)
+	}
+	if err := secmem.SetPolicy(policy); err != nil {
+		logger.Fatalf("keymem: %v", err)
+	}
 	if *harden {
 		if err := secmem.HardenProcess(); err != nil {
 			logger.Fatalf("harden: %v", err)
+		}
+	}
+	if policy.Lock {
+		if err := checkMemlock(); err != nil {
+			logger.Fatal(err)
 		}
 	}
 
@@ -43,7 +57,7 @@ func main() {
 	}
 	defer staticPriv.Release()
 
-	if *harden && !staticPriv.Locked() {
+	if policy.Lock && !staticPriv.Locked() {
 		logger.Fatal("key memory is not locked, refusing to start")
 	}
 
@@ -78,7 +92,8 @@ func main() {
 		go logCounters(r, *logEvery, logger)
 	}
 
-	logger.Printf("relay listening on %s, info on %s, locked=%v, period=%v", *listen, *info, staticPriv.Locked(), *period)
+	logger.Printf("relay listening on %s, info on %s, keymem=%s, locked=%v, harden=%v, period=%v",
+		*listen, *info, policy, staticPriv.Locked(), *harden, *period)
 	go func() {
 		if err := r.Serve(ln); err != nil {
 			logger.Printf("serve: %v", err)
@@ -89,6 +104,21 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 	logger.Print("shutting down")
+}
+
+// a setup holds a handful of key pages at once and the static key one more;
+// below this the node would start and then fail its first circuits
+const minMemlock = 64 << 10
+
+func checkMemlock() error {
+	budget, err := secmem.MemlockBudget()
+	if err != nil {
+		return err
+	}
+	if budget < minMemlock {
+		return fmt.Errorf("RLIMIT_MEMLOCK is %d bytes, need at least %d to lock key pages", budget, minMemlock)
+	}
+	return nil
 }
 
 func serveInfo(addr string, pub []byte, logger *log.Logger) {

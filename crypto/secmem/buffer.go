@@ -11,13 +11,17 @@ var (
 	ErrNotLocked = errors.New("secmem: pages not locked")
 )
 
-// memory stays at a fixed address for the lifetime of the buffer, so the
-// garbage collector never copies key material
+// under the protected policy the key sits on pages of its own outside the Go
+// heap, so it is released and zeroed at a known moment rather than whenever the
+// collector happens to reuse the memory
 type Buffer struct {
 	mu       sync.RWMutex
 	mem      []byte
 	locked   bool
 	released bool
+	// the policy the buffer was made under, so a later change cannot free it
+	// the wrong way
+	policy Policy
 }
 
 // where locking is unavailable Locked() reports false, so a caller that must not
@@ -26,11 +30,12 @@ func New(size int) (*Buffer, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("secmem: bad size %d", size)
 	}
-	mem, locked, err := alloc(size)
+	p := CurrentPolicy()
+	mem, locked, err := alloc(size, p)
 	if err != nil {
 		return nil, err
 	}
-	return &Buffer{mem: mem, locked: locked}, nil
+	return &Buffer{mem: mem, locked: locked, policy: p}, nil
 }
 
 // zeroes src: it exists to move key material off the heap the moment a library
@@ -41,7 +46,9 @@ func NewFrom(src []byte) (*Buffer, error) {
 		return nil, err
 	}
 	copy(b.mem, src)
-	zero(src)
+	if b.policy.Zero {
+		zero(src)
+	}
 	return b, nil
 }
 
@@ -90,6 +97,6 @@ func (b *Buffer) Release() {
 		return
 	}
 	b.released = true
-	free(b.mem, b.locked)
+	free(b.mem, b.locked, b.policy)
 	b.mem = nil
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/blsssss/jimichi/client"
 	"github.com/blsssss/jimichi/crypto/c25519"
+	"github.com/blsssss/jimichi/crypto/secmem"
 )
 
 func main() {
@@ -26,9 +27,37 @@ func main() {
 	mode := flag.String("mode", "immediate", "immediate or fixed: fixed sends one cell per tick and a payload takes a cover slot")
 	rate := flag.Duration("rate", 200*time.Millisecond, "cell period in fixed mode")
 	jitter := flag.Duration("jitter", 0, "random delay added before each cell")
+	harden := flag.Bool("harden", true, "disable core dumps and ptrace access for the process")
+	keymem := flag.String("keymem", "all", "key memory measures: all, none, or a list of offheap, lock, dontdump, zero")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
+
+	policy, err := secmem.ParsePolicy(*keymem)
+	if err != nil {
+		logger.Fatalf("keymem: %v", err)
+	}
+	if err := secmem.SetPolicy(policy); err != nil {
+		logger.Fatalf("keymem: %v", err)
+	}
+	if *harden {
+		if err := secmem.HardenProcess(); err != nil {
+			logger.Fatalf("harden: %v", err)
+		}
+	}
+	// the circuit keys come later, so a probe buffer tells now whether locking
+	// works at all; a client that asked for it must not run without it
+	if policy.Lock {
+		probe, err := secmem.New(32)
+		if err != nil {
+			logger.Fatalf("key memory: %v", err)
+		}
+		locked := probe.Locked()
+		probe.Release()
+		if !locked {
+			logger.Fatal("key memory is not locked, refusing to start")
+		}
+	}
 
 	addrs := splitList(*nodes)
 	if len(addrs) == 0 {

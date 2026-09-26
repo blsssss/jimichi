@@ -8,8 +8,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   commercial data, not to state information systems or significant critical infrastructure. The
   algorithms are the same and conformance is checked against the test vectors from the standards,
   but no protection class is claimed.
-- Go runtime: cipher libraries expand the key into a round key schedule on the heap and the garbage
-  collector may copy it. secmem protects only its own buffers.
+- Go runtime: libraries keep their own copies of keys on the heap, and the AEAD working key in
+  x/crypto stays there for the life of the circuit. secmem protects only its own buffers; CRYPTO
+  lists the copies.
 - mlock prevents swapping, not reading by a process with sufficient privileges. Against root on the
   machine hosting a node, process-level measures do not work; that is the expected result.
 - Sending on a node's own clock requires the node's period to be shorter than the client's, with a
