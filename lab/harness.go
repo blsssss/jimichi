@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blsssss/jimichi/client"
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/secmem"
-	"github.com/blsssss/jimichi/crypto/suite"
-	"github.com/blsssss/jimichi/link"
-	"github.com/blsssss/jimichi/relay"
+	"github.com/jimichi-org/jimichi/client"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/link"
+	"github.com/jimichi-org/jimichi/relay"
 )
 
 type Config struct {

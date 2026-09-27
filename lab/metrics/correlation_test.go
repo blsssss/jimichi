@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blsssss/jimichi/lab/metrics"
+	"github.com/jimichi-org/jimichi/lab/metrics"
 )
 
 const eps = 1e-9

@@ -13,8 +13,8 @@ import (
 	"github.com/pedroalbanese/gogost/gost3412128"
 	"github.com/pedroalbanese/gogost/mgm"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/secmem"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
 const (

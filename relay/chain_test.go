@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blsssss/jimichi/client"
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/c25519"
-	"github.com/blsssss/jimichi/crypto/suite"
-	"github.com/blsssss/jimichi/link"
-	"github.com/blsssss/jimichi/relay"
-	"github.com/blsssss/jimichi/wire"
+	"github.com/jimichi-org/jimichi/client"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/c25519"
+	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/link"
+	"github.com/jimichi-org/jimichi/relay"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 type node struct {

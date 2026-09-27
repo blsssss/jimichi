@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blsssss/jimichi/lab/metrics"
+	"github.com/jimichi-org/jimichi/lab/metrics"
 )
 
 // hand counted with a 10 ms window: flow one has 0, 5 and 9.999 ms inside and

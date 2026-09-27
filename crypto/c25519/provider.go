@@ -13,8 +13,8 @@ import (
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/secmem"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
 const (

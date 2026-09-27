@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blsssss/jimichi/link"
-	"github.com/blsssss/jimichi/wire"
+	"github.com/jimichi-org/jimichi/link"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 const (

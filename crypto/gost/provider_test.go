@@ -11,9 +11,9 @@ import (
 	"github.com/pedroalbanese/gogost/gost3410"
 	"github.com/pedroalbanese/gogost/gost3412128"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/providertest"
-	"github.com/blsssss/jimichi/crypto/secmem"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/providertest"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
 func TestProviderConformance(t *testing.T) {

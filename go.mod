@@ -1,4 +1,4 @@
-module github.com/blsssss/jimichi
+module github.com/jimichi-org/jimichi
 
 go 1.27.0
 

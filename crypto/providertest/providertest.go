@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/secmem"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
 func Run(t *testing.T, newProvider func() jcrypto.CryptoProvider) {
