@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/c25519"
-	"github.com/blsssss/jimichi/crypto/secmem"
-	"github.com/blsssss/jimichi/wire"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/c25519"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 const hops = 3

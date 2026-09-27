@@ -3,8 +3,8 @@ package suite_test
 import (
 	"testing"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/suite"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/suite"
 )
 
 func TestEveryNameGivesItsSuite(t *testing.T) {

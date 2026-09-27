@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/blsssss/jimichi/crypto/secmem"
-	"github.com/blsssss/jimichi/crypto/suite"
-	"github.com/blsssss/jimichi/relay"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/relay"
 )
 
 func main() {

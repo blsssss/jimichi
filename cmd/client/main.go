@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blsssss/jimichi/client"
-	"github.com/blsssss/jimichi/crypto/secmem"
-	"github.com/blsssss/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/client"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/crypto/suite"
 )
 
 func main() {

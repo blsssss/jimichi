@@ -3,8 +3,8 @@ package suite_test
 import (
 	"testing"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/suite"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/suite"
 )
 
 // the per-suite cost block 6 compares: what a circuit setup and a cell cost

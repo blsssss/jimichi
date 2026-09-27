@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/secmem"
-	"github.com/blsssss/jimichi/link"
-	"github.com/blsssss/jimichi/wire"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/link"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 // called on the exit node with the delivered message; a non-nil return travels

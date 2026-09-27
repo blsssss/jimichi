@@ -6,9 +6,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/blsssss/jimichi/crypto/c25519"
-	"github.com/blsssss/jimichi/link"
-	"github.com/blsssss/jimichi/wire"
+	"github.com/jimichi-org/jimichi/crypto/c25519"
+	"github.com/jimichi-org/jimichi/link"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 type recorder struct {

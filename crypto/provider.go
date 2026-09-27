@@ -3,7 +3,7 @@ package crypto
 import (
 	"errors"
 
-	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
 // both suites implement the same contract, so a run switches between them

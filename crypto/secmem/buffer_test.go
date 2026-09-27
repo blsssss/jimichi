@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
 func TestBufferLifecycle(t *testing.T) {

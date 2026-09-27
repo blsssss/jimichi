@@ -5,9 +5,9 @@ package suite
 import (
 	"fmt"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/c25519"
-	"github.com/blsssss/jimichi/crypto/gost"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/c25519"
+	"github.com/jimichi-org/jimichi/crypto/gost"
 )
 
 // c25519 keeps results comparable with work outside Russia; GOST runs behind

@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blsssss/jimichi/client"
-	"github.com/blsssss/jimichi/crypto/suite"
-	"github.com/blsssss/jimichi/lab"
-	"github.com/blsssss/jimichi/lab/metrics"
+	"github.com/jimichi-org/jimichi/client"
+	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/lab"
+	"github.com/jimichi-org/jimichi/lab/metrics"
 )
 
 // one row per run and observation window; the configuration travels with the

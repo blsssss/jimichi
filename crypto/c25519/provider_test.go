@@ -3,9 +3,9 @@ package c25519_test
 import (
 	"testing"
 
-	jcrypto "github.com/blsssss/jimichi/crypto"
-	"github.com/blsssss/jimichi/crypto/c25519"
-	"github.com/blsssss/jimichi/crypto/providertest"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/crypto/c25519"
+	"github.com/jimichi-org/jimichi/crypto/providertest"
 )
 
 func TestProviderConformance(t *testing.T) {

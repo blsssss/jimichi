@@ -10,7 +10,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/blsssss/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
 // what the kernel records for the mapping that holds a buffer: "lo" is locked,
