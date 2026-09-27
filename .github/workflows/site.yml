@@ -19,4 +19,4 @@ jobs:
             echo "SITE_DISPATCH_TOKEN is not set, the site picks the release up on its daily build"
             exit 0
           fi
-          gh api repos/blsssss/jimichi-site/dispatches -f event_type=release
+          gh api repos/jimichi-org/jimichi-site/dispatches -f event_type=release
