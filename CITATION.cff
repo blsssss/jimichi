@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: If you use jimichi or its measurements, please cite it as below.
+title: 'jimichi: confidential messaging with metadata protection and a traffic correlation testbed'
+type: software
+authors:
+  - given-names: Igor
+    family-names: Iurtaev
+license: AGPL-3.0-or-later
+repository-code: https://github.com/jimichi-org/jimichi
+url: https://jimichi.org
+abstract: >-
+  A confidential messaging system that sends messages through a chain of three relays under nested
+  encryption, with fixed-size cells and session keys held only in locked memory, together with a
+  traffic correlation attack that measures how much timings and volumes still reveal and what it
+  costs to take that away.
+keywords:
+  - metadata privacy
+  - traffic analysis
+  - onion routing
+  - cryptography
+  - GOST

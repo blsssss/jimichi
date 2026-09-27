@@ -10,6 +10,11 @@
   <a href="https://jimichi.org">jimichi.org</a> · <a href="README.md">English</a> | Русский
 </p>
 
+<p align="center">
+  <a href="https://github.com/jimichi-org/jimichi/actions/workflows/ci.yml"><img src="https://github.com/jimichi-org/jimichi/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/jimichi-org/jimichi"><img src="https://api.scorecard.dev/projects/github.com/jimichi-org/jimichi/badge" alt="OpenSSF Scorecard"></a>
+</p>
+
 Система конфиденциального обмена сообщениями с защитой метаданных и измерения, показывающие,
 чего эта защита стоит.
 
