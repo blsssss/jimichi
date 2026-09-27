@@ -7,7 +7,7 @@
 <p align="center">
   Confidential messaging that hides who talks to whom, and the measurements that prove it.
   <br>
-  English | <a href="README.ru.md">Русский</a>
+  <a href="https://jimichi.org">jimichi.org</a> · English | <a href="README.ru.md">Русский</a>
 </p>
 
 A confidential messaging system that protects metadata, and the measurements that show what

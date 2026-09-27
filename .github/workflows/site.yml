@@ -1,0 +1,22 @@
+name: site
+
+on:
+  release:
+    types: [published, edited, deleted]
+
+permissions: {}
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: rebuild jimichi.org
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "SITE_DISPATCH_TOKEN is not set, the site picks the release up on its daily build"
+            exit 0
+          fi
+          gh api repos/blsssss/jimichi-site/dispatches -f event_type=release
