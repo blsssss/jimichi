@@ -13,6 +13,7 @@
 <p align="center">
   <a href="https://github.com/jimichi-org/jimichi/actions/workflows/ci.yml"><img src="https://github.com/jimichi-org/jimichi/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/jimichi-org/jimichi"><img src="https://api.scorecard.dev/projects/github.com/jimichi-org/jimichi/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://doi.org/10.5281/zenodo.23001699"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.23001699.svg" alt="DOI"></a>
 </p>
 
 A confidential messaging system that protects metadata, and the measurements that show what

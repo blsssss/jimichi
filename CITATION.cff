@@ -8,6 +8,7 @@ authors:
 license: AGPL-3.0-or-later
 repository-code: https://github.com/jimichi-org/jimichi
 url: https://jimichi.org
+doi: 10.5281/zenodo.23001699
 abstract: >-
   A confidential messaging system that sends messages through a chain of three relays under nested
   encryption, with fixed-size cells and session keys held only in locked memory, together with a
