@@ -13,7 +13,7 @@ this is engineering work, not a certification exercise.
 | Session keys of the layers | memory of the relay process | confidentiality of messages passing that node |
 | Node signing key | memory of the relay process (secmem), until the node restarts | the ability to impersonate the node until the certificate's not_after or the next issuance |
 | Node onion key (agreement key) | memory of the relay process (secmem), until the node restarts | the layers of circuits that passed the node while it ran, for whoever kept their setup cells |
-| CA key | memory of the jimichi enroll process outside the cluster, the seconds of one issuance | issuing certificates for any name and address until the anchor changes |
+| CA key | memory of the jimichi enroll process outside the cluster, only while it issues certificates | issuing certificates for any name and address until the anchor changes |
 | Trust anchor (integrity) | ConfigMap jimichi-ca, client environment | a substituted anchor makes the client accept nodes of another CA |
 | The link between sender and recipient | timings and volumes, node state | confidentiality of the fact of communication |
 | Message content | cells on the network | confidentiality of the conversation |
@@ -26,7 +26,7 @@ this is engineering work, not a certification exercise.
 | Active network observer | additionally delays, duplicates and modifies cells | attempts at replay and tampering |
 | Operator of one node | full access to their own node, including memory | one layer, the addresses of the neighbours |
 | Runtime administrator | root on the machine hosting a node, reads any process memory | node memory, including keys while they exist |
-| Certificate authority owner | the operator who runs issuance, or whoever stole the CA key during the seconds of issuance; issues valid certificates | a certificate for an identity of their own for any name and address, with a network position inserting their own node into a chain |
+| Certificate authority owner | the operator who runs issuance, or whoever stole the CA key during issuance; issues valid certificates | a certificate for an identity of their own for any name and address, with a network position inserting their own node into a chain |
 
 The adversary knows the design and the source code. Security rests on keys, not on the secrecy of
 the implementation.
@@ -41,7 +41,7 @@ the implementation.
 | Linking sender and recipient by traffic | constant cell size, cover traffic, delays and batching | our own correlation attack, ROC and AUC under different parameters |
 | One node learning the whole route | nested encryption, a node sees only its neighbours | compromising one node of three, checking what it holds |
 | Node keys substituted when fetched | the signed descriptor: the client takes keys only from a bundle verified against the anchor and refuses to build the circuit on any error | e2e: a client holding the anchor of another CA refuses to build the circuit; pki and client tests for every refusal |
-| A node inserted through a compromised CA | the CA key lives for the seconds of one issuance outside the cluster, a certificate is issued only for a name and address on the operator's roster; the client picks the chain, layers are encrypted per node | inserting one and two nodes, measuring the residual leak |
+| A node inserted through a compromised CA | the CA key lives outside the cluster and only while it issues certificates; the client picks the chain, layers are encrypted per node | inserting one and two nodes, measuring the residual leak |
 | Linking a flow by cell headers | link encryption between neighbours, frames of one size on the wire | searching a link capture for counters and identifiers |
 | Replay and tampering | AEAD on every layer, a window of counters, tags of opened control cells until the node key changes | replaying a recorded cell, flipping a byte, expecting a refusal |
 | Proving that a message was sent | cover and payload cells are indistinguishable on the wire and to every node before the exit: the cover flag sits inside the innermost layer | distinguishing the two kinds from observable features, expecting chance level |
