@@ -125,7 +125,7 @@ client/       sender, receiver, cover traffic
 vault/        client container with two volumes
 lab/          scenario/, metrics/, report/
 web/          testbed dashboard
-deploy/       compose/ for development, kind/ and base/ for the demo
+deploy/       kind/ cluster configurations and base/ manifests of the testbed
 docs/         documentation, en/ and ru/
 ```
 
@@ -168,7 +168,7 @@ curl -s localhost:9101/stats
 
 Go 1.27. Memory locking, dump prevention and the key-extraction scenarios are Linux-only; other
 platforms build against stubs that report memory as unlocked, so a node refuses to start there.
-Docker Compose for development, kind for the cluster demo.
+Docker and kind for the testbed; there is no Compose setup.
 
 ## License
 

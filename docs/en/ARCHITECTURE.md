@@ -304,31 +304,42 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
 
 1. The operator passes a roster: for each node the name and address for its certificate, two
    local addresses that reach the node's admin port and descriptor port, and the hash of the
-   node signing key. The node prints this hash at start (identity_hash=), and scripts/enroll.sh
-   reads it from the log of the pod's current container through the kube API (kubectl logs).
-   Names, addresses, local addresses and hashes must be well formed and pairwise distinct.
+   node signing key. The node prints this hash once at start, before any port serves
+   (identity_hash=). scripts/enroll.sh reads it from the log of the pod's current container
+   through the kube API (kubectl logs) and requires exactly one such line. Names, addresses, local
+   addresses and hashes must be well formed and pairwise distinct.
 2. The process sets the secmem policy (-keymem, -harden). If memory locking was requested and
    does not work, issuance does not start.
 3. Each node gets POST /csr with a fresh 16-byte nonce and answers with a request signed by its
    signing key. Request.Check matches the nonce, name and address against the roster, the key
    hash in the request must equal the hash from the log, and the signing keys of the nodes must
-   be pairwise distinct.
+   be pairwise distinct. A node holding a valid certificate answers POST /csr with 409, and enroll
+   prints the command that restarts it.
 4. Only when every request has passed is the CA key created in a secmem buffer. The CA issues
    every certificate and its key is released at once (Close): it lives for the issuance only.
-5. Each certificate goes to its node with PUT /cert. The node accepts a certificate only within
-   60 s of POST /csr, once per request and only with a not_before no earlier than the request
-   time minus Skew, and answers 409 otherwise. It then installs the certificate, signs a
-   descriptor and answers 204, or 400 with the error class if the install is refused. Until a new
+5. Each certificate goes to its node with PUT /cert. The node accepts a certificate only if it
+   holds no valid one (none installed yet, or expired), within 60 s of POST /csr
+   (pki.InstallWindow), once per request and only with a not_before no earlier than the request
+   time minus Skew; otherwise it answers 409 with the error class. It then installs the
+   certificate, signs a descriptor and answers 204, or 400 if the install is refused. Sending the
+   installed certificate again gets 204, so a retry after a lost answer goes through. Until a new
    installation succeeds the node keeps serving its previous bundle.
 6. enroll reads /descriptor of every node and checks the whole chain with pki.VerifyChain against
    the new anchor, exactly as a client does.
 7. Only then is the anchor printed on stdout. On any error stdout stays empty and the exit code
    is 1.
 
+- A certificate is installed once per node process: a valid certificate is never replaced, and
+  re-enrollment needs a node restart, which brings a new identity. Install does not check the CA
+  signature, so without this rule anyone who reaches the admin port could replace a working
+  certificate with their own.
 - Installation across the nodes is not atomic. If issuance fails after the first PUT /cert, the
-  nodes that already took a certificate serve their bundle under a discarded CA, and clients
-  refuse them. enroll lists those nodes on stderr, and enroll.sh says that issuance must run
-  again.
+  nodes that already took a certificate keep it under a discarded CA until they restart, and
+  clients refuse them. enroll lists those nodes on stderr, together with the nodes whose answer
+  was lost or a 5xx (may hold), and prints the `kubectl rollout restart` command for them;
+  enroll.sh prints the same guidance. Issuance runs again after the restart.
+- enroll's -timeout is at most 60 s, so the whole run fits the window in which a node waits for
+  its certificate.
 - The request and the certificate travel over `kubectl port-forward` to one specific pod, to the
   node's admin port 127.0.0.1:9101, the same one that serves the counters. The kube API lets the
   operator reach the pod and its log by kubeconfig and the pods/portforward and pods/log rights.
@@ -352,18 +363,19 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
 | Anchor | the same process | stdout, ConfigMap, client environment | until the next issuance, public |
 | Node signing key | cmd/relay at start, before any port opens | secmem; a node told to lock memory does not start without the lock | until the process ends |
 | Static node agreement key (onion and link) | cmd/relay, GenerateEphemeral | secmem | until the process ends |
-| Certificate, descriptor | CA, node | node heap, public; the bundle is kept encoded | certificate until not_after or the next issuance; descriptor 1 h (-descriptor-ttl) |
+| Certificate, descriptor | CA, node | node heap, public; the bundle is kept encoded | certificate until not_after or the node restarts; descriptor 1 h (-descriptor-ttl) |
 
 - A node restart gives a new signing key and no certificate. The node is ready (readiness on
   /healthz), but /descriptor answers 503 and clients refuse to build a circuit through it until
   scripts/enroll.sh runs. make deploy, make start and scripts/e2e.sh run it themselves.
-- Every issuance certifies all live nodes again under a new CA. Certificates of the previous CA
-  die when clients restart with the new anchor: revocation by forgetting. There is no other
-  revocation.
+- A new issuance needs fresh node processes. scripts/redeploy.sh and make start begin with them,
+  while running make deploy or scripts/e2e.sh again on certified nodes stops with a restart
+  hint. Certificates of the previous CA die when the nodes restart with new identities and the
+  clients with the new anchor: revocation by forgetting. There is no other revocation.
 - The certificate lifetime comes from -cert-ttl: 72 h on the testbed, 1 h in CI.
 - The descriptor is signed when the certificate is installed and after that only by the timer; a
   /descriptor request serves the ready bundle and never triggers a signature. The timer fires
-  every min(ttl/2, 1 min) and signs again once the descriptor's wall-clock age reaches half its
+  every min(ttl/4, 1 min) and signs again once the descriptor's wall-clock age reaches half its
   lifetime or the certificate state changes. The wall clock matters because the timer runs on
   the monotonic clock, which stands still while the host sleeps.
 - After the descriptor's expires or the certificate's not_after the node answers 503.

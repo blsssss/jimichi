@@ -49,9 +49,14 @@ English | [Русский](../ru/LIMITATIONS.md)
   of the threat model.
 - The integrity of the anchor equals write access to ConfigMap jimichi-ca and to the client pod
   spec: whoever can change them decides which nodes the client trusts.
-- There is no revocation beyond not_after and a new issuance under a new CA. A signing key
-  extracted from the memory of a live node impersonates that node until whichever of the two
-  comes first.
+- A certificate is installed once per node process, and re-enrollment needs a restart. Whoever
+  holds the pods/portforward right on a node's pod can enroll a fresh node process under a CA of
+  their own before the operator does: clients holding the operator's anchor refuse that node, and
+  it stays out of service until it restarts. That is operator-level power, the runtime
+  administrator of the threat model.
+- There is no revocation beyond not_after and a node restart with a new issuance under a new CA.
+  A signing key extracted from the memory of a live node impersonates that node until whichever
+  of the two comes first.
 - Every node restart needs scripts/enroll.sh: the new process gets a new signing key and no
   certificate. Until then clients refuse the node, and readiness does not show it; it shows as a
   503 on /descriptor, as cert=none in the counters line and in the client log.
