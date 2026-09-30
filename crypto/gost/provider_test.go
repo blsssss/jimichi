@@ -198,6 +198,9 @@ func TestLowOrderPointsAreRefused(t *testing.T) {
 			t.Fatalf("%s: the test point is not on the curve", pt.name)
 		}
 		raw := (&gost3410.PublicKey{C: c, X: x, Y: y}).Raw()
+		if _, err := publicKey(c, raw); err == nil {
+			t.Fatalf("%s: publicKey accepted it", pt.name)
+		}
 		if _, err := p.Agree(priv, raw, []byte("ukm")); !errors.Is(err, jcrypto.ErrBadPublicKey) {
 			t.Fatalf("%s: Agree gave %v, want ErrBadPublicKey", pt.name, err)
 		}

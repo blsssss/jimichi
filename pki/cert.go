@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"net/netip"
+	"strings"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/wire"
@@ -125,7 +127,19 @@ func validAddr(s string) bool {
 		}
 	}
 	host, port, err := net.SplitHostPort(s)
-	return err == nil && host != "" && validPort(port)
+	return err == nil && validHost(host) && validPort(port)
+}
+
+// one spelling per host as well: names in lower case without a trailing dot,
+// IP literals in their canonical form
+func validHost(h string) bool {
+	if h == "" || strings.HasSuffix(h, ".") {
+		return false
+	}
+	if ip, err := netip.ParseAddr(h); err == nil {
+		return ip.Zone() == "" && ip.String() == h
+	}
+	return strings.ToLower(h) == h && !strings.Contains(h, ":")
 }
 
 // one spelling per port, since the client compares addresses byte for byte

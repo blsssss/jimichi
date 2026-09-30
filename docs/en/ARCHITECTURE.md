@@ -186,7 +186,7 @@ node of their own, but it does not open past sessions.
 
 | Link | What it binds | Signed by |
 |---|---|---|
-| Trust anchor | the CA public key as the string `<suite>:<base64>`; ca_id is the first 8 bytes of Hash(key) | nothing, it reaches the client as configuration |
+| Trust anchor | the CA public key as the string `<suite>:<base64>`; ca_id is the first 8 bytes of Hash(key) | nothing, it is meant to reach the client as configuration |
 | Node certificate | suite, serial number, ca_id, validity, name, address, node signing key | the CA key |
 | Node descriptor | certificate hash, link key, onion key, epoch, validity | the node signing key |
 | Certificate request | a nonce chosen by the CA, name, address, node signing key | the node signing key |
@@ -201,7 +201,7 @@ node of their own, but it does not open past sessions.
 - Identity.Install installs a certificate only if the signing key, suite, name, address and
   validity all match. The node does not check the CA signature: it has no anchor. Whoever issues
   the certificate must therefore verify the node's bundle against the anchor after the install,
-  as a client does.
+  as pki.Verify does for a client.
 - The CA key and the node signing key are generated through the CryptoProvider straight into
   secmem buffers. Close releases them; callers defer it.
 
@@ -222,8 +222,9 @@ transmitted.
 - Address: 1 to 64 bytes (the size of the address field in a control cell), printable ASCII
   0x21..0x7e only, parsed as host:port with a non-empty host; the port is decimal, with no sign or
   leading zero, from 1 to 65535. wire drops trailing NULs from an address, so an address with a
-  NUL, a space or a byte outside ASCII could name one node and lead to another. The port has one
-  spelling because the client compares addresses byte for byte.
+  NUL, a space or a byte outside ASCII could name one node and lead to another. Host and port
+  have one spelling each (host names in lower case without a trailing dot, IP literals in
+  canonical form) because Verify compares addresses byte for byte.
 - Keys and signatures are at most 128 bytes. cert_hash is the Hash of the whole certificate,
   signature included.
 - Parsing rejects an unknown version (ErrVersion), an unknown suite (ErrSuite), a field over its

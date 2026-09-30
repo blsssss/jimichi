@@ -99,6 +99,19 @@ func TestVerifyRefusesSmallOrderKeys(t *testing.T) {
 	if p.Verify(second, msg, forged) {
 		t.Fatal("Verify accepted a non-canonical key")
 	}
+
+	// y = p + 3 names a point of large order, so the cofactor check alone passes it
+	large, _ := hex.DecodeString("f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+	a, err := new(edwards25519.Point).SetBytes(large)
+	if err != nil || bytes.Equal(a.Bytes(), large) {
+		t.Fatalf("the non-canonical encoding decoded as %v, %v", a, err)
+	}
+	if new(edwards25519.Point).MultByCofactor(a).Equal(edwards25519.NewIdentityPoint()) == 1 {
+		t.Fatal("the test point has small order")
+	}
+	if p.Verify(large, msg, forged) {
+		t.Fatal("Verify accepted a non-canonical encoding of a large-order point")
+	}
 }
 
 func TestSignMatchesStandardLibrary(t *testing.T) {
