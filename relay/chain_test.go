@@ -1736,6 +1736,19 @@ func (s *scripted) forged(t *testing.T, kind wire.Kind, counter uint64) *wire.Ce
 	return cell
 }
 
+// waits for n forward cells, so the test knows the client has written them
+func (s *scripted) read(t *testing.T, n int) {
+	t.Helper()
+	_ = s.raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+	defer func() { _ = s.raw.SetReadDeadline(time.Time{}) }()
+	for i := 0; i < n; i++ {
+		var c wire.Cell
+		if err := s.conn.ReadCell(&c); err != nil {
+			t.Fatalf("forward cell %d: %v", i, err)
+		}
+	}
+}
+
 func (s *scripted) send(t *testing.T, cells ...*wire.Cell) {
 	t.Helper()
 	for _, c := range cells {
@@ -1926,18 +1939,24 @@ func TestFullQueueEndsTheCircuit(t *testing.T) {
 	})
 }
 
-// the client knows the number of every reply, so one out of turn or one that
-// does not open ends the circuit on its side too
+// the client knows the number of every reply and how many cells it wrote, so a
+// reply out of turn, one that does not open or one more than cells written ends
+// the circuit on its side too
 func TestClientEndsTheCircuitOnABadReply(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		cells func(t *testing.T, s *scripted) []*wire.Cell
+		name string
+		// cells the client writes before the exit answers
+		written int
+		cells   func(t *testing.T, s *scripted) []*wire.Cell
 	}{
-		{"out of turn", func(t *testing.T, s *scripted) []*wire.Cell {
+		{"out of turn", 2, func(t *testing.T, s *scripted) []*wire.Cell {
 			return []*wire.Cell{s.reply(t, 1, "early")}
 		}},
-		{"does not open", func(t *testing.T, s *scripted) []*wire.Cell {
+		{"does not open", 2, func(t *testing.T, s *scripted) []*wire.Cell {
 			return []*wire.Cell{s.reply(t, 0, "fine"), s.forged(t, wire.KindData, 1)}
+		}},
+		{"more replies than cells", 1, func(t *testing.T, s *scripted) []*wire.Cell {
+			return []*wire.Cell{s.reply(t, 0, "fine"), s.reply(t, 1, "extra")}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1950,6 +1969,12 @@ func TestClientEndsTheCircuitOnABadReply(t *testing.T) {
 			}
 			defer cl.Close()
 			s := exit.circuit(t)
+			for i := 0; i < tc.written; i++ {
+				if err := cl.Send([]byte("ping")); err != nil {
+					t.Fatalf("Send: %v", err)
+				}
+			}
+			s.read(t, tc.written)
 			s.send(t, tc.cells(t, s)...)
 			timeout := time.After(3 * time.Second)
 			for open := true; open; {

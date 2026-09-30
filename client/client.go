@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
@@ -75,8 +76,10 @@ type Client struct {
 
 	// the link has its own write lock; holding mu across a write to a stalled
 	// entry would keep Close from closing the connection that unblocks it
-	sendMu  sync.Mutex
-	counter uint64
+	sendMu sync.Mutex
+	// cells written, which is also the next counter; receive reads it without
+	// the send lock
+	sent atomic.Uint64
 
 	stopCover chan struct{}
 	coverDone sync.WaitGroup
@@ -222,7 +225,8 @@ func (c *Client) open(cell *wire.Cell, want uint64) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if h.Kind != wire.KindData || c.circuit.ReplyNumber(h.Counter) != want {
+	// no more replies than cells written: the exit answers each cell once
+	if h.Kind != wire.KindData || want >= c.sent.Load() || c.circuit.ReplyNumber(h.Counter) != want {
 		return nil, false, errOutOfTurn
 	}
 	return c.circuit.OpenExit(cell, wire.Backward)
@@ -318,17 +322,19 @@ func (c *Client) send(cover bool, payload []byte) error {
 	if closed {
 		return errors.New("client: closed")
 	}
+	n := c.sent.Load()
 	var cell *wire.Cell
 	var err error
 	if cover {
-		cell, err = c.circuit.SealCover(c.counter)
+		cell, err = c.circuit.SealCover(n)
 	} else {
-		cell, err = c.circuit.Seal(c.counter, payload)
+		cell, err = c.circuit.Seal(n, payload)
 	}
 	if err != nil {
 		return err
 	}
-	c.counter++
+	// counted before the write, since the reply may arrive before it returns
+	c.sent.Store(n + 1)
 	return c.conn.WriteCell(cell)
 }
 
