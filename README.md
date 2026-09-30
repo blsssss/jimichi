@@ -119,6 +119,7 @@ crypto/       CryptoProvider interface
   providertest/ conformance suite both suites must pass
 wire/         fixed-size cells, nested layers, replay window
 link/         link encryption between neighbours, frames of one size
+pki/          node certificates, descriptors and requests, issuing and checking
 relay/        relay node
 client/       sender, receiver, cover traffic
 vault/        client container with two volumes

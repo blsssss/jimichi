@@ -176,11 +176,93 @@ Circuit teardown:
 
 ## Node authentication
 
-- Every node has a long-term signing pair and a certificate from the testbed CA.
-- The CA is run by lab, lives outside the cluster and exists only for the testbed.
-- The client checks the node's signature during key agreement. A compromised CA does not expose
-  the content of past sessions: the CA key takes no part in the layer agreement, and the client
-  picks the chain.
+The pki package implements the chain of trust from the CA key to the node keys that go into
+circuit setup, together with certificate issuance and verification. The CA key only signs
+certificates and takes no part in the layer agreement: compromising it lets an attacker certify a
+node of their own, but it does not open past sessions.
+
+### Chain of trust
+
+| Link | What it binds | Signed by |
+|---|---|---|
+| Trust anchor | the CA public key as the string `<suite>:<base64>`; ca_id is the first 8 bytes of Hash(key) | nothing, it reaches the client as configuration |
+| Node certificate | suite, serial number, ca_id, validity, name, address, node signing key | the CA key |
+| Node descriptor | certificate hash, link key, onion key, epoch, validity | the node signing key |
+| Certificate request | a nonce chosen by the CA, name, address, node signing key | the node signing key |
+
+- The address in the certificate is exactly the host:port the client dials or writes as the next
+  node's address.
+- The onion key is meant for circuit setup, the link key for the link to the entry node. The
+  descriptor carries both fields so the onion key can change independently of the link key.
+- The request is used only for issuance and is never shown to clients. It proves possession of the
+  signing key, and the nonce chosen by the CA proves freshness. Request.Check accepts a request
+  only if the nonce matches and the name and address match the operator roster.
+- Identity.Install installs a certificate only if the signing key, suite, name, address and
+  validity all match. The node cannot check the CA signature, having no anchor, so after the
+  install the node's bundle is verified against the anchor the same way a client verifies it.
+- The CA key and the node signing key are generated through the CryptoProvider straight into
+  secmem buffers and are released by Close on every exit path.
+
+### Formats
+
+The formats are binary: big-endian integers, variable-length fields with a one-byte length prefix
+and a hard maximum, times in unix seconds (int64). The signature is the last field. What is signed
+is the domain string followed by the body without the signature; the domain string itself is not
+transmitted.
+
+| Object | Body | Domain string |
+|---|---|---|
+| Certificate v1 | version 1, suite, serial 16, ca_id 8, not_before, not_after, name, address, signing key | `jimichi/cert/v1\x00` |
+| Descriptor v1 | version 1, suite, epoch u32, published, expires, cert_hash 32, link key, onion key | `jimichi/descriptor/v1\x00` |
+| Request v1 | version 1, suite, nonce 16, name, address, signing key | `jimichi/csr/v1\x00` |
+
+- Name: 1 to 32 characters from `a-z`, `0-9` and `-`.
+- Address: 1 to 64 bytes (the size of the address field in a control cell), printable ASCII
+  0x21..0x7e only, parsed as host:port with a non-empty host and port. wire drops trailing NULs
+  from an address, so an address with a NUL, a space or a byte outside ASCII could name one node
+  and lead to another.
+- Keys and signatures are at most 128 bytes. cert_hash is the Hash of the whole certificate,
+  signature included.
+- Parsing rejects an unknown version (ErrVersion), an unknown suite (ErrSuite), a field over its
+  maximum, trailing bytes and any input that does not re-encode to itself (ErrFormat). Every object
+  has one canonical encoding. A suite other than the provider's is rejected right after parsing
+  (ErrSuite).
+- The node bundle for clients: JSON `{"v":1,"suite":"c25519","cert":"<base64>","descriptor":"<base64>"}`.
+  Parsing is strict: no unknown fields, no second value, base64 in its canonical form only.
+- The unsigned bundle (pki.Unsigned) serves the measurement without authentication: an empty
+  certificate, a zero cert_hash, an empty signature.
+
+Validity:
+
+- The clock skew allowance Skew = 2 min applies to lower bounds only (not_before, published), so no
+  window is ever extended past its end.
+- A descriptor expires no later than its certificate (expires <= not_after) and lives at most 24 h.
+- Identity.Refresh signs a new descriptor with expires = min(now + ttl, not_after). Without a
+  certificate it returns ErrNoCert, and after not_after it withdraws the bundle.
+
+### Verification order
+
+pki.Verify checks a node bundle against the anchor, the address being dialled and the current time.
+The first failure stops the check, and every step has its own error:
+
+1. bundle version and suite (ErrVersion, ErrSuite): the suite is settled before any key is parsed
+   as a curve point;
+2. certificate parsing (ErrFormat, ErrVersion, ErrSuite);
+3. ca_id (ErrUnknownCA) and the CA signature (ErrCertSignature);
+4. certificate validity (ErrCertTime);
+5. the certificate address equals the dialled address byte for byte (ErrWrongAddr);
+6. descriptor parsing and cert_hash (ErrCertMismatch);
+7. the node signing key's signature (ErrDescSignature);
+8. descriptor validity, expires <= not_after, lifetime at most 24 h (ErrDescTime);
+9. the link and onion keys have the length of the suite's agreement key (ErrKeySize).
+
+- pki.VerifyChain runs this check for every node of the chain and requires addresses, signing keys
+  and onion keys to be pairwise distinct (ErrDuplicate).
+- pki.Unverified reads the same bundles checking only format, suite, key length and repeats, with
+  no signatures, validity or addresses. It is the baseline for measuring what authentication is
+  worth.
+- Request.Check at issuance checks the nonce (ErrNonce), the name and address against the roster
+  (ErrRoster) and the request signature (ErrRequestSignature).
 
 ## What is recorded during measurements
 
@@ -215,6 +297,7 @@ adversary with several snapshots) are stated in LIMITATIONS.
 | crypto/providertest | contract conformance tests | crypto |
 | wire | cell format, layers, replay window | crypto, crypto/secmem |
 | link | link encryption between neighbours, frames of one size | crypto, crypto/secmem, wire |
+| pki | certificate, descriptor and request of a node, issuing and checking | crypto, crypto/secmem, wire |
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
 | client | send, receive, cover traffic | crypto, crypto/secmem, link, wire |
 | vault | container with two volumes | crypto, crypto/secmem |

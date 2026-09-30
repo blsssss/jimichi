@@ -18,6 +18,12 @@ English | [Русский](../ru/GLOSSARY.md)
 | Correlation attack | linking sender and recipient by timings and volumes |
 | Unlinkability | the property that an observer cannot link sender and recipient |
 | Forward secrecy | compromise of a long-term key does not expose past sessions |
+| Trust anchor | the CA public key the client trusts in advance, as the string `<suite>:<base64>` |
+| Node certificate | a CA-signed record binding a node's name, address and signing key for a validity period |
+| Node signing key | the node's long-term signing pair (identity key): it signs the certificate request and the descriptor and takes no part in key agreement |
+| Onion key | the node key the client agrees a layer secret with during circuit setup |
+| Node descriptor | a record signed by the node signing key: certificate hash, link key, onion key, epoch and a short validity |
+| Certificate issuance | the CA checks a node's signed request, carrying a nonce the CA chose, against the operator roster and signs the certificate |
 | Counter window | the range of cell numbers a node accepts, the replay defence |
 | Memory dump | a snapshot of process memory, used in key extraction scenarios |
 | ROC, AUC | the error curve and the area under it, the measure of attack success |
