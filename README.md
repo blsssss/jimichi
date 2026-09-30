@@ -110,7 +110,7 @@ known-answer examples of its standards, and c25519 signing against RFC 8032. See
 ## Layout
 
 ```
-cmd/          entry points: relay, client, lab
+cmd/          entry points: relay, client, jimichi (testbed CLI), lab
 crypto/       CryptoProvider interface
   gost/       GOST suite
   c25519/     X25519 / XChaCha20-Poly1305 / Ed25519 suite
@@ -145,12 +145,19 @@ kind create cluster --config deploy/kind/cluster.yaml
 make images
 kind load docker-image jimichi/relay:dev jimichi/client:dev --name jimichi
 kubectl apply -f deploy/base/relay.yaml
+kubectl -n jimichi wait --for=condition=Available deployment -l app=relay --timeout=180s
+bash scripts/enroll.sh
 kubectl apply -f deploy/base/client.yaml
 ```
 
-Three relays and a client appear in the `jimichi` namespace. A relay publishes its public key on
-port 9100. Its aggregated counters go to stdout once a minute and to port 9101 on loopback only,
-read through a port-forward:
+`make deploy` runs the last four steps. Three relays and a client appear in the `jimichi`
+namespace. A relay creates its signing key in memory at start and waits for enrollment:
+`scripts/enroll.sh` builds `cmd/jimichi` and runs `jimichi enroll` on the host, which certifies
+every relay through a port-forward under a CA that exists only for that run and stores the CA
+public key, the anchor, in ConfigMap `jimichi-ca`. The relay then publishes a signed descriptor on
+port 9100, and the client verifies every descriptor against the anchor before it builds the
+circuit. A restarted relay needs `make enroll` again. Aggregated counters go to stdout once a
+minute and to port 9101 on loopback only, read through a port-forward:
 
 ```
 kubectl -n jimichi port-forward deployment/relay-3 9101:9101
