@@ -14,7 +14,12 @@ for d in relay-1 relay-2 relay-3; do
 done
 # enroll.sh restarts a client that already exists, so every client pod counted
 # below started after the relays it reaches and the anchor that certifies them
-bash scripts/enroll.sh
+if ! bash scripts/enroll.sh; then
+  echo "enrollment failed" >&2
+  kubectl -n "$NAMESPACE" get pods -o wide >&2 || true
+  kubectl -n "$NAMESPACE" logs -l app=relay --prefix --tail=20 >&2 || true
+  exit 1
+fi
 kubectl apply -f deploy/base/client.yaml
 kubectl -n "$NAMESPACE" rollout status deployment/client-a --timeout=180s
 
@@ -43,9 +48,26 @@ fi
 # the same relays, verified against the anchor of a CA that certified none of them
 foreign=$("bin/jimichi$(go env GOEXE)" keygen-ca -suite "$SUITE")
 nodes="relay-1.$NAMESPACE.svc.cluster.local:9000,relay-2.$NAMESPACE.svc.cluster.local:9000,relay-3.$NAMESPACE.svc.cluster.local:9000"
+# the pod runs under the same restrictions as client-a, so its refusal is the
+# one a real client gives; the overrides replace the whole container
+overrides=$(cat <<JSON
+{
+  "apiVersion": "v1",
+  "spec": {
+    "securityContext": {"runAsNonRoot": true, "runAsUser": 65532, "runAsGroup": 65532, "seccompProfile": {"type": "RuntimeDefault"}},
+    "containers": [{
+      "name": "badca",
+      "image": "jimichi/client:dev",
+      "imagePullPolicy": "IfNotPresent",
+      "args": ["-nodes", "$nodes", "-suite", "$SUITE", "-ca", "$foreign", "-count", "1"],
+      "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}}
+    }]
+  }
+}
+JSON
+)
 kubectl -n "$NAMESPACE" delete pod badca --ignore-not-found --wait=true >/dev/null
-kubectl -n "$NAMESPACE" run badca --image=jimichi/client:dev --image-pull-policy=IfNotPresent \
-  --restart=Never -- -nodes "$nodes" -suite "$SUITE" -ca "$foreign" -count 1 >/dev/null
+kubectl -n "$NAMESPACE" run badca --image=jimichi/client:dev --restart=Never --overrides="$overrides" >/dev/null
 if ! kubectl -n "$NAMESPACE" wait pod/badca --for=jsonpath='{.status.phase}'=Failed --timeout=120s >/dev/null; then
   echo "a client with a foreign anchor did not fail" >&2
   kubectl -n "$NAMESPACE" logs pod/badca >&2 || true
