@@ -18,8 +18,9 @@ const (
 	setupFlags = 1
 	setupHdr   = setupFlags + AddrSize + 8
 
-	LabelSetup = "jimichi/setup"
-	LabelCell  = "jimichi/cell"
+	LabelSetup  = "jimichi/setup"
+	LabelCell   = "jimichi/cell"
+	LabelReplay = "jimichi/setup/replay"
 )
 
 // no suite fits more layers into one setup cell; the bound also keeps a
@@ -201,6 +202,8 @@ type SetupLayer struct {
 	NextCircuit uint64
 	Inner       []byte
 	CellKey     *secmem.Buffer
+	// the same for every copy of one setup and for no other setup
+	Tag SetupTag
 }
 
 // index travels in the counter field: a relay must know its position before it
@@ -243,6 +246,14 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 		return nil, err
 	}
 	defer setupKey.Release()
+	// taken from the secret and not from the key on the wire: keys that differ
+	// by a point of small order, and X25519 encodings with the top bit set, all
+	// give one secret and open the same layer
+	tag, err := setupTag(p, secret)
+	if err != nil {
+		secret.Release()
+		return nil, err
+	}
 	cellKey, err := p.DeriveKey(secret, []byte(LabelCell), p.KeySize())
 	secret.Release()
 	if err != nil {
@@ -271,7 +282,7 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 		return nil, ErrFraming
 	}
 
-	out := &SetupLayer{CellKey: cellKey, Inner: plain[setupHdr:]}
+	out := &SetupLayer{CellKey: cellKey, Inner: plain[setupHdr:], Tag: tag}
 	if plain[0] == 1 {
 		out.NextAddr = takeAddr(plain[setupFlags : setupFlags+AddrSize])
 	}
@@ -288,6 +299,19 @@ func ForwardSetup(layer *SetupLayer, index int) (*Cell, error) {
 		return nil, err
 	}
 	return NewCell(Header{Kind: KindControl, Circuit: layer.NextCircuit, Counter: uint64(index + 1)}, body)
+}
+
+// the tag is a one-way image of the secret under its own label, so keeping it
+// on the heap for the life of the node key reveals none of the layer keys
+func setupTag(p jcrypto.CryptoProvider, secret *secmem.Buffer) (SetupTag, error) {
+	var tag SetupTag
+	b, err := p.DeriveKey(secret, []byte(LabelReplay), len(tag))
+	if err != nil {
+		return tag, err
+	}
+	copy(tag[:], b.Bytes())
+	b.Release()
+	return tag, nil
 }
 
 func setupAAD(index int) []byte {

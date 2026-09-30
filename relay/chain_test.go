@@ -3,6 +3,7 @@ package relay_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -942,5 +943,396 @@ func TestChainOnEverySuite(t *testing.T) {
 				t.Fatalf("payload limit %d, want 444", cl.MaxPayload())
 			}
 		})
+	}
+}
+
+// reports when the relay lets go of the link, which it does only after the
+// circuit has left its tables
+type closeSignal struct {
+	net.Conn
+	closed func()
+}
+
+func (c *closeSignal) Close() error {
+	c.closed()
+	return c.Conn.Close()
+}
+
+// a copy of a setup must not rebuild its circuit once the first one is gone:
+// the circuit id is free again by then, so only the setup itself can tell
+func TestSetupReplayAfterTeardownIsRefused(t *testing.T) {
+	p := c25519.New()
+	delivered := make(chan []byte, 4)
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+		delivered <- append([]byte(nil), payload...)
+		return nil
+	})
+
+	var dials atomic.Int32
+	var once sync.Once
+	released := make(chan struct{})
+	entry := startRelay(t, p, relay.Config{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &closeSignal{Conn: conn, closed: func() { once.Do(func() { close(released) }) }}, nil
+	}})
+
+	links := []uint64{57, 68}
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{
+		{StaticPub: entry.pub, Link: links[0], NextAddr: exit.addr, NextCircuit: links[1]},
+		{StaticPub: exit.pub, Link: links[1]},
+	})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, links)
+	if err != nil {
+		t.Fatalf("NewCircuit: %v", err)
+	}
+	defer circuit.Close()
+
+	dialEntry := func() (*link.Conn, net.Conn) {
+		t.Helper()
+		raw, err := net.Dial("tcp", entry.addr)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		conn, err := link.Dial(raw, p, entry.pub)
+		if err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		return conn, raw
+	}
+
+	first, _ := dialEntry()
+	if err := first.WriteCell(setup.Cell); err != nil {
+		t.Fatalf("write setup: %v", err)
+	}
+	cell, err := circuit.Seal(0, []byte("original"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if err := first.WriteCell(cell); err != nil {
+		t.Fatalf("write cell: %v", err)
+	}
+	select {
+	case <-delivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the original circuit carried nothing")
+	}
+
+	_ = first.Close()
+	select {
+	case <-released:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the entry kept the circuit after its link closed")
+	}
+
+	second, raw := dialEntry()
+	defer second.Close()
+	if err := second.WriteCell(setup.Cell); err != nil {
+		t.Fatalf("write replayed setup: %v", err)
+	}
+	// the recorded data cell follows, as it would in a replay; the entry may
+	// already have closed the link, so a failed write is fine
+	_ = second.WriteCell(cell)
+	_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+	var got wire.Cell
+	if err := second.ReadCell(&got); err == nil {
+		t.Fatal("the entry answered on a link whose setup was a replay")
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("the entry kept the link of a replayed setup open")
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("the replay made the entry dial the exit again, %d dials", n)
+	}
+	select {
+	case got := <-delivered:
+		t.Fatalf("the exit delivered %q after the replay", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// forgetting a tag would reopen the replay it guards against, so a full cache
+// turns new circuits away instead
+func TestFullSetupCacheRefusesNewCircuits(t *testing.T) {
+	p := c25519.New()
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte { return payload })
+	entry := startRelay(t, p, relay.Config{SetupCache: 1})
+
+	first, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer first.Close()
+	if err := first.Send([]byte("ping")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case <-first.Replies():
+	case <-time.After(3 * time.Second):
+		t.Fatal("no reply on the circuit that fits the cache")
+	}
+
+	second, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer second.Close()
+	_ = second.Send([]byte("ping"))
+	select {
+	case _, open := <-second.Replies():
+		if open {
+			t.Fatal("a reply came through a circuit past the cache")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a circuit past the cache was not refused")
+	}
+}
+
+func TestSetupCacheSizeIsBounded(t *testing.T) {
+	p := c25519.New()
+	priv, _, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer priv.Release()
+	for _, size := range []int{-1, relay.MaxSetupCache + 1} {
+		if _, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, SetupCache: size}); err == nil {
+			t.Fatalf("relay.New accepted a setup cache of %d", size)
+		}
+	}
+}
+
+// the realistic replay comes from behind the entry: a hostile entry, or whoever
+// sits on the anonymous link to the middle, holds the forwarded setup in clear
+func TestForwardedSetupReplayIsRefusedByTheMiddle(t *testing.T) {
+	p := c25519.New()
+	exit := startNode(t, p, nil)
+
+	var dials atomic.Int32
+	var once sync.Once
+	released := make(chan struct{})
+	middle := startRelay(t, p, relay.Config{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &closeSignal{Conn: conn, closed: func() { once.Do(func() { close(released) }) }}, nil
+	}})
+
+	entryPriv, entryPub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entryPriv.Release()
+
+	links := []uint64{71, 72, 73}
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{
+		{StaticPub: entryPub, Link: links[0], NextAddr: middle.addr, NextCircuit: links[1]},
+		{StaticPub: middle.pub, Link: links[1], NextAddr: exit.addr, NextCircuit: links[2]},
+		{StaticPub: exit.pub, Link: links[2]},
+	})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+	layer, err := wire.OpenSetup(p, entryPriv, setup.Cell)
+	if err != nil {
+		t.Fatalf("OpenSetup: %v", err)
+	}
+	layer.CellKey.Release()
+	forwarded, err := wire.ForwardSetup(layer, 0)
+	if err != nil {
+		t.Fatalf("ForwardSetup: %v", err)
+	}
+
+	dialMiddle := func() (*link.Conn, net.Conn) {
+		t.Helper()
+		raw, err := net.Dial("tcp", middle.addr)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		conn, err := link.Dial(raw, p, nil)
+		if err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		return conn, raw
+	}
+
+	first, _ := dialMiddle()
+	if err := first.WriteCell(forwarded); err != nil {
+		t.Fatalf("write setup: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for dials.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if dials.Load() != 1 {
+		t.Fatal("the middle never extended the original circuit")
+	}
+	_ = first.Close()
+	select {
+	case <-released:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the middle kept the circuit after its link closed")
+	}
+
+	second, raw := dialMiddle()
+	defer second.Close()
+	if err := second.WriteCell(forwarded); err != nil {
+		t.Fatalf("write replayed setup: %v", err)
+	}
+	_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+	var got wire.Cell
+	if err := second.ReadCell(&got); err == nil {
+		t.Fatal("the middle answered on a link whose setup was a replay")
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("the middle kept the link of a replayed setup open")
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("the replay made the middle dial the exit again, %d dials", n)
+	}
+}
+
+// setups sent on a link that already carries a circuit are refused before they
+// reach the cache, so one connection cannot use up the room of every other
+func TestSetupsOnATakenLinkDoNotFillTheCache(t *testing.T) {
+	p := c25519.New()
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte { return payload })
+	entry := startRelay(t, p, relay.Config{SetupCache: 2})
+
+	raw, err := net.Dial("tcp", entry.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn, err := link.Dial(raw, p, entry.pub)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	defer conn.Close()
+
+	for i := 0; i < 8; i++ {
+		setup, err := wire.BuildSetup(p, []wire.SetupHop{{StaticPub: entry.pub, Link: uint64(90 + i)}})
+		if err != nil {
+			t.Fatalf("BuildSetup: %v", err)
+		}
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+		if err := conn.WriteCell(setup.Cell); err != nil {
+			t.Fatalf("setup %d: %v", i, err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for entry.r.Stats().Snapshot().Accepted < 8 {
+		if time.Now().After(deadline) {
+			t.Fatal("the entry did not read every setup on the taken link")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+	if err := cl.Send([]byte("ping")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case _, open := <-cl.Replies():
+		if !open {
+			t.Fatal("setups on one taken link used up the cache")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no reply after setups on a taken link")
+	}
+}
+
+// a setup is burned the moment its layer opens: one that failed further on, here
+// because the next hop was unreachable, must not build a circuit when it comes
+// back later on a fresh link
+func TestFailedSetupCannotComeBack(t *testing.T) {
+	p := c25519.New()
+	exit := startNode(t, p, nil)
+
+	var dials atomic.Int32
+	middle := startRelay(t, p, relay.Config{Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if dials.Add(1) == 1 {
+			return nil, errors.New("next hop unreachable")
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}})
+
+	entryPriv, entryPub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entryPriv.Release()
+	links := []uint64{101, 102, 103}
+	setup, err := wire.BuildSetup(p, []wire.SetupHop{
+		{StaticPub: entryPub, Link: links[0], NextAddr: middle.addr, NextCircuit: links[1]},
+		{StaticPub: middle.pub, Link: links[1], NextAddr: exit.addr, NextCircuit: links[2]},
+		{StaticPub: exit.pub, Link: links[2]},
+	})
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	defer func() {
+		for _, k := range setup.CellKeys {
+			k.Release()
+		}
+	}()
+	layer, err := wire.OpenSetup(p, entryPriv, setup.Cell)
+	if err != nil {
+		t.Fatalf("OpenSetup: %v", err)
+	}
+	layer.CellKey.Release()
+	forwarded, err := wire.ForwardSetup(layer, 0)
+	if err != nil {
+		t.Fatalf("ForwardSetup: %v", err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		raw, err := net.Dial("tcp", middle.addr)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		conn, err := link.Dial(raw, p, nil)
+		if err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		if err := conn.WriteCell(forwarded); err != nil {
+			t.Fatalf("attempt %d: write setup: %v", attempt, err)
+		}
+		_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+		var got wire.Cell
+		err = conn.ReadCell(&got)
+		_ = conn.Close()
+		if err == nil {
+			t.Fatalf("attempt %d: the middle answered a setup it could not extend", attempt)
+		} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			t.Fatalf("attempt %d: the middle kept the link open", attempt)
+		}
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("the setup that failed once made the middle dial %d times", n)
 	}
 }

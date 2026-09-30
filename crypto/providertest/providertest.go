@@ -117,6 +117,19 @@ func testDeriveKey(t *testing.T, p jcrypto.CryptoProvider) {
 	if _, err := p.DeriveKey(secret, []byte("forward"), 0); err == nil {
 		t.Fatal("DeriveKey(size 0) must fail")
 	}
+
+	// wire derives a 16-byte replay tag; every size up to KeySize must work
+	short, err := p.DeriveKey(secret, []byte("replay"), 16)
+	if err != nil {
+		t.Fatalf("DeriveKey(size 16): %v", err)
+	}
+	defer short.Release()
+	if short.Len() != 16 {
+		t.Fatalf("derived size = %d, want 16", short.Len())
+	}
+	if bytes.Equal(short.Bytes(), forward.Bytes()[:16]) {
+		t.Fatal("different labels must produce different outputs at a short size too")
+	}
 }
 
 func testAEADRoundTrip(t *testing.T, p jcrypto.CryptoProvider) {

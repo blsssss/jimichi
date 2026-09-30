@@ -2,8 +2,11 @@ package wire_test
 
 import (
 	"encoding/binary"
+	"errors"
+	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
@@ -178,5 +181,151 @@ func TestOpenSetupRefusesAnImpossibleHopIndex(t *testing.T) {
 		if _, err := wire.OpenSetup(provider(), privs[0], &cell); err == nil {
 			t.Fatalf("OpenSetup accepted hop index %d", counter)
 		}
+	}
+}
+
+func openTag(t *testing.T, priv *secmem.Buffer, cell *wire.Cell) wire.SetupTag {
+	t.Helper()
+	layer, err := wire.OpenSetup(provider(), priv, cell)
+	if err != nil {
+		t.Fatalf("OpenSetup: %v", err)
+	}
+	layer.CellKey.Release()
+	return layer.Tag
+}
+
+func TestSetupTagIsStablePerSetup(t *testing.T) {
+	privs, pubs := staticKeys(t, provider(), hops)
+	var tags [2]wire.SetupTag
+	var cells [2]*wire.Cell
+	for i := range tags {
+		setup, err := wire.BuildSetup(provider(), chainTo(pubs))
+		if err != nil {
+			t.Fatalf("BuildSetup: %v", err)
+		}
+		for _, k := range setup.CellKeys {
+			t.Cleanup(k.Release)
+		}
+		cells[i] = setup.Cell
+		tags[i] = openTag(t, privs[0], setup.Cell)
+	}
+	if again := openTag(t, privs[0], cells[0]); again != tags[0] {
+		t.Fatal("one setup opened twice gave two tags")
+	}
+	if tags[0] == tags[1] {
+		t.Fatal("two setups share a tag")
+	}
+}
+
+// X25519 drops the top bit of a point, so a copy with that bit flipped opens
+// the same layer; a tag taken from the wire bytes would let it through
+func TestSetupTagSurvivesAnotherEncodingOfTheKey(t *testing.T) {
+	privs, pubs := staticKeys(t, provider(), hops)
+	setup, err := wire.BuildSetup(provider(), chainTo(pubs))
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	for _, k := range setup.CellKeys {
+		t.Cleanup(k.Release)
+	}
+	want := openTag(t, privs[0], setup.Cell)
+
+	flipped := *setup.Cell
+	pubLen := len(pubs[0])
+	flipped[wire.CellSize-wire.BodySize+pubLen-1] ^= 0x80
+	if got := openTag(t, privs[0], &flipped); got != want {
+		t.Fatal("another encoding of the same key gave another tag")
+	}
+}
+
+func TestSetupCache(t *testing.T) {
+	c := wire.NewSetupCache(2)
+	a, b, d := wire.SetupTag{1}, wire.SetupTag{2}, wire.SetupTag{3}
+	if err := c.Add(a); err != nil {
+		t.Fatalf("first tag: %v", err)
+	}
+	if err := c.Add(a); !errors.Is(err, wire.ErrSetupReplay) {
+		t.Fatalf("repeated tag: %v, want ErrSetupReplay", err)
+	}
+	if err := c.Add(b); err != nil {
+		t.Fatalf("second tag: %v", err)
+	}
+	if err := c.Add(d); !errors.Is(err, wire.ErrSetupCacheFull) {
+		t.Fatalf("tag past capacity: %v, want ErrSetupCacheFull", err)
+	}
+	// a full cache still knows what it holds, so a replay is not mistaken for load
+	if err := c.Add(b); !errors.Is(err, wire.ErrSetupReplay) {
+		t.Fatalf("repeated tag in a full cache: %v, want ErrSetupReplay", err)
+	}
+}
+
+// adding the point of order two maps u to 1/u, and the clamped X25519 scalar is
+// a multiple of eight, so this is one more key with the same secret
+func TestSetupTagSurvivesASmallOrderShift(t *testing.T) {
+	privs, pubs := staticKeys(t, provider(), hops)
+	setup, err := wire.BuildSetup(provider(), chainTo(pubs))
+	if err != nil {
+		t.Fatalf("BuildSetup: %v", err)
+	}
+	for _, k := range setup.CellKeys {
+		t.Cleanup(k.Release)
+	}
+	want := openTag(t, privs[0], setup.Cell)
+
+	pubLen := len(pubs[0])
+	at := wire.CellSize - wire.BodySize
+	u := new(big.Int).SetBytes(reversed(setup.Cell[at : at+pubLen]))
+	prime := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(19))
+	inv := new(big.Int).ModInverse(u, prime)
+	if inv == nil {
+		t.Fatal("ephemeral key has no inverse")
+	}
+	shifted := *setup.Cell
+	copy(shifted[at:at+pubLen], reversed(inv.FillBytes(make([]byte, pubLen))))
+	if got := openTag(t, privs[0], &shifted); got != want {
+		t.Fatal("a key shifted by a point of small order gave another tag")
+	}
+}
+
+func reversed(b []byte) []byte {
+	out := make([]byte, len(b))
+	for i := range b {
+		out[len(b)-1-i] = b[i]
+	}
+	return out
+}
+
+// copies racing on different links reach the cache at once; exactly one wins
+func TestSetupCacheAdmitsOneOfConcurrentCopies(t *testing.T) {
+	c := wire.NewSetupCache(0)
+	tag := wire.SetupTag{7}
+	var won atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if c.Add(tag) == nil {
+				won.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := won.Load(); n != 1 {
+		t.Fatalf("%d copies were admitted, want 1", n)
+	}
+}
+
+func TestSetupCacheDefaultSize(t *testing.T) {
+	c := wire.NewSetupCache(0)
+	for i := 0; i < wire.DefaultSetupCache; i++ {
+		var tag wire.SetupTag
+		binary.BigEndian.PutUint32(tag[:], uint32(i))
+		if err := c.Add(tag); err != nil {
+			t.Fatalf("tag %d of the default %d: %v", i, wire.DefaultSetupCache, err)
+		}
+	}
+	if err := c.Add(wire.SetupTag{0xff}); !errors.Is(err, wire.ErrSetupCacheFull) {
+		t.Fatalf("tag past the default size: %v, want ErrSetupCacheFull", err)
 	}
 }

@@ -24,6 +24,9 @@ type Config struct {
 	Provider   jcrypto.CryptoProvider
 	StaticPriv *secmem.Buffer
 	ReplaySize uint64
+	// setups remembered to refuse a copy; once full the node refuses new
+	// circuits until it restarts with a new key; zero picks the default
+	SetupCache int
 	Deliver    Deliver
 	Dialer     net.Dialer
 	// lets the testbed observe the link to the next hop the way a passive
@@ -37,7 +40,8 @@ type Config struct {
 }
 
 type Relay struct {
-	cfg Config
+	cfg    Config
+	setups *wire.SetupCache
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -110,9 +114,13 @@ func New(cfg Config) (*Relay, error) {
 	if cfg.QueueCells < 0 || cfg.QueueCells > maxQueueCells {
 		return nil, fmt.Errorf("relay: queue of %d cells outside 0..%d", cfg.QueueCells, maxQueueCells)
 	}
+	if cfg.SetupCache < 0 || cfg.SetupCache > MaxSetupCache {
+		return nil, fmt.Errorf("relay: setup cache of %d entries outside 0..%d", cfg.SetupCache, MaxSetupCache)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Relay{
 		cfg:      cfg,
+		setups:   wire.NewSetupCache(cfg.SetupCache),
 		ctx:      ctx,
 		cancel:   cancel,
 		circuits: make(map[uint64]*circuit),
@@ -124,6 +132,10 @@ func New(cfg Config) (*Relay, error) {
 // bounds how long a silent peer can hold a handshake or a dial open, so neither
 // can keep Close from reaching the keys
 const handshakeTimeout = 5 * time.Second
+
+// tags sit on the heap for the life of the node key, about 36 bytes each with
+// the map overhead, so this keeps the cache near 36 MiB, inside a 128 MiB pod
+const MaxSetupCache = 1 << 20
 
 var (
 	errDuplicate = errors.New("relay: circuit id already in use")
@@ -392,8 +404,23 @@ func (r *Relay) backward(c *circuit) {
 }
 
 func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
+	// a link carries one circuit, so a further setup on it is turned away before
+	// it costs an agreement or a tag: otherwise one link could fill the cache
+	r.mu.Lock()
+	_, owned := r.owners[from]
+	r.mu.Unlock()
+	if owned {
+		return errLinkTaken
+	}
+
 	layer, err := wire.OpenSetup(r.cfg.Provider, r.cfg.StaticPriv, cell)
 	if err != nil {
+		return r.setupFailed(from, err)
+	}
+	// burned on first sight whatever happens next: a setup that fails further on
+	// must not come back later on a fresh link either
+	if err := r.setups.Add(layer.Tag); err != nil {
+		layer.CellKey.Release()
 		return r.setupFailed(from, err)
 	}
 	index := int(hdr.Counter)

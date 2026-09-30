@@ -16,6 +16,7 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/relay"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 func main() {
@@ -29,6 +30,7 @@ func main() {
 	echo := flag.Bool("echo", true, "as an exit, send the payload back along the circuit")
 	period := flag.Duration("period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
 	queue := flag.Int("queue", 64, "cells a circuit may queue per direction when -period is set")
+	setupCache := flag.Int("setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits until restart", relay.MaxSetupCache))
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
@@ -82,6 +84,7 @@ func main() {
 		},
 		Period:     *period,
 		QueueCells: *queue,
+		SetupCache: *setupCache,
 	})
 	if err != nil {
 		logger.Fatalf("relay: %v", err)

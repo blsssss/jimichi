@@ -163,8 +163,8 @@ func publicKey(c *gost3410.Curve, raw []byte) (*gost3410.PublicKey, error) {
 	return pub, nil
 }
 
-// KDF_GOSTR3411_2012_256 (R 50.1.113-2016) gives 32 bytes, which is every size
-// wire and link ask for
+// KDF_GOSTR3411_2012_256 (R 50.1.113-2016) gives 32 bytes; a shorter size, such
+// as the setup replay tag, is its prefix
 func (p *Provider) DeriveKey(secret *secmem.Buffer, label []byte, size int) (*secmem.Buffer, error) {
 	if secret == nil || secret.Len() == 0 {
 		return nil, jcrypto.ErrBadKeySize

@@ -1,6 +1,9 @@
 package wire
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 // a relay that forwards a replayed cell hands an active observer a free timing
 // mark, so this is metadata protection and not only integrity
@@ -97,4 +100,44 @@ func (w *ReplayWindow) set(counter uint64) {
 func (w *ReplayWindow) unset(counter uint64) {
 	word, bit := w.slot(counter)
 	w.bits[word] &^= bit
+}
+
+type SetupTag [16]byte
+
+const DefaultSetupCache = 1 << 16
+
+var (
+	ErrSetupReplay    = errors.New("wire: setup already seen")
+	ErrSetupCacheFull = errors.New("wire: setup cache full")
+)
+
+// one setup cell carries the whole chain, so a copy accepted after the circuit
+// is gone rebuilds it to the exit and recreates its hop keys with counters from
+// zero; the tags must outlive every circuit built under the node key, so a full
+// cache refuses new setups rather than forget a tag a replay could reuse
+type SetupCache struct {
+	mu   sync.Mutex
+	max  int
+	seen map[SetupTag]struct{}
+}
+
+func NewSetupCache(max int) *SetupCache {
+	if max <= 0 {
+		max = DefaultSetupCache
+	}
+	return &SetupCache{max: max, seen: make(map[SetupTag]struct{})}
+}
+
+// Add records a tag whose setup layer has opened
+func (c *SetupCache) Add(tag SetupTag) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.seen[tag]; ok {
+		return ErrSetupReplay
+	}
+	if len(c.seen) >= c.max {
+		return ErrSetupCacheFull
+	}
+	c.seen[tag] = struct{}{}
+	return nil
 }

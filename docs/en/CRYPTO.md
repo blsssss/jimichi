@@ -57,6 +57,8 @@ Decisions taken:
 - ukm is mandatory in both suites: it binds the shared secret to one session. In GOST it is the
   standard VKO parameter, in c25519 it goes in as the HKDF salt.
 - KeySize reports the AEAD key length so that wire never hardcodes 32 bytes.
+- DeriveKey accepts any size from 1 to KeySize: wire takes 16 bytes for the control cell replay
+  tag.
 - An AEAD is safe for concurrent use: a node peels and wraps layers under one key from different
   goroutines. gogost's MGM keeps per-call state, so the GOST suite serialises calls with a lock.
   providertest checks this with concurrent Seal and Open.

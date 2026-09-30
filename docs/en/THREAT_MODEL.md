@@ -39,7 +39,7 @@ the implementation.
 | One node learning the whole route | nested encryption, a node sees only its neighbours | compromising one node of three, checking what it holds |
 | A node inserted through a compromised CA | the client picks the chain, layers are encrypted per node | inserting one and two nodes, measuring the residual leak |
 | Linking a flow by cell headers | link encryption between neighbours, frames of one size on the wire | searching a link capture for counters and identifiers |
-| Replay and tampering | AEAD on every layer, a window of counters | replaying a recorded cell, flipping a byte, expecting a refusal |
+| Replay and tampering | AEAD on every layer, a window of counters, tags of opened control cells until the node key changes | replaying a recorded cell, flipping a byte, expecting a refusal |
 | Proving that a message was sent | cover and payload cells are indistinguishable on the wire and to every node before the exit: the cover flag sits inside the innermost layer | distinguishing the two kinds from observable features, expecting chance level |
 | Proving authorship to a third party | deniable authentication: the recipient is convinced by a shared secret, not by a signature | the recipient forges a transcript indistinguishable from a real one |
 | Coercion after the session | ephemeral key buffers are zeroed, no keys on disk; library copies on the heap live until the memory is reused | searching memory and disk for the key after the session ends |
