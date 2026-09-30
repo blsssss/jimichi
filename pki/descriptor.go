@@ -36,6 +36,17 @@ func (d *Descriptor) Marshal() []byte {
 }
 
 func ParseDescriptor(b []byte) (*Descriptor, error) {
+	d, err := decodeDescriptor(b)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(d.Marshal(), b) {
+		return nil, ErrFormat
+	}
+	return d, nil
+}
+
+func decodeDescriptor(b []byte) (*Descriptor, error) {
 	r := reader{b: b}
 	s, err := r.header()
 	if err != nil {
@@ -51,9 +62,6 @@ func ParseDescriptor(b []byte) (*Descriptor, error) {
 	d.Sig = r.field(0, maxSig)
 	if err := r.end(); err != nil {
 		return nil, err
-	}
-	if !bytes.Equal(d.Marshal(), b) {
-		return nil, ErrFormat
 	}
 	return d, nil
 }

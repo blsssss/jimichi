@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
@@ -66,33 +65,26 @@ func (b Bundle) Marshal() []byte {
 	return out
 }
 
+// the certificate may be empty, which is how an unsigned bundle travels; Verify
+// then fails on it with ErrFormat
 func ParseBundle(raw []byte) (*Bundle, error) {
 	var e envelope
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&e); err != nil {
-		return nil, ErrFormat
-	}
-	if _, err := dec.Token(); err != io.EOF {
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&e); err != nil {
 		return nil, ErrFormat
 	}
 	if e.V != Version {
 		return nil, ErrVersion
 	}
-	cert, err := decodeField(e.Cert)
-	if err != nil {
-		return nil, err
+	cert, errCert := base64.StdEncoding.Strict().DecodeString(e.Cert)
+	desc, errDesc := base64.StdEncoding.Strict().DecodeString(e.Descriptor)
+	if errCert != nil || errDesc != nil || e.Suite == "" || len(desc) == 0 {
+		return nil, ErrFormat
 	}
-	desc, err := decodeField(e.Descriptor)
-	if err != nil {
-		return nil, err
-	}
-	return &Bundle{V: e.V, Suite: e.Suite, Cert: cert, Descriptor: desc}, nil
-}
-
-func decodeField(s string) ([]byte, error) {
-	b, err := base64.StdEncoding.Strict().DecodeString(s)
-	if err != nil || base64.StdEncoding.EncodeToString(b) != s {
+	b := &Bundle{V: e.V, Suite: e.Suite, Cert: cert, Descriptor: desc}
+	// encoding/json matches keys regardless of case, keeps the last of two equal
+	// keys and reads a missing one as empty; only the spelling Marshal writes is
+	// accepted, which rules all of that out along with spacing and trailing data
+	if !bytes.Equal(b.Marshal(), raw) {
 		return nil, ErrFormat
 	}
 	return b, nil
@@ -245,7 +237,7 @@ func eachNode(addrs []string, bundles [][]byte, read func(string, []byte) (*Veri
 }
 
 func certWindow(c *Cert, now time.Time, skew time.Duration) error {
-	if now.Add(skew).Unix() < c.NotBefore || now.Unix() >= c.NotAfter {
+	if c.NotAfter <= c.NotBefore || now.Add(skew).Unix() < c.NotBefore || now.Unix() >= c.NotAfter {
 		return ErrCertTime
 	}
 	return nil

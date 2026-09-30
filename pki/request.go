@@ -33,6 +33,17 @@ func (r *Request) Marshal() []byte {
 }
 
 func ParseRequest(b []byte) (*Request, error) {
+	r, err := decodeRequest(b)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(r.Marshal(), b) {
+		return nil, ErrFormat
+	}
+	return r, nil
+}
+
+func decodeRequest(b []byte) (*Request, error) {
 	rd := reader{b: b}
 	s, err := rd.header()
 	if err != nil {
@@ -48,9 +59,6 @@ func ParseRequest(b []byte) (*Request, error) {
 		return nil, err
 	}
 	if !validName(r.Name) || !validAddr(r.Addr) {
-		return nil, ErrFormat
-	}
-	if !bytes.Equal(r.Marshal(), b) {
 		return nil, ErrFormat
 	}
 	return r, nil

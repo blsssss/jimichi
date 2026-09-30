@@ -35,46 +35,68 @@ func seedCorpus(f *testing.F) seeds {
 	return s
 }
 
-func fuzzRoundTrip(f *testing.F, corpus [][]byte, parse func([]byte) ([]byte, error)) {
+// decode is the parser without its closing canonical check, so a field the codec
+// reads and writes differently shows up here as a mismatch rather than hiding
+// behind a rejection; parse must then accept exactly what decode accepts
+func fuzzRoundTrip(f *testing.F, corpus [][]byte, decode func([]byte) ([]byte, error), parse func([]byte) error) {
 	for _, c := range corpus {
 		f.Add(c)
 	}
 	f.Add([]byte{})
 	f.Add([]byte{Version, byte(jcrypto.SuiteC25519)})
 	f.Fuzz(func(t *testing.T, b []byte) {
-		out, err := parse(b)
-		if err == nil && !bytes.Equal(out, b) {
-			t.Fatalf("%x parses and re-marshals to %x", b, out)
+		out, decErr := decode(b)
+		parseErr := parse(b)
+		if decErr != nil {
+			if parseErr == nil {
+				t.Fatalf("%x is rejected by decode (%v) and accepted by parse", b, decErr)
+			}
+			return
+		}
+		if !bytes.Equal(out, b) {
+			t.Fatalf("%x decodes and re-marshals to %x", b, out)
+		}
+		if parseErr != nil {
+			t.Fatalf("%x decodes and round-trips but parse rejects it: %v", b, parseErr)
 		}
 	})
 }
 
 func FuzzParseCert(f *testing.F) {
 	fuzzRoundTrip(f, seedCorpus(f).certs, func(b []byte) ([]byte, error) {
-		c, err := ParseCert(b)
+		c, err := decodeCert(b)
 		if err != nil {
 			return nil, err
 		}
 		return c.Marshal(), nil
+	}, func(b []byte) error {
+		_, err := ParseCert(b)
+		return err
 	})
 }
 
 func FuzzParseDescriptor(f *testing.F) {
 	fuzzRoundTrip(f, seedCorpus(f).descriptors, func(b []byte) ([]byte, error) {
-		d, err := ParseDescriptor(b)
+		d, err := decodeDescriptor(b)
 		if err != nil {
 			return nil, err
 		}
 		return d.Marshal(), nil
+	}, func(b []byte) error {
+		_, err := ParseDescriptor(b)
+		return err
 	})
 }
 
 func FuzzParseRequest(f *testing.F) {
 	fuzzRoundTrip(f, seedCorpus(f).requests, func(b []byte) ([]byte, error) {
-		r, err := ParseRequest(b)
+		r, err := decodeRequest(b)
 		if err != nil {
 			return nil, err
 		}
 		return r.Marshal(), nil
+	}, func(b []byte) error {
+		_, err := ParseRequest(b)
+		return err
 	})
 }

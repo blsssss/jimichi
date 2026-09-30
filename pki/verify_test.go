@@ -2,6 +2,7 @@ package pki
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"math"
 	"strings"
@@ -261,6 +262,78 @@ func TestEveryTimeBoundary(t *testing.T) {
 			_, err := Verify(p, pol, n.addr, n.pack(t, d), c.now)
 			wantErr(t, c.name, err, c.want)
 		}
+	})
+}
+
+func TestCertificateWindowMustBeOrdered(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		e := newEnv(t, p)
+		n := e.node(t, "relay-1")
+		for _, c := range []struct {
+			what                string
+			notBefore, notAfter time.Time
+		}{
+			{"a reversed window", until, t0},
+			// with the skew the moment just before not_before would still pass
+			{"an empty window", t0, t0},
+		} {
+			cert := *n.cert
+			cert.NotBefore, cert.NotAfter = c.notBefore.Unix(), c.notAfter.Unix()
+			sig, err := e.ca.sign(certDomain, cert.body())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cert.Sig = sig
+			n.raw = cert.Marshal()
+			now := c.notBefore.Add(-time.Minute)
+			_, err = Verify(p, e.pol, n.addr, n.pack(t, n.descriptor(now, now.Add(time.Minute))), now)
+			wantErr(t, "verify of "+c.what, err, ErrCertTime)
+			wantErr(t, "install of "+c.what, n.id.Install(n.raw, now), ErrCertTime)
+		}
+	})
+}
+
+// the neutral Ed25519 point with R = [0]B, S = 0 is a signature of every message
+// under crypto/ed25519; GOST has no affine neutral point, its order 2 point stands in
+var weakKeys = map[jcrypto.Suite]struct{ pub, sig string }{
+	jcrypto.SuiteC25519: {
+		"01" + strings.Repeat("00", 31),
+		"01" + strings.Repeat("00", 63),
+	},
+	jcrypto.SuiteGOST: {
+		"aa4aa1e7dc7530a67ec42a195cfe448758d978d4444b978e15ff95f573fe0001" + strings.Repeat("00", 32),
+		"01" + strings.Repeat("00", 63),
+	},
+}
+
+func TestSmallOrderKeyProvesNothing(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		e := newEnv(t, p)
+		pub, _ := hex.DecodeString(weakKeys[p.Suite()].pub)
+		sig, _ := hex.DecodeString(weakKeys[p.Suite()].sig)
+		nonce := randomNonce(t)
+		r := &Request{Suite: p.Suite(), Nonce: nonce, Name: "relay-1", Addr: addrOf("relay-1"), Identity: pub, Sig: sig}
+		parsed, err := ParseRequest(r.Marshal())
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantErr(t, "request under a small-order key", parsed.Check(p, nonce, "relay-1", addrOf("relay-1")), ErrRequestSignature)
+		_, err = e.ca.Issue(parsed, t0, until)
+		wantErr(t, "issue for a small-order key", err, ErrRequestSignature)
+
+		// a CA that certified such a key anyway still would not make its descriptors forgeable
+		cert := &Cert{Suite: p.Suite(), CAID: e.ca.id, NotBefore: t0.Unix(), NotAfter: until.Unix(),
+			Name: "relay-1", Addr: addrOf("relay-1"), Identity: pub}
+		if cert.Sig, err = e.ca.sign(certDomain, cert.body()); err != nil {
+			t.Fatal(err)
+		}
+		raw := cert.Marshal()
+		onion := agreementKey(t, p)
+		d := &Descriptor{Suite: p.Suite(), Published: t0.Unix(), Expires: t0.Add(time.Hour).Unix(),
+			LinkPub: onion, OnionPub: onion, Sig: sig}
+		copy(d.CertHash[:], p.Hash(raw))
+		_, err = Verify(p, e.pol, cert.Addr, pack(p, raw, d.Marshal()), t0)
+		wantErr(t, "descriptor under a small-order key", err, ErrDescSignature)
 	})
 }
 

@@ -253,6 +253,9 @@ func TestBundleIsSafeToServeDuringRefresh(t *testing.T) {
 		done := make(chan struct{})
 		errs := make(chan error, 4)
 		var wg sync.WaitGroup
+		var once sync.Once
+		stop := func() { once.Do(func() { close(done); wg.Wait() }) }
+		defer stop()
 		for range 4 {
 			wg.Add(1)
 			go func() {
@@ -279,8 +282,7 @@ func TestBundleIsSafeToServeDuringRefresh(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		close(done)
-		wg.Wait()
+		stop()
 		close(errs)
 		for err := range errs {
 			t.Fatalf("a bundle served during refresh: %v", err)

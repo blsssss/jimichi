@@ -12,8 +12,6 @@ import (
 	"github.com/jimichi-org/jimichi/wire"
 )
 
-// the node side of the chain: a signing key that never leaves the buffer it was
-// generated in, the installed certificate and the last signed bundle
 type Identity struct {
 	p    jcrypto.CryptoProvider
 	name string

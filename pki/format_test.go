@@ -156,6 +156,15 @@ func TestNamesAndAddresses(t *testing.T) {
 		{"relay-1:9000\n", false},
 		{"rélay:9000", false},
 		{"a:b:9000", false},
+		{"relay-1:1", true},
+		{"relay-1:65535", true},
+		{"relay-1:0", false},
+		{"relay-1:09000", false},
+		{"relay-1:65536", false},
+		{"relay-1:100000", false},
+		{"relay-1:+9000", false},
+		{"relay-1:http", false},
+		{"relay-1:9O00", false},
 	} {
 		if validAddr(c.addr) != c.ok {
 			t.Fatalf("validAddr(%q) = %v", c.addr, !c.ok)
@@ -246,34 +255,50 @@ func TestAnchor(t *testing.T) {
 }
 
 func TestParseBundle(t *testing.T) {
-	for _, c := range []struct {
-		what, json string
-		want       error
-	}{
-		{"an unknown field", `{"v":1,"suite":"c25519","cert":"","descriptor":"","x":1}`, ErrFormat},
-		{"a second value", `{"v":1,"suite":"c25519","cert":"","descriptor":""}{}`, ErrFormat},
-		{"version 2", `{"v":2,"suite":"c25519","cert":"","descriptor":""}`, ErrVersion},
-		{"no version", `{"suite":"c25519","cert":"","descriptor":""}`, ErrVersion},
-		{"a string version", `{"v":"1","suite":"c25519","cert":"","descriptor":""}`, ErrFormat},
-		{"loose base64", `{"v":1,"suite":"c25519","cert":"AB==","descriptor":""}`, ErrFormat},
-		{"a line break in base64", `{"v":1,"suite":"c25519","cert":"AA\n==","descriptor":""}`, ErrFormat},
-		{"an array", `[]`, ErrFormat},
-		{"no JSON", `v=1`, ErrFormat},
-	} {
-		_, err := ParseBundle([]byte(c.json))
-		wantErr(t, "bundle with "+c.what, err, c.want)
-	}
-
 	b := Bundle{V: Version, Suite: "gost", Cert: []byte{1, 2, 3}, Descriptor: []byte{4}}
 	raw := b.Marshal()
 	if want := `{"v":1,"suite":"gost","cert":"AQID","descriptor":"BA=="}`; string(raw) != want {
 		t.Fatalf("bundle encodes as %s, want %s", raw, want)
 	}
-	got, err := ParseBundle(append(raw, '\n'))
+	got, err := ParseBundle(raw)
 	if err != nil || got.Suite != b.Suite || !bytes.Equal(got.Cert, b.Cert) || !bytes.Equal(got.Descriptor, b.Descriptor) {
 		t.Fatalf("bundle round trip: %+v, %v", got, err)
 	}
-	if empty := (Bundle{V: Version, Suite: "c25519"}).Marshal(); !bytes.Contains(empty, []byte(`"cert":""`)) {
-		t.Fatalf("an empty certificate encodes as %s", empty)
+	unsigned := `{"v":1,"suite":"gost","cert":"","descriptor":"BA=="}`
+	if _, err := ParseBundle([]byte(unsigned)); err != nil {
+		t.Fatalf("bundle with an empty certificate, as an unsigned one travels: %v", err)
+	}
+
+	for _, c := range []struct {
+		what, json string
+		want       error
+	}{
+		{"an unknown field", `{"v":1,"suite":"gost","cert":"AQID","descriptor":"BA==","x":1}`, ErrFormat},
+		{"a second value", string(raw) + `{}`, ErrFormat},
+		{"a trailing newline", string(raw) + "\n", ErrFormat},
+		{"spaces", `{"v": 1,"suite":"gost","cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"fields in another order", `{"suite":"gost","v":1,"cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"an upper-case key", `{"V":1,"suite":"gost","cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"a mixed-case key", `{"v":1,"Suite":"gost","cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"a repeated key", `{"v":1,"suite":"gost","cert":"AQID","cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"a repeated key of another value", `{"v":1,"suite":"c25519","suite":"gost","cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"no suite", `{"v":1,"cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"an empty suite", `{"v":1,"suite":"","cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"no certificate", `{"v":1,"suite":"gost","descriptor":"BA=="}`, ErrFormat},
+		{"a null certificate", `{"v":1,"suite":"gost","cert":null,"descriptor":"BA=="}`, ErrFormat},
+		{"no descriptor", `{"v":1,"suite":"gost","cert":"AQID"}`, ErrFormat},
+		{"an empty descriptor", `{"v":1,"suite":"gost","cert":"AQID","descriptor":""}`, ErrFormat},
+		{"an escaped character", strings.Replace(string(raw), "AQID", "AQI"+string(rune(0x5c))+"u0044", 1), ErrFormat},
+		{"loose base64", `{"v":1,"suite":"gost","cert":"AB==","descriptor":"BA=="}`, ErrFormat},
+		{"a line break in base64", `{"v":1,"suite":"gost","cert":"AQ\nID","descriptor":"BA=="}`, ErrFormat},
+		{"a float version", `{"v":1.0,"suite":"gost","cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"a string version", `{"v":"1","suite":"gost","cert":"AQID","descriptor":"BA=="}`, ErrFormat},
+		{"version 2", `{"v":2,"suite":"gost","cert":"AQID","descriptor":"BA=="}`, ErrVersion},
+		{"no version", `{"suite":"gost","cert":"AQID","descriptor":"BA=="}`, ErrVersion},
+		{"an array", `[]`, ErrFormat},
+		{"no JSON", `v=1`, ErrFormat},
+	} {
+		_, err := ParseBundle([]byte(c.json))
+		wantErr(t, "bundle with "+c.what, err, c.want)
 	}
 }

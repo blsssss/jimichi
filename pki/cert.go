@@ -62,6 +62,17 @@ func (c *Cert) Marshal() []byte {
 }
 
 func ParseCert(b []byte) (*Cert, error) {
+	c, err := decodeCert(b)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(c.Marshal(), b) {
+		return nil, ErrFormat
+	}
+	return c, nil
+}
+
+func decodeCert(b []byte) (*Cert, error) {
 	r := reader{b: b}
 	s, err := r.header()
 	if err != nil {
@@ -80,9 +91,6 @@ func ParseCert(b []byte) (*Cert, error) {
 		return nil, err
 	}
 	if !validName(c.Name) || !validAddr(c.Addr) {
-		return nil, ErrFormat
-	}
-	if !bytes.Equal(c.Marshal(), b) {
 		return nil, ErrFormat
 	}
 	return c, nil
@@ -117,7 +125,22 @@ func validAddr(s string) bool {
 		}
 	}
 	host, port, err := net.SplitHostPort(s)
-	return err == nil && host != "" && port != ""
+	return err == nil && host != "" && validPort(port)
+}
+
+// one spelling per port, since the client compares addresses byte for byte
+func validPort(s string) bool {
+	if len(s) == 0 || len(s) > 5 || s[0] == '0' {
+		return false
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		n = n*10 + int(s[i]-'0')
+	}
+	return n <= 65535
 }
 
 type writer struct{ b []byte }
