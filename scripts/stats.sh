@@ -3,11 +3,12 @@
 # port-forward and never through the service the clients use
 set -euo pipefail
 
-NAMESPACE="${NAMESPACE:-jimichi}"
+. "$(dirname "$0")/lib.sh"
 
 for h in 1 2 3; do
   port=$((19100 + h))
-  kubectl -n "$NAMESPACE" port-forward "deployment/relay-$h" "$port:9101" >/dev/null 2>&1 &
+  pod=$(current_pod "relay-$h")
+  kubectl -n "$NAMESPACE" port-forward "pod/$pod" "$port:9101" >/dev/null 2>&1 &
   pid=$!
   for _ in $(seq 1 50); do
     curl -s "localhost:$port/stats" >/dev/null 2>&1 && break
