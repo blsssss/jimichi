@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,25 +68,95 @@ func TestBrokenRunsStayOutOfTheMedians(t *testing.T) {
 	if s.Runs != 3 || s.BrokenRuns != 1 {
 		t.Fatalf("runs %d, broken %d; want 3 and 1", s.Runs, s.BrokenRuns)
 	}
-	near := func(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
+	near := func(a *float64, b float64) bool { return a != nil && *a-b < 1e-9 && b-*a < 1e-9 }
 	if !near(s.AUC, 0.7) || !near(s.AUCMin, 0.6) || !near(s.AUCMax, 0.8) || !near(s.TopOne, 0.75) ||
-		!near(s.Multiplier, 3) || !near(s.RelayMult, 2) || !near(s.LatencyP50Ms, 20) || s.DegenerateRuns != 0 {
-		t.Fatalf("summary %+v does not match the two clean runs", s)
+		!near(s.Multiplier, 3) || !near(s.RelayMult, 2) || !near(s.LatencyP50Ms, 20) ||
+		s.DegenerateRuns == nil || *s.DegenerateRuns != 0 {
+		t.Fatalf("summary does not match the two clean runs: %s", encode(t, s))
 	}
 }
 
-// a configuration whose every run closed a circuit keeps its line, with zero
-// medians the report can still encode
+func encode(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("summary does not encode: %v", err)
+	}
+	return string(b)
+}
+
+var medianFields = []string{
+	"auc_median", "auc_min", "auc_max", "top1_median", "bandwidth_multiplier_median",
+	"relay_link_multiplier_median", "ci_degenerate_runs", "latency_p50_ms_median",
+}
+
+func fields(t *testing.T, s summary) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(encode(t, s)), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// a configuration whose every run closed a circuit keeps its line, and every
+// field that would hold a result is null rather than a zero that reads as one
 func TestEveryRunBrokenLeavesNothingToSummarise(t *testing.T) {
 	rows := []result{
-		{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.9, BrokenFlows: 1},
-		{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.4, RelayBrokenCircuits: 3},
+		{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.9, P50: "10ms", BrokenFlows: 1},
+		{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.4, P50: "20ms", RelayBrokenCircuits: 3},
 	}
 	sum := summarise(rows)
-	if len(sum) != 1 || sum[0].Runs != 2 || sum[0].BrokenRuns != 2 || sum[0].AUC != 0 {
-		t.Fatalf("summary %+v, want two runs, both broken, no median", sum)
+	if len(sum) != 1 || sum[0].Runs != 2 || sum[0].BrokenRuns != 2 {
+		t.Fatalf("summary %s, want two runs, both broken", encode(t, sum))
 	}
-	if _, err := json.Marshal(sum); err != nil {
-		t.Fatalf("summary does not encode: %v", err)
+	m := fields(t, sum[0])
+	for _, f := range medianFields {
+		v, present := m[f]
+		if !present || v != nil {
+			t.Fatalf("%s is %v, want null: %s", f, v, encode(t, sum[0]))
+		}
+	}
+}
+
+// clean runs without a single latency sample leave the latency median null:
+// Median of nothing is NaN, which JSON cannot hold
+func TestNoLatencySampleLeavesTheLatencyMedianNull(t *testing.T) {
+	sum := summarise([]result{{Suite: "c25519", Traffic: "x", Bin: "100ms", AUC: 0.6}})
+	m := fields(t, sum[0])
+	if v, present := m["latency_p50_ms_median"]; !present || v != nil {
+		t.Fatalf("latency median %v, want null", v)
+	}
+	if m["auc_median"] != 0.6 || m["ci_degenerate_runs"] != 0.0 {
+		t.Fatalf("clean fields lost: %s", encode(t, sum[0]))
+	}
+}
+
+// one clean run gives values, not a median, and the printed line says so; a
+// line with no clean run prints no numbers at all
+func TestSummaryMarksLinesWithOneOrNoCleanRun(t *testing.T) {
+	sum := summarise([]result{
+		{Suite: "c25519", Traffic: "one", Bin: "100ms", AUC: 0.6, P50: "10ms"},
+		{Suite: "c25519", Traffic: "one", Bin: "100ms", AUC: 0.9, RelayBrokenCircuits: 1},
+		{Suite: "c25519", Traffic: "none", Bin: "100ms", AUC: 0.9, BrokenFlows: 2},
+		{Suite: "c25519", Traffic: "two", Bin: "100ms", AUC: 0.6},
+		{Suite: "c25519", Traffic: "two", Bin: "100ms", AUC: 0.8},
+	})
+	var out bytes.Buffer
+	printSummary(&out, sum)
+	lines := map[string]string{}
+	for _, l := range strings.Split(out.String(), "\n") {
+		if f := strings.Fields(l); len(f) > 0 {
+			lines[f[0]] = l
+		}
+	}
+	if !strings.Contains(lines["one"], "one clean run") {
+		t.Fatalf("a single clean run is printed as a median: %q", lines["one"])
+	}
+	if !strings.Contains(lines["none"], "nothing to summarise") || strings.Contains(lines["none"], "0.900") {
+		t.Fatalf("a line without clean runs prints numbers: %q", lines["none"])
+	}
+	if strings.Contains(lines["two"], "one clean run") || !strings.Contains(lines["two"], "0.700") {
+		t.Fatalf("a line of two clean runs lost its median: %q", lines["two"])
 	}
 }
