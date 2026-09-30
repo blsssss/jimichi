@@ -1,6 +1,7 @@
 package c25519
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha512"
 
@@ -61,6 +62,17 @@ func publicKey(seed []byte) []byte {
 	}
 	defer zeroScalar(s)
 	return new(edwards25519.Point).ScalarBaseMult(s).Bytes()
+}
+
+// crypto/ed25519 verifies without the cofactor and takes any point as a key: under
+// a key of small order R = [S]B signs every message, so such keys are refused, and
+// so is a second encoding of a point, which would give one key two spellings
+func validPublicKey(pub []byte) bool {
+	a, err := new(edwards25519.Point).SetBytes(pub)
+	if err != nil || !bytes.Equal(a.Bytes(), pub) {
+		return false
+	}
+	return new(edwards25519.Point).MultByCofactor(a).Equal(edwards25519.NewIdentityPoint()) == 0
 }
 
 func zeroScalar(s *edwards25519.Scalar) { s.Set(edwards25519.NewScalar()) }

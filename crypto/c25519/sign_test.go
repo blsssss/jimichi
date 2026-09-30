@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"testing"
+
+	"filippo.io/edwards25519"
 )
 
 // RFC 8032, section 7.1, test 2
@@ -45,6 +47,57 @@ func TestGenerateSigningMatchesStandardLibrary(t *testing.T) {
 			t.Fatalf("key %d: signature differs from stdlib", i)
 		}
 		priv.Release()
+	}
+}
+
+// all eight points of small order: one of order 1, one of 2, two of 4, four of 8
+var smallOrder = []string{
+	"0100000000000000000000000000000000000000000000000000000000000000",
+	"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"0000000000000000000000000000000000000000000000000000000000000000",
+	"0000000000000000000000000000000000000000000000000000000000000080",
+	"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+	"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+	"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+	"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+}
+
+func TestVerifyRefusesSmallOrderKeys(t *testing.T) {
+	p := New()
+	msg := []byte("any message at all")
+	identity, _ := hex.DecodeString(smallOrder[0])
+	// R = [0]B and S = 0 pass [S]B = R + [k]A for every k once A is the identity
+	forged := append(bytes.Clone(identity), make([]byte, 32)...)
+	if !ed25519.Verify(identity, msg, forged) {
+		t.Fatal("crypto/ed25519 no longer accepts the forgery this check exists for")
+	}
+
+	seen := map[string]bool{}
+	for _, h := range smallOrder {
+		pub, _ := hex.DecodeString(h)
+		a, err := new(edwards25519.Point).SetBytes(pub)
+		if err != nil {
+			t.Fatalf("%s is not a point: %v", h, err)
+		}
+		if new(edwards25519.Point).MultByCofactor(a).Equal(edwards25519.NewIdentityPoint()) != 1 {
+			t.Fatalf("%s is not of small order", h)
+		}
+		seen[string(a.Bytes())] = true
+		if p.Verify(pub, msg, forged) {
+			t.Fatalf("Verify accepted a signature under the small-order key %s", h)
+		}
+	}
+	if len(seen) != 8 {
+		t.Fatalf("%d distinct points, want 8", len(seen))
+	}
+
+	// y = p + 1, the neutral point spelled a second way
+	second, _ := hex.DecodeString("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+	if a, err := new(edwards25519.Point).SetBytes(second); err != nil || bytes.Equal(a.Bytes(), second) {
+		t.Fatalf("the non-canonical encoding decoded as %v, %v", a, err)
+	}
+	if p.Verify(second, msg, forged) {
+		t.Fatal("Verify accepted a non-canonical key")
 	}
 }
 

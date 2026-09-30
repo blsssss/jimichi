@@ -5,6 +5,7 @@ package providertest
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"sync"
 	"testing"
@@ -255,6 +256,50 @@ func testSignatures(t *testing.T, p jcrypto.CryptoProvider) {
 			t.Fatalf("Verify must reject a %d-byte signature", len(bad))
 		}
 	}
+
+	keys := smallOrderKeys[p.Suite()]
+	if len(keys) == 0 {
+		t.Fatalf("no small-order keys listed for suite %v", p.Suite())
+	}
+	for _, h := range keys {
+		weak, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range [][]byte{sig, make([]byte, len(sig)), forgedUnderNeutral(len(sig))} {
+			if p.Verify(weak, msg, s) {
+				t.Fatalf("Verify must reject the small-order key %s", h)
+			}
+		}
+	}
+}
+
+// under a key of small order a signature can be made for any message without a
+// private key, so Verify must refuse the key before it looks at the signature.
+// Ed25519: the neutral point and a point of order 2, 4 and 8. GOST paramSetA:
+// the points of order 2 and 4; the neutral point has no affine encoding
+var smallOrderKeys = map[jcrypto.Suite][]string{
+	jcrypto.SuiteC25519: {
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"0000000000000000000000000000000000000000000000000000000000000080",
+		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+	},
+	jcrypto.SuiteGOST: {
+		"aa4aa1e7dc7530a67ec42a195cfe448758d978d4444b978e15ff95f573fe0001" +
+			"0000000000000000000000000000000000000000000000000000000000000000",
+		"77592f8c11c5e7acc09d6af3d1805dbc5393c3955d5ab43875003505c6807f7f" +
+			"cd0e8ea4344fb70642d93fda75821835fbb94ac1180f1daa5f019f0f52827e7e",
+		"77592f8c11c5e7acc09d6af3d1805dbc5393c3955d5ab43875003505c6807f7f" +
+			"caee715bcbb048f9bd26c0258a7de7ca0446b53ee7f0e255a0fe60f0ad7d8181",
+	},
+}
+
+// the Ed25519 forgery under the neutral point: R = [0]B encoded, then S = 0
+func forgedUnderNeutral(size int) []byte {
+	s := make([]byte, size)
+	s[0] = 1
+	return s
 }
 
 func testHash(t *testing.T, p jcrypto.CryptoProvider) {

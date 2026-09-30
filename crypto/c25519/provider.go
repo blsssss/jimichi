@@ -106,8 +106,6 @@ func (p *Provider) NewAEAD(key *secmem.Buffer) (jcrypto.AEAD, error) {
 	return &aead{inner: inner}, nil
 }
 
-// the key has the crypto/ed25519 layout, seed then public key, and the seed is
-// read straight into the buffer
 func (p *Provider) GenerateSigning() (*secmem.Buffer, []byte, error) {
 	priv, err := secmem.New(ed25519.PrivateKeySize)
 	if err != nil {
@@ -131,7 +129,7 @@ func (p *Provider) Sign(priv *secmem.Buffer, msg []byte) ([]byte, error) {
 }
 
 func (p *Provider) Verify(pub, msg, sig []byte) bool {
-	if len(pub) != ed25519.PublicKeySize {
+	if len(pub) != ed25519.PublicKeySize || !validPublicKey(pub) {
 		return false
 	}
 	return ed25519.Verify(ed25519.PublicKey(pub), msg, sig)
