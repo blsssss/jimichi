@@ -106,17 +106,21 @@ func (p *Provider) NewAEAD(key *secmem.Buffer) (jcrypto.AEAD, error) {
 	return &aead{inner: inner}, nil
 }
 
+// the key has the crypto/ed25519 layout, seed then public key, and the seed is
+// read straight into the buffer
 func (p *Provider) GenerateSigning() (*secmem.Buffer, []byte, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("c25519: generate signing key: %w", err)
-	}
-	// NewFrom zeroes the heap copy the stdlib handed us
-	buf, err := secmem.NewFrom(priv)
+	priv, err := secmem.New(ed25519.PrivateKeySize)
 	if err != nil {
 		return nil, nil, err
 	}
-	return buf, pub, nil
+	key := priv.Bytes()
+	if _, err := io.ReadFull(rand.Reader, key[:ed25519.SeedSize]); err != nil {
+		priv.Release()
+		return nil, nil, fmt.Errorf("c25519: read random: %w", err)
+	}
+	pub := publicKey(key[:ed25519.SeedSize])
+	copy(key[ed25519.SeedSize:], pub)
+	return priv, pub, nil
 }
 
 func (p *Provider) Sign(priv *secmem.Buffer, msg []byte) ([]byte, error) {

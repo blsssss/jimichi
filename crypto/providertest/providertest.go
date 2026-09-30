@@ -231,6 +231,30 @@ func testSignatures(t *testing.T, p jcrypto.CryptoProvider) {
 	if p.Verify(pub, msg, corrupt) {
 		t.Fatal("Verify must reject a modified signature")
 	}
+
+	otherPriv, otherPub, err := p.GenerateSigning()
+	if err != nil {
+		t.Fatalf("GenerateSigning: %v", err)
+	}
+	defer otherPriv.Release()
+	otherSig, err := p.Sign(otherPriv, msg)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if p.Verify(pub, msg, otherSig) || p.Verify(otherPub, msg, sig) {
+		t.Fatal("Verify must reject a signature made by another key")
+	}
+
+	for _, bad := range [][]byte{nil, pub[:len(pub)-1], append(bytes.Clone(pub), 0)} {
+		if p.Verify(bad, msg, sig) {
+			t.Fatalf("Verify must reject a %d-byte public key", len(bad))
+		}
+	}
+	for _, bad := range [][]byte{nil, sig[:len(sig)-1], append(bytes.Clone(sig), 0)} {
+		if p.Verify(pub, msg, bad) {
+			t.Fatalf("Verify must reject a %d-byte signature", len(bad))
+		}
+	}
 }
 
 func testHash(t *testing.T, p jcrypto.CryptoProvider) {

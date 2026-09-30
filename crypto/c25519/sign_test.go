@@ -21,6 +21,33 @@ func TestSignKnownAnswer(t *testing.T) {
 	}
 }
 
+func TestGenerateSigningMatchesStandardLibrary(t *testing.T) {
+	p := New()
+	for i := 0; i < 32; i++ {
+		priv, pub, err := p.GenerateSigning()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := ed25519.NewKeyFromSeed(bytes.Clone(priv.Bytes()[:ed25519.SeedSize]))
+		if !bytes.Equal(pub, want.Public().(ed25519.PublicKey)) {
+			t.Fatalf("key %d: public key %x, stdlib %x", i, pub, want.Public())
+		}
+		if !bytes.Equal(priv.Bytes(), want) {
+			t.Fatalf("key %d: private key layout differs from stdlib", i)
+		}
+		msg := make([]byte, i*5)
+		_, _ = rand.Read(msg)
+		sig, err := p.Sign(priv, msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(sig, ed25519.Sign(want, msg)) {
+			t.Fatalf("key %d: signature differs from stdlib", i)
+		}
+		priv.Release()
+	}
+}
+
 func TestSignMatchesStandardLibrary(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		pub, priv, err := ed25519.GenerateKey(rand.Reader)

@@ -49,4 +49,18 @@ func sign(priv, msg []byte) []byte {
 	return append(append(sig, R...), S.Bytes()...)
 }
 
+// RFC 8032, section 5.1.5: crypto/ed25519.GenerateKey would leave the seed and
+// the expanded key on the heap, while the node identity key lives as long as
+// the process
+func publicKey(seed []byte) []byte {
+	h := sha512.Sum512(seed)
+	defer clear(h[:])
+	s, err := edwards25519.NewScalar().SetBytesWithClamping(h[:32])
+	if err != nil {
+		panic("c25519: clamping a 32-byte scalar cannot fail")
+	}
+	defer zeroScalar(s)
+	return new(edwards25519.Point).ScalarBaseMult(s).Bytes()
+}
+
 func zeroScalar(s *edwards25519.Scalar) { s.Set(edwards25519.NewScalar()) }
