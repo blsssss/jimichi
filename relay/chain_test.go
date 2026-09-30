@@ -2121,3 +2121,40 @@ func TestLostFirstCellsEndTheCircuitAtTheExit(t *testing.T) {
 		})
 	}
 }
+
+// a reply the exit cannot seal, here one too long for a cell, goes back as
+// cover under its own number: the replies after it stay in turn and the
+// circuit carries on
+func TestReplyThatDoesNotSealLeavesAsCover(t *testing.T) {
+	p := c25519.New()
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+		if string(payload) == "big" {
+			return make([]byte, wire.CellSize)
+		}
+		return payload
+	})
+	middle := startNode(t, p, nil)
+	entry := startNode(t, p, nil)
+	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer cl.Close()
+	for _, m := range []string{"one", "big", "two"} {
+		if err := cl.Send([]byte(m)); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+	expectReplies(t, cl, "one", "two")
+	for name, n := range map[string]*node{"entry": entry, "middle": middle, "exit": exit} {
+		if b := n.r.Stats().Snapshot().Broken; b != 0 {
+			t.Fatalf("%s closed the circuit", name)
+		}
+	}
+	if cl.Broken() {
+		t.Fatal("the client closed the circuit")
+	}
+	if d := exit.r.Stats().Snapshot().Dropped; d != 1 {
+		t.Fatalf("the exit counted %d replies it could not seal, want 1", d)
+	}
+}

@@ -324,13 +324,18 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 
 	var cell *wire.Cell
 	var err error
-	if payload == nil {
-		cell, err = c.hop.SealCoverReply(c.inbound, counter)
-	} else {
-		cell, err = c.hop.SealReply(c.inbound, counter, payload)
+	if payload != nil {
+		// the number is taken either way and a gap would close the circuit a
+		// relay further on, so a reply that does not seal, one too long for a
+		// cell, leaves as cover under the same number
+		if cell, err = c.hop.SealReply(c.inbound, counter, payload); err != nil {
+			r.stats.add(&r.stats.Dropped)
+		}
 	}
-	if err != nil {
-		return err
+	if cell == nil {
+		if cell, err = c.hop.SealCoverReply(c.inbound, counter); err != nil {
+			return fmt.Errorf("%w: %v", errBroken, err)
+		}
 	}
 	if c.bwd != nil {
 		if !c.bwd.push(cell, false) {
