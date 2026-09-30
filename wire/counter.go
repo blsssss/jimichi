@@ -7,8 +7,10 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
-// base counters stay below this in each direction, so any two values one link
-// carries are less than half the modulus apart
+// a link carries at most this many cells each way, a quarter of the modulus
+// its values wrap at: a Sequence, seeded wherever the first cell puts it, never
+// comes round to a value it has carried, so Wrap never seals twice under one
+// backward nonce, and the client and the exit never reuse a base counter
 const cellLimit = uint64(1) << 60
 
 // Offsets are one hop's counter offsets, indexed by Direction. Every hop adds

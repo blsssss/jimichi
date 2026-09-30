@@ -24,6 +24,9 @@ func nonceFor(size int, dir Direction, circuit, counter uint64) ([]byte, error) 
 	if counter >= counterLimit {
 		return nil, fmt.Errorf("wire: counter exhausted")
 	}
+	if dir > Backward {
+		return nil, fmt.Errorf("wire: unknown direction %d", dir)
+	}
 	switch {
 	case size >= 17:
 		n := make([]byte, size)
