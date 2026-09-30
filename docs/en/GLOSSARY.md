@@ -28,7 +28,7 @@ English | [Русский](../ru/GLOSSARY.md)
 | Node bundle | the node certificate and descriptor in one JSON object, which the node serves to clients |
 | Operator roster | the list of node names and addresses the operator allows certificates for |
 | Certificate issuance | the CA checks a node's signed request, carrying a nonce the CA chose, against the operator roster and signs the certificate |
-| Counter window | the range of cell numbers a node accepts, the replay defence |
+| Counter order | on every link a node accepts only the counter one above the previous one, anything else closes the circuit; the replay defence |
 | Memory dump | a snapshot of process memory, used in key extraction scenarios |
 | ROC, AUC | the error curve and the area under it, the measure of attack success |
 | Bootstrap | a resampling method for confidence intervals |

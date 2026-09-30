@@ -15,8 +15,12 @@ English | [Русский](../ru/LIMITATIONS.md)
   machine hosting a node, process-level measures do not work; that is the expected result.
 - Sending on a node's own clock requires the node's period to be shorter than the client's, with a
   margin of a few percent. The node does not know how fast a client sends: if the client sends more
-  often, the node's queue fills up and the excess cells are lost, and with equal periods a missed
-  tick can never be caught up. The testbed gives nodes a period 5% shorter than the client's.
+  often, the node's queue fills up and the circuit closes, since the node cannot lose a cell of a
+  circuit. With equal or longer periods a missed tick can never be caught up, and the queue fills
+  up sooner or later. The testbed gives nodes a period 5% shorter than the client's.
+- Any break in the counter order closes the circuit. Whoever can put a frame on a link (a
+  neighbouring node, a man in the middle on an anonymous link between nodes) can close a circuit,
+  as it could before by breaking the connection. This is a denial of service.
 - A link is covered by own-clock sending only if the node sending on it has the measure turned on.
   The client cannot check that the nodes of its chain do: a node without the measure carries the
   timing onwards, and the protection is gone on its outgoing links.

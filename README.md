@@ -117,7 +117,7 @@ crypto/       CryptoProvider interface
   suite/      picks a suite by name
   secmem/     mlocked, non-dumpable, self-zeroing key buffers
   providertest/ conformance suite both suites must pass
-wire/         fixed-size cells, nested layers, replay window
+wire/         fixed-size cells, nested layers, counter order
 link/         link encryption between neighbours, frames of one size
 pki/          node certificates, descriptors and requests, issuing and checking
 relay/        relay node

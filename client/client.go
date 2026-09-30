@@ -69,9 +69,14 @@ type Client struct {
 	queue   chan []byte
 	dropped uint64
 
-	mu      sync.Mutex
+	mu     sync.Mutex
+	closed bool
+	broken bool
+
+	// the link has its own write lock; holding mu across a write to a stalled
+	// entry would keep Close from closing the connection that unblocks it
+	sendMu  sync.Mutex
 	counter uint64
-	closed  bool
 
 	stopCover chan struct{}
 	coverDone sync.WaitGroup
@@ -182,16 +187,25 @@ func (c *Client) MaxPayload() int { return c.circuit.MaxPayload() }
 // replies arrive wrapped in one layer per hop, in the reverse order
 func (c *Client) Replies() <-chan []byte { return c.replies }
 
+// the exit numbers its replies from zero and no relay drops or reorders one,
+// so a reply out of turn or one that does not open ends the circuit
 func (c *Client) receive() {
 	defer c.busy.Done()
 	defer close(c.replies)
-	for {
+	for want := uint64(0); ; want++ {
 		var cell wire.Cell
 		if err := c.conn.ReadCell(&cell); err != nil {
 			return
 		}
-		payload, cover, err := c.circuit.OpenExit(&cell, wire.Backward)
-		if err != nil || cover {
+		payload, cover, err := c.open(&cell, want)
+		if err != nil {
+			c.mu.Lock()
+			c.broken = true
+			c.mu.Unlock()
+			_ = c.conn.Close()
+			return
+		}
+		if cover {
 			continue
 		}
 		select {
@@ -199,6 +213,26 @@ func (c *Client) receive() {
 		default:
 		}
 	}
+}
+
+var errOutOfTurn = errors.New("client: reply out of turn")
+
+func (c *Client) open(cell *wire.Cell, want uint64) ([]byte, bool, error) {
+	h, err := cell.Header()
+	if err != nil {
+		return nil, false, err
+	}
+	if h.Kind != wire.KindData || c.circuit.ReplyNumber(h.Counter) != want {
+		return nil, false, errOutOfTurn
+	}
+	return c.circuit.OpenExit(cell, wire.Backward)
+}
+
+// whether the circuit ended because a reply came out of turn or did not open
+func (c *Client) Broken() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.broken
 }
 
 func (c *Client) Send(payload []byte) error {
@@ -265,32 +299,36 @@ func (c *Client) send(cover bool, payload []byte) error {
 		c.mu.Unlock()
 		return errors.New("client: closed")
 	}
-	counter := c.counter
-	c.counter++
 	c.busy.Add(1)
 	c.mu.Unlock()
 	defer c.busy.Done()
 
-	seal := func() (*wire.Cell, error) { return c.circuit.Seal(counter, payload) }
-	if cover {
-		seal = func() (*wire.Cell, error) { return c.circuit.SealCover(counter) }
-	}
-	cell, err := seal()
-	if err != nil {
-		return err
-	}
 	if err := c.delay(); err != nil {
 		return err
 	}
 
-	// the link has its own write lock; holding c.mu across a write to a stalled
-	// entry would keep Close from closing the connection that unblocks it
+	// the counter is taken as the cell is written, after the jitter: relays
+	// take counters only in turn, so a call whose delay ran out first must not
+	// leave with a higher one behind a lower one
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	c.mu.Lock()
 	closed := c.closed
 	c.mu.Unlock()
 	if closed {
 		return errors.New("client: closed")
 	}
+	var cell *wire.Cell
+	var err error
+	if cover {
+		cell, err = c.circuit.SealCover(c.counter)
+	} else {
+		cell, err = c.circuit.Seal(c.counter, payload)
+	}
+	if err != nil {
+		return err
+	}
+	c.counter++
 	return c.conn.WriteCell(cell)
 }
 

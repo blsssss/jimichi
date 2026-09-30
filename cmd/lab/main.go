@@ -73,6 +73,10 @@ type result struct {
 	P50               string  `json:"latency_p50,omitempty"`
 	P95               string  `json:"latency_p95,omitempty"`
 	P99               string  `json:"latency_p99,omitempty"`
+
+	// a closed circuit stops its flow early, so its traces are shorter
+	RelayBrokenCircuits uint64 `json:"relay_broken_circuits"`
+	BrokenFlows         int    `json:"broken_flows"`
 }
 
 type variant struct {
@@ -189,6 +193,9 @@ func main() {
 				os.Exit(1)
 			}
 			after := loadavg()
+			if run.RelayBroken > 0 || run.BrokenFlows > 0 {
+				fmt.Fprintf(os.Stderr, "%s: relays closed %d circuits and clients %d during the run\n", v.label, run.RelayBroken, run.BrokenFlows)
+			}
 			for _, bin := range bins {
 				res, d := analyse(run, v.label, bin)
 				res.Repeat, res.BaseSeed, res.Rev = r, *seed, *rev
@@ -394,6 +401,9 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		P50:               percentile(run.Latency, 0.5),
 		P95:               percentile(run.Latency, 0.95),
 		P99:               percentile(run.Latency, 0.99),
+
+		RelayBrokenCircuits: run.RelayBroken,
+		BrokenFlows:         run.BrokenFlows,
 	}
 	return res, detail{Traffic: traffic, Bin: bin.String(), Entry: entry, Exit: exit, Scores: matrix}
 }

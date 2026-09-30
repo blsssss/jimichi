@@ -95,7 +95,7 @@ func TestLinkValuesNeverCoincide(t *testing.T) {
 }
 
 // the next base counter is the next value on every link, across the wrap too,
-// so a window on any link sees a sequence that only grows
+// so every link sees its values one after another
 func TestLinkValuesStayConsecutive(t *testing.T) {
 	for _, off := range []uint64{0, 1, counterLimit - 1, counterLimit - 2, 1 << 61} {
 		for _, base := range []uint64{0, 1, cellLimit - 2} {
@@ -110,49 +110,60 @@ func TestLinkValuesStayConsecutive(t *testing.T) {
 	}
 }
 
-// a window of 64 on a link whose values cross the modulus: the order holds,
-// copies and counters too old are refused on both sides of the wrap
-func TestReplayWindowAcrossTheWrap(t *testing.T) {
-	w := NewReplayWindow(64)
-	start := counterLimit - 3
-	for i := uint64(0); i < 6; i++ {
-		if !w.Commit(shift(start, i)) {
-			t.Fatalf("value %#x refused", shift(start, i))
+// the first value is taken as it comes, then only the next one: a copy, a gap
+// or a step back is refused and leaves the sequence where it was
+func TestSequenceTakesCountersInTurn(t *testing.T) {
+	var s Sequence
+	for _, step := range []struct {
+		counter uint64
+		ok      bool
+	}{
+		{1000, true},
+		{1001, true},
+		{1001, false}, // a copy
+		{1003, false}, // a gap
+		{1000, false}, // a step back
+		{1002, true},
+		{1 << 61, false},
+		{1003, true},
+	} {
+		if got := s.Next(step.counter); got != step.ok {
+			t.Fatalf("Next(%d) = %v, want %v", step.counter, got, step.ok)
 		}
-	}
-	for i := uint64(0); i < 6; i++ {
-		if w.Check(shift(start, i)) {
-			t.Fatalf("copy of %#x accepted", shift(start, i))
-		}
-	}
-	if !w.Commit(shift(start, 70)) {
-		t.Fatal("a jump past the wrap refused")
-	}
-	if w.Check(shift(start, 6)) || w.Check(start) {
-		t.Fatal("a value 64 or more behind accepted")
-	}
-	if !w.Check(shift(start, 7)) {
-		t.Fatal("an unseen value 63 behind refused")
 	}
 }
 
-// no value of one link lies cellLimit or more ahead of the first, and none at
-// or past the nonce limit exists at all
-func TestReplayWindowBounds(t *testing.T) {
-	w := NewReplayWindow(64)
-	first := counterLimit - 10
-	if !w.Commit(first) {
-		t.Fatal("first value refused")
+// values of a link wrap at the nonce limit and stay in turn across it
+func TestSequenceAcrossTheWrap(t *testing.T) {
+	var s Sequence
+	for _, c := range []uint64{counterLimit - 2, counterLimit - 1, 0, 1} {
+		if !s.Next(c) {
+			t.Fatalf("value %#x refused", c)
+		}
 	}
-	if w.Check(shift(first, cellLimit)) {
-		t.Fatal("a value cellLimit ahead of the first accepted")
+	if s.Next(counterLimit - 1) {
+		t.Fatal("a value from before the wrap accepted")
 	}
-	if !w.Check(shift(first, cellLimit-1)) {
-		t.Fatal("the last value before cellLimit refused")
-	}
-	for _, c := range []uint64{counterLimit, counterLimit + first, ^uint64(0)} {
-		if w.Check(c) || w.Commit(c) {
+}
+
+// nothing at or past the nonce limit is a counter, not even the first one, and
+// a link takes no more than cellLimit values
+func TestSequenceBounds(t *testing.T) {
+	for _, c := range []uint64{counterLimit, counterLimit + 5, ^uint64(0)} {
+		var s Sequence
+		if s.Next(c) {
 			t.Fatalf("value %#x past the nonce limit accepted", c)
 		}
+	}
+	var s Sequence
+	if !s.Next(5) {
+		t.Fatal("first value refused")
+	}
+	s.taken = cellLimit - 1
+	if !s.Next(6) {
+		t.Fatal("the last value before cellLimit refused")
+	}
+	if s.Next(7) {
+		t.Fatal("a value past cellLimit accepted")
 	}
 }

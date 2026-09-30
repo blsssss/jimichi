@@ -254,70 +254,6 @@ func TestCircuitIDIsPerLink(t *testing.T) {
 	}
 }
 
-func TestReplayWindow(t *testing.T) {
-	w := wire.NewReplayWindow(64)
-
-	if !w.Accept(100) {
-		t.Fatal("first counter must be accepted")
-	}
-	if w.Accept(100) {
-		t.Fatal("repeated counter must be rejected")
-	}
-	if !w.Accept(101) {
-		t.Fatal("next counter must be accepted")
-	}
-	if !w.Accept(99) {
-		t.Fatal("slightly out of order counter must be accepted")
-	}
-	if w.Accept(99) {
-		t.Fatal("repeat inside the window must be rejected")
-	}
-	if !w.Accept(200) {
-		t.Fatal("jump forward must be accepted")
-	}
-	if w.Accept(101) {
-		t.Fatal("counter that fell out of the window must be rejected")
-	}
-}
-
-// window 64: top 200 accepts 137..200 and refuses 136, which is 64 behind;
-// jumping to 300 drops every mark, so 250 is new but 236 is too old
-func TestReplayWindowEdges(t *testing.T) {
-	w := wire.NewReplayWindow(64)
-	for _, c := range []uint64{200, 137} {
-		if !w.Accept(c) {
-			t.Fatalf("counter %d must be accepted", c)
-		}
-	}
-	if w.Accept(136) || w.Accept(137) {
-		t.Fatal("a counter 64 behind and a repeat must both be refused")
-	}
-	if !w.Accept(300) || !w.Accept(250) {
-		t.Fatal("a jump and a counter inside the new window must be accepted")
-	}
-	if w.Accept(236) {
-		t.Fatal("236 is 64 behind 300 and must be refused")
-	}
-}
-
-// a forged cell with a far counter fails authentication; if its counter were
-// recorded anyway, every genuine cell after it would look too old
-func TestCheckDoesNotMoveTheWindow(t *testing.T) {
-	w := wire.NewReplayWindow(64)
-	if !w.Commit(10) {
-		t.Fatal("first counter must be committed")
-	}
-	if !w.Check(1 << 40) {
-		t.Fatal("a far counter must pass the check")
-	}
-	if !w.Check(11) || !w.Commit(11) {
-		t.Fatal("the next genuine counter must still pass after a check alone")
-	}
-	if w.Commit(11) {
-		t.Fatal("a committed counter must not commit twice")
-	}
-}
-
 func TestMaxPayloadShrinksWithChain(t *testing.T) {
 	p := provider()
 	short := newCircuit(t, p, hopKeys(t, p, 1))
@@ -448,6 +384,9 @@ func TestEveryLinkCarriesItsOwnCounter(t *testing.T) {
 			if got, _, err := circuit.OpenExit(back, wire.Backward); err != nil || string(got) != "back" {
 				t.Fatalf("OpenExit: %q, %v", got, err)
 			}
+			if n := circuit.ReplyNumber(h.Counter); n != 7 {
+				t.Fatalf("the client reads reply number %d, the exit sent 7", n)
+			}
 
 			if fwd[0] != 7 {
 				t.Fatalf("the client's own link carries %d, want the base counter 7", fwd[0])
@@ -498,5 +437,40 @@ func TestCounterPastTheLimitIsRefused(t *testing.T) {
 	}
 	if _, err := middle.Wrap(far, 2); err == nil {
 		t.Fatal("Wrap accepted a counter past the nonce limit")
+	}
+}
+
+// only data cells travel back, and whatever a relay wraps leaves as one
+func TestWrapCarriesOnlyDataCells(t *testing.T) {
+	p := provider()
+	keys := hopKeys(t, p, hops)
+	exit, err := wire.NewHop(p, keys[hops-1], hopOffsets(hops)[hops-1], hops-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exit.Close()
+	middle, err := wire.NewHop(p, keys[1], hopOffsets(hops)[1], 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer middle.Close()
+	reply, err := exit.SealReply(1, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := reply.Header()
+	other, err := wire.NewCell(wire.Header{Kind: wire.KindControl, Circuit: h.Circuit, Counter: h.Counter}, reply.Body())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := middle.Wrap(other, 2); !errors.Is(err, wire.ErrKind) {
+		t.Fatalf("Wrap of a control cell: %v, want ErrKind", err)
+	}
+	out, err := middle.Wrap(reply, 2)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	if oh, _ := out.Header(); oh.Kind != wire.KindData {
+		t.Fatalf("a wrapped cell left as %s", oh.Kind)
 	}
 }

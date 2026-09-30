@@ -23,7 +23,6 @@ type Deliver func(circuit uint64, payload []byte) []byte
 type Config struct {
 	Provider   jcrypto.CryptoProvider
 	StaticPriv *secmem.Buffer
-	ReplaySize uint64
 	// setups remembered to refuse a copy; once full the node refuses new
 	// circuits until it restarts with a new key; zero picks the default
 	SetupCache int
@@ -71,6 +70,9 @@ type Counters struct {
 	Delivered uint64
 	Dropped   uint64
 	Padding   uint64
+	// circuits closed because a cell came out of turn, came back as another
+	// kind or found its queue full
+	Broken uint64
 }
 
 func (s *Stats) add(field *uint64) {
@@ -87,8 +89,8 @@ func (s *Stats) Snapshot() Counters {
 
 type circuit struct {
 	hop      *wire.Hop
-	replay   *wire.ReplayWindow
-	back     *wire.ReplayWindow
+	fwdSeq   wire.Sequence
+	bwdSeq   wire.Sequence
 	next     *link.Conn
 	nextRaw  net.Conn
 	in       *link.Conn
@@ -140,8 +142,11 @@ const MaxSetupCache = 1 << 20
 var (
 	errDuplicate = errors.New("relay: circuit id already in use")
 	errLinkTaken = errors.New("relay: link already carries a circuit")
-	errQueueFull = errors.New("relay: send queue full")
-	errReplay    = errors.New("relay: replayed counter")
+	// a cell out of turn or with no room ends its circuit: losing or passing it
+	// would leave a mark every node after this one could see
+	errBroken    = errors.New("relay: circuit broken")
+	errOutOfTurn = fmt.Errorf("%w: counter out of turn", errBroken)
+	errQueueFull = fmt.Errorf("%w: send queue full", errBroken)
 )
 
 func (r *Relay) Stats() *Stats { return &r.stats }
@@ -236,6 +241,10 @@ func (r *Relay) handle(conn net.Conn) {
 			return
 		}
 		if err := r.route(&cell, lc); err != nil {
+			if errors.Is(err, errBroken) {
+				r.stats.add(&r.stats.Broken)
+				return
+			}
 			r.stats.add(&r.stats.Dropped)
 			if errors.Is(err, errFatal) {
 				return
@@ -265,19 +274,15 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	if c == nil || c.in != from {
 		return fmt.Errorf("relay: unknown circuit")
 	}
-	// recorded only once the layer opens, so a forged far counter cannot push
-	// genuine cells out of the window
-	if !c.replay.Check(hdr.Counter) {
-		return errReplay
-	}
-
+	// the counter is taken only once the layer opens: a cell nobody sealed is
+	// dropped and decides nothing about which counter is due
 	if c.isExit {
 		payload, cover, err := c.hop.OpenLast(cell)
 		if err != nil {
 			return err
 		}
-		if !c.replay.Commit(hdr.Counter) {
-			return errReplay
+		if !c.fwdSeq.Next(hdr.Counter) {
+			return errOutOfTurn
 		}
 		r.stats.add(&r.stats.Delivered)
 		var reply []byte
@@ -293,8 +298,8 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	if err != nil {
 		return err
 	}
-	if !c.replay.Commit(hdr.Counter) {
-		return errReplay
+	if !c.fwdSeq.Next(hdr.Counter) {
+		return errOutOfTurn
 	}
 	out.SetCircuit(c.nextID)
 	if c.fwd != nil {
@@ -376,23 +381,22 @@ func (r *Relay) backward(c *circuit) {
 		if err := c.next.ReadCell(&cell); err != nil {
 			return
 		}
+		// this node cannot open what comes back, so the header is all it can
+		// check, and any break in it ends the circuit
 		hdr, err := cell.Header()
-		if err != nil {
-			r.stats.add(&r.stats.Dropped)
-			continue
-		}
-		if !c.back.Accept(hdr.Counter) {
-			r.stats.add(&r.stats.Dropped)
-			continue
+		if err != nil || hdr.Kind != wire.KindData || !c.bwdSeq.Next(hdr.Counter) {
+			r.stats.add(&r.stats.Broken)
+			return
 		}
 		out, err := c.hop.Wrap(&cell, c.inbound)
 		if err != nil {
-			r.stats.add(&r.stats.Dropped)
-			continue
+			r.stats.add(&r.stats.Broken)
+			return
 		}
 		if c.bwd != nil {
 			if !c.bwd.push(out, true) {
-				r.stats.add(&r.stats.Dropped)
+				r.stats.add(&r.stats.Broken)
+				return
 			}
 			continue
 		}
@@ -433,8 +437,6 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 
 	c := &circuit{
 		hop:      hop,
-		replay:   wire.NewReplayWindow(r.cfg.ReplaySize),
-		back:     wire.NewReplayWindow(r.cfg.ReplaySize),
 		nextID:   layer.NextCircuit,
 		isExit:   layer.NextAddr == "",
 		inbound:  hdr.Circuit,

@@ -51,8 +51,8 @@ func TestPacedRunFillsBothDirections(t *testing.T) {
 			}
 		}
 	}
-	if run.RelayDropped != 0 {
-		t.Fatalf("relays dropped %d cells on an idle run", run.RelayDropped)
+	if run.RelayDropped != 0 || run.RelayBroken != 0 || run.BrokenFlows != 0 {
+		t.Fatalf("relays dropped %d cells and closed %d circuits, %d clients closed theirs on an idle run", run.RelayDropped, run.RelayBroken, run.BrokenFlows)
 	}
 }
 

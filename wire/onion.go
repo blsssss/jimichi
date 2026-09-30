@@ -25,6 +25,7 @@ type Circuit struct {
 	// before[i] sums, per direction, the offsets of the hops between the client
 	// and hop i
 	before   []Offsets
+	total    Offsets
 	overhead int
 }
 
@@ -56,6 +57,7 @@ func NewCircuit(p jcrypto.CryptoProvider, keys []*secmem.Buffer, offsets []Offse
 		c.before[i] = sum
 		sum = Offsets{shift(sum[Forward], offsets[i][Forward]), shift(sum[Backward], offsets[i][Backward])}
 	}
+	c.total = sum
 	return c, nil
 }
 
@@ -66,6 +68,11 @@ func (c *Circuit) valueAt(i int, dir Direction, first uint64) uint64 {
 		return shift(first, c.before[i][Forward])
 	}
 	return unshift(first, c.before[i][Backward])
+}
+
+// the exit's own number of a reply that reached the client with this counter
+func (c *Circuit) ReplyNumber(counter uint64) uint64 {
+	return unshift(counter, c.total[Backward])
 }
 
 func (c *Circuit) Hops() int { return len(c.hops) }
@@ -304,11 +311,14 @@ func (h *Hop) Wrap(cell *Cell, inboundCircuit uint64) (*Cell, error) {
 	if err != nil {
 		return nil, err
 	}
+	if hdr.Kind != KindData {
+		return nil, fmt.Errorf("%w: %s on the way back", ErrKind, hdr.Kind)
+	}
 	// a value past the limit would wrap onto one already used under this key
 	if hdr.Counter >= counterLimit {
 		return nil, fmt.Errorf("wire: counter exhausted")
 	}
-	return h.seal(Header{Kind: hdr.Kind, Circuit: inboundCircuit, Counter: shift(hdr.Counter, h.offset[Backward])}, cell.Body()[:layerLen(h.index+1, h.overhead)])
+	return h.seal(Header{Kind: KindData, Circuit: inboundCircuit, Counter: shift(hdr.Counter, h.offset[Backward])}, cell.Body()[:layerLen(h.index+1, h.overhead)])
 }
 
 // one backward layer under this hop's key, bound to the counter of the link the

@@ -71,6 +71,12 @@ type Run struct {
 	Dropped   uint64
 	// cells the relays themselves dropped, from their aggregated counters
 	RelayDropped uint64
+	// circuits the relays closed because a cell came out of turn or found a
+	// full queue; such a flow stops before the run ends
+	RelayBroken uint64
+	// clients that closed their circuit over a reply out of turn or one that
+	// did not open
+	BrokenFlows int
 	// where the observation window starts on the trace clock: flows begin to
 	// send only once every circuit is up, so setup falls before it
 	Origin time.Duration
@@ -229,9 +235,14 @@ func Execute(cfg Config) (*Run, error) {
 	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin, Unanswered: latency.pending()}
 	for _, c := range clients {
 		run.Dropped += c.Dropped()
+		if c.Broken() {
+			run.BrokenFlows++
+		}
 	}
 	for _, n := range nodes {
-		run.RelayDropped += n.relay.Stats().Snapshot().Dropped
+		s := n.relay.Stats().Snapshot()
+		run.RelayDropped += s.Dropped
+		run.RelayBroken += s.Broken
 	}
 	exitMu.Lock()
 	run.Exit = exitTraces

@@ -216,8 +216,8 @@ func logCounters(r *relay.Relay, n *node, every time.Duration, logger *log.Logge
 	defer t.Stop()
 	for range t.C {
 		s := r.Stats().Snapshot()
-		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d cert=%s",
-			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, n.certState())
+		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d broken=%d cert=%s",
+			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, s.Broken, n.certState())
 	}
 }
 

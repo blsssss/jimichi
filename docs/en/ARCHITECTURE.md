@@ -57,8 +57,8 @@ Every cell is 512 bytes, payload and cover cells alike.
   modulo 2^62 to the counter of every cell it passes on. The client knows the offsets of all nodes and seals the
   layer of each node with the value that arrives on the link into that node. The setup cell does
   not grow for it.
-- The cell number stays below 2^60 in each direction, so the values of one link lie less than half
-  the modulus apart and the replay window can tell which of them is newer.
+- The cell number stays below 2^60 in each direction, so the values of one link never repeat
+  while the circuit lives.
 - Every layer is an AEAD over the next layer. The associated data covers the version, the kind,
   the counter on the link into the node and the hop index, so a cell cannot be moved to another
   position in the chain and a node cannot shift the counter without breaking the layer.
@@ -74,9 +74,15 @@ Every cell is 512 bytes, payload and cover cells alike.
   bytes for a message, in both suites.
 - The setup cell holds four hops on c25519 and three on GOST: a GOST public key is 64 bytes
   against 32, and every setup layer grows by the difference.
-- A node keeps a window of accepted counters on every link and drops a replay: forwarding one
-  would hand an active observer a free timing mark. The values on a link follow one another, and
-  the window compares them modulo 2^62.
+- Counters on every link follow strictly one after another: a node accepts a cell only if its
+  counter is one above the last one accepted, modulo 2^62. The first value in each direction is
+  taken as it comes, since it depends on the offsets of the other nodes. A copy, a gap, a step back
+  or a jump closes the circuit and the cell goes no further: forwarding a replay would hand an
+  active observer a free timing mark, and a gap or a reorder would carry on to every later link.
+- A node opens a forward cell first and checks its counter after. A cell that does not open is
+  dropped and does not affect the order.
+- The client assigns the counter when it writes the cell to the link, after the random delay, so
+  cells leave in counter order.
 
 ## Link encryption
 
@@ -121,8 +127,9 @@ clock.
   the circuit setup, which crosses the chain almost at once, and the client's phase would match
   the node's again.
 - The queue is bounded, so neither the node's memory nor the latency grows without limit when a
-  client sends faster than the node's period. A cell that arrives at a full queue is dropped and
-  counted as dropped. The loss is not visible on the wire: frames leave on every tick either way.
+  client sends faster than the node's period. A cell that arrives at a full queue closes the
+  circuit: a node never loses a cell of a circuit, since a loss would break the counter order on
+  the later links. Such a close is counted with the closed circuits.
 - There is no shuffling across circuits: every circuit runs over its own TCP connections, so
   there is nothing to mix on a link.
 
@@ -139,8 +146,15 @@ encryption and tells padding from a real cell by its kind, so it does not help a
 A reply travels the same chain in reverse: the exit applies its layer, every relay towards the
 client adds its own, and only the client strips them all. The direction enters the nonce, so a
 forward and a backward cell never share one under the same key. The backward counter is separate,
-and each relay keeps its own replay window per direction. Like the forward one, it takes a value of
-its own on every link: the exit and every relay on the way back add their backward offset.
+and each relay checks the counter order in each direction separately. Like the forward one, it
+takes a value of its own on every link: the exit and every relay on the way back add their backward
+offset.
+
+A relay cannot check a backward cell: its inner layers do not open for it. It therefore passes back
+only cells of kind "data" with the next counter in turn, and any other cell closes the circuit. The
+exit numbers its replies from zero. The client knows the offsets of all nodes, recovers the number
+of every reply and accepts only the next one: a reply out of turn, or one that does not open,
+closes the circuit on the client's side as well.
 
 The exit answers every data cell with exactly one backward cell: a message with its reply, a cover
 cell with a cover reply. Replies to messages only would show every node on the way back, by their
@@ -184,6 +198,9 @@ Circuit teardown:
   another link is dropped, and so is a second control cell with an identifier already in use.
 - Closing a link anywhere closes the neighbouring links of the circuit in both directions, so the
   break reaches the client and the exit node.
+- A node closes a circuit itself when a cell arrives out of turn, a cell of another kind comes
+  back, or a cell finds no room in its queue. The close takes the same path as a closed link and
+  is counted with the closed circuits.
 - Circuit keys are released once every goroutine using them has stopped.
 - The client sees the break as its reply channel closing and exits. The orchestrator restarts it
   on a new circuit.
@@ -404,7 +421,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 | Source | Data |
 |---|---|
 | client | send and receive timestamps per cell, losses, flow identifier; at start the fingerprint and validity of every verified node |
-| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, state of the installed certificate (cert: none, valid, expired). No flow identifiers. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after |
+| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, state of the installed certificate (cert: none, valid, expired). No flow identifiers. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after |
 | network | traffic captures at the entry and the exit for the correlation attack |
 | memory | dumps of the relay process in the key extraction scenario |
 
@@ -430,7 +447,7 @@ adversary with several snapshots) are stated in LIMITATIONS.
 | crypto/suite | picks a suite by name for entry points and the testbed | crypto/gost, crypto/c25519 |
 | crypto/secmem | key memory | x/sys/unix |
 | crypto/providertest | contract conformance tests | crypto |
-| wire | cell format, layers, replay window | crypto, crypto/secmem |
+| wire | cell format, layers, counter order | crypto, crypto/secmem |
 | link | link encryption between neighbours, frames of one size | crypto, crypto/secmem, wire |
 | pki | certificate, descriptor and request of a node, issuing and checking | crypto, crypto/secmem, wire |
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
