@@ -71,30 +71,46 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
+	// logger.Fatal skips deferred calls, so once a key exists every exit goes
+	// through fail, which releases what has been created so far
+	var closers []func()
+	release := func() {
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+		closers = nil
+	}
+	fail := func(format string, args ...any) {
+		release()
+		logger.Printf(format, args...)
+		os.Exit(1)
+	}
+	defer release()
+
 	staticPriv, staticPub, err := provider.GenerateEphemeral()
 	if err != nil {
 		logger.Fatalf("static key: %v", err)
 	}
-	defer staticPriv.Release()
+	closers = append(closers, staticPriv.Release)
 
 	if policy.Lock && !staticPriv.Locked() {
-		logger.Fatal("key memory is not locked, refusing to start")
+		fail("key memory is not locked, refusing to start")
 	}
 
 	n := &node{ttl: *descriptorTTL, now: time.Now, logger: logger}
 	if *auth {
 		id, err := pki.NewIdentity(provider, *name, *advertise)
 		if err != nil {
-			logger.Fatalf("identity: %v", err)
+			fail("identity: %v", err)
 		}
-		defer id.Close()
+		closers = append(closers, id.Close)
 		if policy.Lock && !id.Locked() {
-			logger.Fatal("identity key memory is not locked, refusing to start")
+			fail("identity key memory is not locked, refusing to start")
 		}
 		id.SetKeys(staticPub, staticPub, 0)
 		n.id = id
 	} else if n.unsigned, err = pki.Unsigned(provider, staticPub, staticPub); err != nil {
-		logger.Fatalf("descriptor: %v", err)
+		fail("descriptor: %v", err)
 	}
 
 	r, err := relay.New(relay.Config{
@@ -113,18 +129,25 @@ func main() {
 		SetupCache: *setupCache,
 	})
 	if err != nil {
-		logger.Fatalf("relay: %v", err)
+		fail("relay: %v", err)
 	}
-	defer r.Close()
+	closers = append(closers, r.Close)
 
-	ln, err := net.Listen("tcp", *listen)
-	if err != nil {
-		logger.Fatalf("listen: %v", err)
+	// bound here rather than inside the serving goroutines: a node whose
+	// enrollment port is taken would otherwise run on and never get a certificate
+	var lns [3]net.Listener
+	for i, addr := range []string{*listen, *info, *statsAddr} {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			fail("listen: %v", err)
+		}
+		closers = append(closers, func() { _ = ln.Close() })
+		lns[i] = ln
 	}
-	defer ln.Close()
+	ln, infoLn, adminLn := lns[0], lns[1], lns[2]
 
-	go serve(*info, n.infoMux(), logger)
-	go serve(*statsAddr, n.adminMux(r.Stats().Snapshot), logger)
+	go serve(infoLn, n.infoMux(), logger)
+	go serve(adminLn, n.adminMux(r.Stats().Snapshot), logger)
 	if n.id != nil {
 		go n.keepFresh()
 	}
@@ -135,7 +158,9 @@ func main() {
 	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v",
 		*listen, *info, chosen, policy, staticPriv.Locked(), *harden, *period, *auth)
 	if n.id != nil {
-		logger.Printf("identity=%s name=%s awaiting enrollment", n.id.Fingerprint(), *name)
+		// the full hash lets enrollment pin the key read from this log through
+		// the kube API, the fingerprint is for people
+		logger.Printf("identity=%s identity_hash=%s name=%s awaiting enrollment", n.id.Fingerprint(), n.id.KeyHash(), *name)
 	}
 	go func() {
 		if err := r.Serve(ln); err != nil {
@@ -165,10 +190,10 @@ func checkMemlock() error {
 	return nil
 }
 
-func serve(addr string, h http.Handler, logger *log.Logger) {
-	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 5 * time.Second}
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Printf("http %s: %v", addr, err)
+func serve(ln net.Listener, h http.Handler, logger *log.Logger) {
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		logger.Printf("http %s: %v", ln.Addr(), err)
 	}
 }
 

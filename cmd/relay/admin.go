@@ -17,13 +17,31 @@ import (
 	"github.com/jimichi-org/jimichi/wire"
 )
 
-const maxAdminBody = 4 << 10
+const (
+	maxAdminBody = 4 << 10
+	// how long a certificate request keeps the node open to one installation
+	installWindow = time.Minute
+	maxCheckEvery = time.Minute
+)
 
 const (
 	certNone    = "none"
 	certValid   = "valid"
 	certExpired = "expired"
 )
+
+var (
+	errNoRequest = fmt.Errorf("no open certificate request: install within %v of POST /csr, once per request", installWindow)
+	errStaleCert = errors.New("certificate issued before the open request")
+)
+
+// the bundle clients get, with the times that end it
+type served struct {
+	bundle    []byte
+	notAfter  int64
+	published int64
+	expires   int64
+}
 
 // what the node publishes about itself; without -auth there is no identity and
 // the descriptor goes out unsigned
@@ -34,10 +52,15 @@ type node struct {
 	now      func() time.Time
 	logger   *log.Logger
 
-	// one installation or refresh at a time, so the expiry below always
-	// belongs to the certificate the descriptor was signed under
-	mu       sync.Mutex
+	// replaced only by a signing that succeeded, so a refused or failed
+	// installation leaves the previous bundle in service
+	out atomic.Pointer[served]
+	// not_after of the installed certificate, 0 before the first installation
 	notAfter atomic.Int64
+
+	mu          sync.Mutex
+	requestAt   time.Time
+	signedState string
 }
 
 func checkAuthFlags(stats, name, advertise string, ttl time.Duration) error {
@@ -76,10 +99,14 @@ func (n *node) descriptor() ([]byte, bool) {
 	if n.id == nil {
 		return n.unsigned, n.unsigned != nil
 	}
-	if n.certState() != certValid {
+	s := n.out.Load()
+	if s == nil {
 		return nil, false
 	}
-	return n.id.Bundle()
+	if now := n.now().Unix(); now >= s.notAfter || now >= s.expires {
+		return nil, false
+	}
+	return s.bundle, true
 }
 
 func (n *node) infoMux() http.Handler {
@@ -90,7 +117,7 @@ func (n *node) infoMux() http.Handler {
 	mux.HandleFunc("GET /descriptor", func(w http.ResponseWriter, _ *http.Request) {
 		b, ok := n.descriptor()
 		if !ok {
-			http.Error(w, "no valid certificate", http.StatusServiceUnavailable)
+			http.Error(w, "no valid descriptor", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -106,12 +133,13 @@ func (n *node) adminMux(counters func() relay.Counters) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		s := counters()
-		writeJSON(w, map[string]uint64{
+		writeJSON(w, map[string]any{
 			"accepted":  s.Accepted,
 			"forwarded": s.Forwarded,
 			"delivered": s.Delivered,
 			"dropped":   s.Dropped,
 			"padding":   s.Padding,
+			"cert":      n.certState(),
 		})
 	})
 	if n.id != nil {
@@ -137,10 +165,16 @@ func (n *node) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	n.mu.Lock()
+	n.requestAt = n.now()
+	n.mu.Unlock()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(req)
 }
 
+// the loopback port is reachable by anyone allowed to port-forward to the pod,
+// so a working certificate is replaced only right after a request and only by
+// one issued after it, never by a certificate kept from an earlier enrollment
 func (n *node) handleCert(w http.ResponseWriter, r *http.Request) {
 	raw, ok := readBody(w, r)
 	if !ok {
@@ -154,17 +188,26 @@ func (n *node) handleCert(w http.ResponseWriter, r *http.Request) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	now := n.now()
+	switch {
+	case n.requestAt.IsZero() || now.Sub(n.requestAt) > installWindow:
+		http.Error(w, errNoRequest.Error(), http.StatusConflict)
+		return
+	case cert.NotBefore < n.requestAt.Add(-pki.Skew).Unix():
+		http.Error(w, errStaleCert.Error(), http.StatusConflict)
+		return
+	}
 	if err := n.id.Install(raw, now); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	n.requestAt = time.Time{}
 	n.notAfter.Store(cert.NotAfter)
-	if err := n.id.Refresh(now, n.ttl); err != nil {
+	n.logger.Printf("certificate installed serial=%x not_after=%s",
+		cert.Serial, time.Unix(cert.NotAfter, 0).UTC().Format(time.RFC3339))
+	if err := n.sign(now); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	n.logger.Printf("certificate installed serial=%x not_after=%s",
-		cert.Serial, time.Unix(cert.NotAfter, 0).UTC().Format(time.RFC3339))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -181,24 +224,66 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return body, true
 }
 
+// callers hold mu
+func (n *node) sign(now time.Time) error {
+	n.signedState = n.certState()
+	if err := n.id.Refresh(now, n.ttl); err != nil {
+		return err
+	}
+	b, ok := n.id.Bundle()
+	if !ok {
+		return pki.ErrNoCert
+	}
+	s, err := servedFrom(b)
+	if err != nil {
+		return err
+	}
+	n.out.Store(s)
+	return nil
+}
+
+func servedFrom(b []byte) (*served, error) {
+	bundle, err := pki.ParseBundle(b)
+	if err != nil {
+		return nil, err
+	}
+	c, err := pki.ParseCert(bundle.Cert)
+	if err != nil {
+		return nil, err
+	}
+	d, err := pki.ParseDescriptor(bundle.Descriptor)
+	if err != nil {
+		return nil, err
+	}
+	return &served{bundle: b, notAfter: c.NotAfter, published: d.Published, expires: d.Expires}, nil
+}
+
 // a signature on GOST costs math/big work and leaves heap copies of the key,
-// so it runs on this timer only and never because someone asked for the
-// descriptor
+// so it happens on this timer and never because someone asked for the
+// descriptor; the timer runs on the monotonic clock, which stops while the
+// host sleeps, hence the frequent look at the wall-clock age
 func (n *node) keepFresh() {
-	t := time.NewTicker(n.ttl / 2)
+	t := time.NewTicker(min(n.ttl/2, maxCheckEvery))
 	defer t.Stop()
 	for range t.C {
-		n.refresh()
+		n.refreshIfDue()
 	}
 }
 
-func (n *node) refresh() {
+func (n *node) refreshIfDue() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.notAfter.Load() == 0 {
+	state := n.certState()
+	if state == certNone || state == certExpired && n.signedState == certExpired {
 		return
 	}
-	if err := n.id.Refresh(n.now(), n.ttl); err != nil {
+	now := n.now()
+	s := n.out.Load()
+	due := s == nil || now.Unix()-s.published >= int64(n.ttl/2/time.Second)
+	if !due && state == n.signedState {
+		return
+	}
+	if err := n.sign(now); err != nil {
 		n.logger.Printf("descriptor refresh: %v", err)
 	}
 }

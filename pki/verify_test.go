@@ -51,6 +51,9 @@ func TestChainRoundTrip(t *testing.T) {
 			if Fingerprint(p, v.Identity) != n.id.Fingerprint() {
 				t.Fatalf("node %d: fingerprint differs from the identity's own", i)
 			}
+			if h := KeyHash(p, v.Identity); h != n.id.KeyHash() || len(h) != 2*HashSize || !strings.HasPrefix(h, n.id.Fingerprint()) {
+				t.Fatalf("node %d: key hash %q is not the full hash behind fingerprint %s", i, h, n.id.Fingerprint())
+			}
 		}
 	})
 }

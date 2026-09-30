@@ -45,6 +45,12 @@ func Fingerprint(p jcrypto.CryptoProvider, pub []byte) string {
 	return hex.EncodeToString(id[:])
 }
 
+// the whole hash, for pinning a key where a fingerprint's 8 bytes could be
+// matched by a key ground out for the purpose
+func KeyHash(p jcrypto.CryptoProvider, pub []byte) string {
+	return hex.EncodeToString(p.Hash(pub))
+}
+
 func keyID(p jcrypto.CryptoProvider, pub []byte) [IDSize]byte {
 	var id [IDSize]byte
 	copy(id[:], p.Hash(pub))

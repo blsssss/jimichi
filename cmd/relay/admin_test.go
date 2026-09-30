@@ -43,13 +43,31 @@ func (c *clock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 type fixture struct {
 	p     jcrypto.CryptoProvider
 	n     *node
+	ca    *pki.CA
 	clock *clock
 	info  *httptest.Server
 	admin *httptest.Server
-	log   *bytes.Buffer
+	log   *logBuffer
 }
 
 func newFixture(t *testing.T, s jcrypto.Suite) *fixture {
@@ -68,7 +86,7 @@ func newFixture(t *testing.T, s jcrypto.Suite) *fixture {
 		t.Fatal(err)
 	}
 	id.SetKeys(pub, pub, 0)
-	f := &fixture{p: p, clock: &clock{now: t0}, log: &bytes.Buffer{}}
+	f := &fixture{p: p, ca: newCA(t, p), clock: &clock{now: t0}, log: &logBuffer{}}
 	f.n = &node{id: id, ttl: time.Hour, now: f.clock.Now, logger: log.New(f.log, "", 0)}
 	f.serve(t)
 	return f
@@ -80,6 +98,16 @@ func (f *fixture) serve(t *testing.T) {
 	t.Cleanup(f.info.Close)
 	f.admin = httptest.NewServer(f.n.adminMux(func() relay.Counters { return relay.Counters{Accepted: 7} }))
 	t.Cleanup(f.admin.Close)
+}
+
+func newCA(t *testing.T, p jcrypto.CryptoProvider) *pki.CA {
+	t.Helper()
+	ca, err := pki.NewCA(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ca.Close)
+	return ca
 }
 
 func call(t *testing.T, method, url string, body []byte) (int, []byte) {
@@ -109,7 +137,8 @@ func nonce(t *testing.T) [pki.NonceSize]byte {
 	return n
 }
 
-func (f *fixture) enroll(t *testing.T, ca *pki.CA, notAfter time.Time) {
+// POST /csr, checked the way jimichi enroll checks it
+func (f *fixture) request(t *testing.T) *pki.Request {
 	t.Helper()
 	n := nonce(t)
 	code, body := call(t, http.MethodPost, f.admin.URL+"/csr", n[:])
@@ -123,52 +152,76 @@ func (f *fixture) enroll(t *testing.T, ca *pki.CA, notAfter time.Time) {
 	if err := req.Check(f.p, n, testName, testAddr); err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	cert, err := ca.Issue(req, f.clock.Now(), notAfter)
+	return req
+}
+
+func (f *fixture) issue(t *testing.T, req *pki.Request, notBefore, notAfter time.Time) []byte {
+	t.Helper()
+	cert, err := f.ca.Issue(req, notBefore, notAfter)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code, body := call(t, http.MethodPut, f.admin.URL+"/cert", cert.Marshal()); code != http.StatusNoContent {
+	return cert.Marshal()
+}
+
+func (f *fixture) put(t *testing.T, cert []byte) (int, string) {
+	t.Helper()
+	code, body := call(t, http.MethodPut, f.admin.URL+"/cert", cert)
+	return code, string(body)
+}
+
+func (f *fixture) enroll(t *testing.T, notAfter time.Time) {
+	t.Helper()
+	cert := f.issue(t, f.request(t), f.clock.Now(), notAfter)
+	if code, body := f.put(t, cert); code != http.StatusNoContent {
 		t.Fatalf("PUT /cert = %d %s", code, body)
 	}
 }
 
-func newCA(t *testing.T, p jcrypto.CryptoProvider) *pki.CA {
+func (f *fixture) descriptor(t *testing.T) (int, []byte) {
 	t.Helper()
-	ca, err := pki.NewCA(p)
-	if err != nil {
-		t.Fatal(err)
+	return call(t, http.MethodGet, f.info.URL+"/descriptor", nil)
+}
+
+func (f *fixture) verify(t *testing.T) *pki.Verified {
+	t.Helper()
+	code, bundle := f.descriptor(t)
+	if code != http.StatusOK {
+		t.Fatalf("GET /descriptor = %d %s", code, bundle)
 	}
-	t.Cleanup(ca.Close)
-	return ca
+	v, err := pki.Verify(f.p, pki.Policy{Anchor: f.ca.Anchor(), Skew: pki.Skew}, testAddr, bundle, f.clock.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	return v
+}
+
+func (f *fixture) stats(t *testing.T) string {
+	t.Helper()
+	code, body := call(t, http.MethodGet, f.admin.URL+"/stats", nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET /stats = %d", code)
+	}
+	return string(body)
 }
 
 func TestEnrollmentPublishesAVerifiableDescriptor(t *testing.T) {
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(s.String(), func(t *testing.T) {
 			f := newFixture(t, s)
-			if code, _ := call(t, http.MethodGet, f.info.URL+"/descriptor", nil); code != http.StatusServiceUnavailable {
+			if code, _ := f.descriptor(t); code != http.StatusServiceUnavailable {
 				t.Fatalf("GET /descriptor before enrollment = %d, want 503", code)
 			}
-			if got := f.n.certState(); got != certNone {
-				t.Fatalf("cert state before enrollment = %s", got)
+			if got := f.stats(t); !strings.Contains(got, `"cert":"none"`) {
+				t.Fatalf("stats before enrollment: %s", got)
 			}
 
-			ca := newCA(t, f.p)
-			f.enroll(t, ca, t0.Add(72*time.Hour))
-			code, bundle := call(t, http.MethodGet, f.info.URL+"/descriptor", nil)
-			if code != http.StatusOK {
-				t.Fatalf("GET /descriptor after enrollment = %d %s", code, bundle)
-			}
-			pol := pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}
-			v, err := pki.Verify(f.p, pol, testAddr, bundle, f.clock.Now())
-			if err != nil {
-				t.Fatalf("Verify: %v", err)
-			}
-			if !v.DescUntil.Equal(t0.Add(time.Hour)) {
+			f.enroll(t, t0.Add(72*time.Hour))
+			if v := f.verify(t); !v.DescUntil.Equal(t0.Add(time.Hour)) {
 				t.Fatalf("descriptor until %v, want %v", v.DescUntil, t0.Add(time.Hour))
 			}
-			if got := f.n.certState(); got != certValid {
-				t.Fatalf("cert state after enrollment = %s", got)
+			if got := f.stats(t); !strings.Contains(got, `"cert":"valid"`) || !strings.Contains(got, `"accepted":7`) {
+				t.Fatalf("stats after enrollment: %s", got)
 			}
 			if !strings.Contains(f.log.String(), "certificate installed serial=") {
 				t.Fatalf("no installation line in the log: %q", f.log.String())
@@ -177,31 +230,146 @@ func TestEnrollmentPublishesAVerifiableDescriptor(t *testing.T) {
 	}
 }
 
-func TestTimerRefreshesTheDescriptor(t *testing.T) {
+func TestInstallNeedsAFreshRequestAndKeepsTheServedBundle(t *testing.T) {
 	f := newFixture(t, jcrypto.SuiteC25519)
-	ca := newCA(t, f.p)
-	f.enroll(t, ca, t0.Add(72*time.Hour))
-	pol := pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}
 
-	f.clock.advance(50 * time.Minute)
-	f.n.refresh()
-	_, bundle := call(t, http.MethodGet, f.info.URL+"/descriptor", nil)
-	v, err := pki.Verify(f.p, pol, testAddr, bundle, f.clock.Now())
-	if err != nil {
-		t.Fatalf("Verify after refresh: %v", err)
+	req := f.request(t)
+	early := f.issue(t, req, t0, t0.Add(72*time.Hour))
+	f.clock.advance(installWindow + time.Second)
+	if code, body := f.put(t, early); code != http.StatusConflict {
+		t.Fatalf("PUT /cert after the window = %d %s, want 409", code, body)
 	}
-	if want := t0.Add(50*time.Minute + time.Hour); !v.DescUntil.Equal(want) {
-		t.Fatalf("descriptor until %v, want %v", v.DescUntil, want)
+	if code, _ := f.descriptor(t); code != http.StatusServiceUnavailable {
+		t.Fatal("a refused installation published a descriptor")
+	}
+
+	f.enroll(t, f.clock.Now().Add(72*time.Hour))
+	_, first := f.descriptor(t)
+	served := func(when string) {
+		t.Helper()
+		if code, b := f.descriptor(t); code != http.StatusOK || !bytes.Equal(b, first) {
+			t.Fatalf("%s: GET /descriptor = %d, the previous bundle should stay in service", when, code)
+		}
+		if got := f.stats(t); !strings.Contains(got, `"cert":"valid"`) {
+			t.Fatalf("%s: stats %s", when, got)
+		}
+	}
+
+	req = f.request(t)
+	again := f.issue(t, req, f.clock.Now(), f.clock.Now().Add(72*time.Hour))
+	if code, body := f.put(t, again); code != http.StatusNoContent {
+		t.Fatalf("PUT /cert within the window = %d %s", code, body)
+	}
+	_, first = f.descriptor(t)
+	if code, body := f.put(t, again); code != http.StatusConflict || !strings.Contains(body, "no open certificate request") {
+		t.Fatalf("second PUT /cert for one request = %d %s, want 409", code, body)
+	}
+	served("second installation for one request")
+
+	stale := f.issue(t, f.request(t), f.clock.Now().Add(-pki.Skew-time.Minute), f.clock.Now().Add(time.Hour))
+	if code, body := f.put(t, stale); code != http.StatusConflict || !strings.Contains(body, errStaleCert.Error()) {
+		t.Fatalf("PUT /cert issued before the request = %d %s, want 409", code, body)
+	}
+	served("certificate older than the request")
+
+	other, err := pki.NewIdentity(f.p, testName, testAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	raw, err := other.Request(nonce(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignReq, err := pki.ParseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.request(t)
+	foreign := f.issue(t, foreignReq, f.clock.Now(), f.clock.Now().Add(time.Hour))
+	if code, body := f.put(t, foreign); code != http.StatusBadRequest || !strings.Contains(body, pki.ErrCertMismatch.Error()) {
+		t.Fatalf("PUT /cert of another identity = %d %s, want 400", code, body)
+	}
+	served("certificate of another identity")
+
+	f.clock.advance(time.Second)
+	replacement := f.issue(t, f.request(t), f.clock.Now(), f.clock.Now().Add(24*time.Hour))
+	if code, body := f.put(t, replacement); code != http.StatusNoContent {
+		t.Fatalf("PUT /cert after refusals = %d %s", code, body)
+	}
+	if v := f.verify(t); !v.CertUntil.Equal(f.clock.Now().Add(24 * time.Hour)) {
+		t.Fatalf("serving a certificate until %v, want the replacement", v.CertUntil)
+	}
+}
+
+func TestCertificateEndpointRefusesAndSaysWhy(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	for _, c := range []struct {
+		name string
+		cert func() []byte
+		want error
+	}{
+		{"truncated", func() []byte { return []byte{pki.Version} }, pki.ErrFormat},
+		{"unknown version", func() []byte { return []byte("not a certificate") }, pki.ErrVersion},
+		{"expired", func() []byte { return f.issue(t, f.request(t), t0.Add(-pki.Skew), t0) }, pki.ErrCertTime},
+		{"not yet valid", func() []byte { return f.issue(t, f.request(t), t0.Add(time.Hour), t0.Add(2*time.Hour)) }, pki.ErrCertTime},
+	} {
+		code, body := f.put(t, c.cert())
+		if code != http.StatusBadRequest || !strings.Contains(body, c.want.Error()) {
+			t.Errorf("%s: PUT /cert = %d %q, want 400 with %q", c.name, code, body, c.want)
+		}
+	}
+	if code, _ := f.put(t, make([]byte, maxAdminBody+1)); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("PUT /cert over the cap = %d", code)
+	}
+	if got := f.n.certState(); got != certNone {
+		t.Fatalf("a refused certificate changed the state to %s", got)
+	}
+	if code, _ := f.descriptor(t); code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /descriptor after refused certificates = %d, want 503", code)
+	}
+}
+
+func TestDescriptorExpiresWithoutARefresh(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	f.enroll(t, t0.Add(72*time.Hour))
+
+	f.clock.advance(time.Hour)
+	if code, _ := f.descriptor(t); code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /descriptor past its expiry = %d, want 503", code)
+	}
+	if got := f.n.certState(); got != certValid {
+		t.Fatalf("cert state with an expired descriptor = %s, the certificate is still valid", got)
+	}
+	f.n.refreshIfDue()
+	if v := f.verify(t); !v.DescUntil.Equal(t0.Add(2 * time.Hour)) {
+		t.Fatalf("descriptor until %v after the late refresh", v.DescUntil)
+	}
+}
+
+func TestTimerResignsAtHalfLife(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	f.enroll(t, t0.Add(72*time.Hour))
+	_, first := f.descriptor(t)
+
+	f.clock.advance(29 * time.Minute)
+	f.n.refreshIfDue()
+	if _, b := f.descriptor(t); !bytes.Equal(b, first) {
+		t.Fatal("re-signed before half of the lifetime")
+	}
+	f.clock.advance(time.Minute)
+	f.n.refreshIfDue()
+	if v := f.verify(t); !v.DescUntil.Equal(t0.Add(30*time.Minute + time.Hour)) {
+		t.Fatalf("descriptor until %v, want a re-signing at half of the lifetime", v.DescUntil)
 	}
 }
 
 func TestRequestingTheDescriptorNeverSigns(t *testing.T) {
 	f := newFixture(t, jcrypto.SuiteC25519)
-	ca := newCA(t, f.p)
-	f.enroll(t, ca, t0.Add(72*time.Hour))
-	_, first := call(t, http.MethodGet, f.info.URL+"/descriptor", nil)
-	f.clock.advance(10 * time.Minute)
-	_, second := call(t, http.MethodGet, f.info.URL+"/descriptor", nil)
+	f.enroll(t, t0.Add(72*time.Hour))
+	_, first := f.descriptor(t)
+	f.clock.advance(50 * time.Minute)
+	_, second := f.descriptor(t)
 	if !bytes.Equal(first, second) {
 		t.Fatal("a request changed the descriptor; only the timer may sign")
 	}
@@ -209,22 +377,28 @@ func TestRequestingTheDescriptorNeverSigns(t *testing.T) {
 
 func TestExpiredCertificateWithdrawsTheDescriptor(t *testing.T) {
 	f := newFixture(t, jcrypto.SuiteC25519)
-	ca := newCA(t, f.p)
-	f.enroll(t, ca, t0.Add(90*time.Minute))
+	f.enroll(t, t0.Add(90*time.Minute))
 
-	f.clock.advance(90 * time.Minute)
-	if code, _ := call(t, http.MethodGet, f.info.URL+"/descriptor", nil); code != http.StatusServiceUnavailable {
+	f.clock.advance(50 * time.Minute)
+	f.n.refreshIfDue()
+	if v := f.verify(t); !v.DescUntil.Equal(t0.Add(90 * time.Minute)) {
+		t.Fatalf("descriptor until %v, want the certificate's not_after", v.DescUntil)
+	}
+	f.clock.advance(40 * time.Minute)
+	if code, _ := f.descriptor(t); code != http.StatusServiceUnavailable {
 		t.Fatalf("GET /descriptor at not_after = %d, want 503", code)
 	}
-	if got := f.n.certState(); got != certExpired {
-		t.Fatalf("cert state at not_after = %s", got)
+	if got := f.stats(t); !strings.Contains(got, `"cert":"expired"`) {
+		t.Fatalf("stats at not_after: %s", got)
 	}
-	f.n.refresh()
+	f.n.refreshIfDue()
+	f.clock.advance(time.Minute)
+	f.n.refreshIfDue()
 	if _, ok := f.n.id.Bundle(); ok {
 		t.Fatal("the refresh after not_after kept the bundle")
 	}
-	if !strings.Contains(f.log.String(), pki.ErrCertTime.Error()) {
-		t.Fatalf("no refresh failure in the log: %q", f.log.String())
+	if n := strings.Count(f.log.String(), pki.ErrCertTime.Error()); n != 1 {
+		t.Fatalf("the expiry was logged %d times, want once: %q", n, f.log.String())
 	}
 }
 
@@ -249,73 +423,16 @@ func TestRequestEndpoint(t *testing.T) {
 	if code, _ := call(t, http.MethodPost, f.info.URL+"/csr", make([]byte, pki.NonceSize)); code != http.StatusNotFound {
 		t.Errorf("the public listener answered /csr with %d", code)
 	}
-}
-
-func TestCertificateEndpointRefusesAndSaysWhy(t *testing.T) {
-	f := newFixture(t, jcrypto.SuiteC25519)
-	ca := newCA(t, f.p)
-
-	issueFor := func(name, addr string, notBefore, notAfter time.Time) []byte {
-		t.Helper()
-		other, err := pki.NewIdentity(f.p, name, addr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer other.Close()
-		n := nonce(t)
-		raw, err := other.Request(n)
-		if err != nil {
-			t.Fatal(err)
-		}
-		req, err := pki.ParseRequest(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cert, err := ca.Issue(req, notBefore, notAfter)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return cert.Marshal()
+	raw, err := f.n.id.Request(nonce(t))
+	if err != nil {
+		t.Fatal(err)
 	}
-	own := func(notBefore, notAfter time.Time) []byte {
-		t.Helper()
-		n := nonce(t)
-		_, raw := call(t, http.MethodPost, f.admin.URL+"/csr", n[:])
-		req, err := pki.ParseRequest(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cert, err := ca.Issue(req, notBefore, notAfter)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return cert.Marshal()
+	req, err := pki.ParseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	for _, c := range []struct {
-		name string
-		cert []byte
-		want error
-	}{
-		{"truncated", []byte{pki.Version}, pki.ErrFormat},
-		{"unknown version", []byte("not a certificate"), pki.ErrVersion},
-		{"another identity", issueFor(testName, testAddr, t0, t0.Add(time.Hour)), pki.ErrCertMismatch},
-		{"expired", own(t0.Add(-2*time.Hour), t0.Add(-time.Hour)), pki.ErrCertTime},
-		{"not yet valid", own(t0.Add(time.Hour), t0.Add(2*time.Hour)), pki.ErrCertTime},
-	} {
-		code, body := call(t, http.MethodPut, f.admin.URL+"/cert", c.cert)
-		if code != http.StatusBadRequest || !strings.Contains(string(body), c.want.Error()) {
-			t.Errorf("%s: PUT /cert = %d %q, want 400 with %q", c.name, code, body, c.want)
-		}
-	}
-	if code, _ := call(t, http.MethodPut, f.admin.URL+"/cert", make([]byte, maxAdminBody+1)); code != http.StatusRequestEntityTooLarge {
-		t.Errorf("PUT /cert over the cap = %d", code)
-	}
-	if got := f.n.certState(); got != certNone {
-		t.Fatalf("a refused certificate changed the state to %s", got)
-	}
-	if code, _ := call(t, http.MethodGet, f.info.URL+"/descriptor", nil); code != http.StatusServiceUnavailable {
-		t.Fatalf("GET /descriptor after refused certificates = %d, want 503", code)
+	if code, body := f.put(t, f.issue(t, req, t0, t0.Add(time.Hour))); code != http.StatusConflict {
+		t.Errorf("PUT /cert after refused requests only = %d %s, want 409", code, body)
 	}
 }
 
@@ -335,7 +452,7 @@ func TestUnsignedNodeServesTheBaselineAndNoEnrollment(t *testing.T) {
 	f := &fixture{p: p, n: &node{unsigned: unsigned, ttl: time.Hour, now: time.Now, logger: log.New(io.Discard, "", 0)}}
 	f.serve(t)
 
-	code, bundle := call(t, http.MethodGet, f.info.URL+"/descriptor", nil)
+	code, bundle := f.descriptor(t)
 	if code != http.StatusOK {
 		t.Fatalf("GET /descriptor = %d", code)
 	}
@@ -352,8 +469,8 @@ func TestUnsignedNodeServesTheBaselineAndNoEnrollment(t *testing.T) {
 			t.Errorf("%s without -auth = %d, want 404", path, code)
 		}
 	}
-	if code, body := call(t, http.MethodGet, f.admin.URL+"/stats", nil); code != http.StatusOK || !strings.Contains(string(body), `"accepted":7`) {
-		t.Fatalf("GET /stats = %d %s", code, body)
+	if got := f.stats(t); !strings.Contains(got, `"accepted":7`) || !strings.Contains(got, `"cert":"none"`) {
+		t.Fatalf("GET /stats = %s", got)
 	}
 }
 
