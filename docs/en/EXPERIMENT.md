@@ -175,6 +175,14 @@ hold. It is reported as a measured boundary, not passed over.
   computed.
 - Adversary classifiers are trained and evaluated on separate samples, split by time, with no
   feature leakage.
+- A relay closes a circuit whose counters break the order or whose queue is full, and a client
+  closes one on a reply out of turn. The flow then stops before the run ends and its traces are
+  shorter. Every report row carries relay_broken_circuits and broken_flows; the summary counts such
+  runs in broken_runs and leaves them out of every median, range and count of degenerate
+  intervals. When every run of a configuration is broken, its summary line has no medians.
+- relay_dropped_cells counts cells the relays dropped: cells whose layer did not open, cells still
+  waiting in the queue of a circuit that closed, and replies the exit could not seal, which go back
+  as cover under their own number.
 
 ## Threats to validity
 
