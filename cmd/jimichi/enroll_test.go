@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,15 +20,19 @@ import (
 
 func addrOf(name string) string { return name + ".jimichi.svc.cluster.local:9000" }
 
+func host(url string) string { return strings.TrimPrefix(url, "http://") }
+
 // a relay's admin and info listeners around a pki.Identity, with hooks for a
 // relay that misbehaves
 type fakeRelay struct {
 	p        jcrypto.CryptoProvider
 	name     string
 	id       *pki.Identity
+	pin      string
 	admin    *httptest.Server
 	info     *httptest.Server
 	requests atomic.Int32
+	puts     atomic.Int32
 	installs atomic.Int32
 
 	request    func(nonce [pki.NonceSize]byte) ([]byte, error)
@@ -48,7 +53,7 @@ func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr s
 	}
 	priv.Release()
 	id.SetKeys(pub, pub, 0)
-	r := &fakeRelay{p: p, name: name, id: id, request: id.Request, descriptor: id.Bundle}
+	r := &fakeRelay{p: p, name: name, id: id, pin: id.KeyHash(), request: id.Request, descriptor: id.Bundle}
 
 	admin := http.NewServeMux()
 	admin.HandleFunc("POST /csr", func(w http.ResponseWriter, req *http.Request) {
@@ -68,6 +73,7 @@ func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr s
 		_, _ = w.Write(out)
 	})
 	admin.HandleFunc("PUT /cert", func(w http.ResponseWriter, req *http.Request) {
+		r.puts.Add(1)
 		raw, _ := io.ReadAll(req.Body)
 		if r.refuseCert {
 			http.Error(w, pki.ErrRoster.Error(), http.StatusBadRequest)
@@ -89,7 +95,7 @@ func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr s
 	info.HandleFunc("GET /descriptor", func(w http.ResponseWriter, _ *http.Request) {
 		b, ok := r.descriptor()
 		if !ok {
-			http.Error(w, "no valid certificate", http.StatusServiceUnavailable)
+			http.Error(w, "no valid descriptor", http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = w.Write(b)
@@ -105,9 +111,13 @@ func honestRelay(t *testing.T, p jcrypto.CryptoProvider, name string) *fakeRelay
 	return newRelay(t, p, name, name, addrOf(name))
 }
 
+func (r *fakeRelay) entry() rosterEntry {
+	return rosterEntry{name: r.name, addr: addrOf(r.name), admin: host(r.admin.URL), info: host(r.info.URL), identity: r.pin}
+}
+
 func (r *fakeRelay) roster() string {
-	host := func(url string) string { return strings.TrimPrefix(url, "http://") }
-	return fmt.Sprintf("%s=%s,admin=%s,info=%s", r.name, addrOf(r.name), host(r.admin.URL), host(r.info.URL))
+	e := r.entry()
+	return fmt.Sprintf("%s=%s,admin=%s,info=%s,identity=%s", e.name, e.addr, e.admin, e.info, e.identity)
 }
 
 func enrollArgs(s jcrypto.Suite, relays ...*fakeRelay) []string {
@@ -125,6 +135,33 @@ func provider(t *testing.T, s jcrypto.Suite) jcrypto.CryptoProvider {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// a relay that answers with a key it shares with another relay: every request
+// is valid on its own, only the batch shows the key twice
+func shareKey(t *testing.T, p jcrypto.CryptoProvider, relays ...*fakeRelay) {
+	t.Helper()
+	priv, pub, err := p.GenerateSigning()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(priv.Release)
+	for _, r := range relays {
+		name := r.name
+		r.pin = pki.KeyHash(p, pub)
+		r.request = func(nonce [pki.NonceSize]byte) ([]byte, error) {
+			req := &pki.Request{Suite: p.Suite(), Nonce: nonce, Name: name, Addr: addrOf(name), Identity: pub}
+			// Marshal of an unsigned request is its body and the zero length of
+			// the missing signature
+			unsigned := req.Marshal()
+			sig, err := p.Sign(priv, append([]byte("jimichi/csr/v1\x00"), unsigned[:len(unsigned)-1]...))
+			if err != nil {
+				return nil, err
+			}
+			req.Sig = sig
+			return req.Marshal(), nil
+		}
+	}
 }
 
 func TestEnrollCertifiesEveryRelay(t *testing.T) {
@@ -161,6 +198,9 @@ func TestEnrollCertifiesEveryRelay(t *testing.T) {
 			if !strings.Contains(log, "WARNING: the CA key is held without locked memory and process hardening") {
 				t.Errorf("no warning about the unprotected CA key in %q", log)
 			}
+			if strings.Contains(log, "discarded CA") {
+				t.Errorf("a successful run warned about a discarded CA: %q", log)
+			}
 			for _, r := range relays {
 				if !strings.Contains(log, "enrolled "+r.name+" identity="+r.id.Fingerprint()) {
 					t.Errorf("no line for %s in %q", r.name, log)
@@ -173,82 +213,67 @@ func TestEnrollCertifiesEveryRelay(t *testing.T) {
 func TestEnrollIsAllOrNothing(t *testing.T) {
 	s := jcrypto.SuiteC25519
 	p := provider(t, s)
-
-	shared := func(t *testing.T, relays ...*fakeRelay) {
-		priv, pub, err := p.GenerateSigning()
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(priv.Release)
-		for _, r := range relays {
-			name := r.name
-			r.request = func(nonce [pki.NonceSize]byte) ([]byte, error) {
-				req := &pki.Request{Suite: p.Suite(), Nonce: nonce, Name: name, Addr: addrOf(name), Identity: pub}
-				// Marshal of an unsigned request is its body and the zero length of
-				// the missing signature
-				unsigned := req.Marshal()
-				sig, err := p.Sign(priv, append([]byte("jimichi/csr/v1\x00"), unsigned[:len(unsigned)-1]...))
-				if err != nil {
-					return nil, err
-				}
-				req.Sig = sig
-				return req.Marshal(), nil
-			}
-		}
+	three := func(t *testing.T) []*fakeRelay {
+		return []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), honestRelay(t, p, "relay-3")}
 	}
 
 	for _, c := range []struct {
 		name string
-		// relays 1 to 3, the second or third one bent by the setup
+		// relays 1 to 3, one of them bent by the setup
 		setup func(t *testing.T) []*fakeRelay
 		want  error
-		// whether any relay may have been given a certificate before the failure
-		issued bool
+		// relays that took a certificate before the failure
+		installed string
 	}{
 		{"relay certified under another name", func(t *testing.T) []*fakeRelay {
 			return []*fakeRelay{honestRelay(t, p, "relay-1"), newRelay(t, p, "relay-2", "relay-9", addrOf("relay-2")), honestRelay(t, p, "relay-3")}
-		}, pki.ErrRoster, false},
+		}, pki.ErrRoster, ""},
 		{"relay certified for another address", func(t *testing.T) []*fakeRelay {
 			return []*fakeRelay{honestRelay(t, p, "relay-1"), newRelay(t, p, "relay-2", "relay-2", "relay-2.elsewhere:9000"), honestRelay(t, p, "relay-3")}
-		}, pki.ErrRoster, false},
+		}, pki.ErrRoster, ""},
 		{"request replayed from an earlier nonce", func(t *testing.T) []*fakeRelay {
-			r := honestRelay(t, p, "relay-2")
-			old, err := r.id.Request([pki.NonceSize]byte{1})
+			relays := three(t)
+			old, err := relays[1].id.Request([pki.NonceSize]byte{1})
 			if err != nil {
 				t.Fatal(err)
 			}
-			r.request = func([pki.NonceSize]byte) ([]byte, error) { return old, nil }
-			return []*fakeRelay{honestRelay(t, p, "relay-1"), r, honestRelay(t, p, "relay-3")}
-		}, pki.ErrNonce, false},
+			relays[1].request = func([pki.NonceSize]byte) ([]byte, error) { return old, nil }
+			return relays
+		}, pki.ErrNonce, ""},
 		{"request with a broken signature", func(t *testing.T) []*fakeRelay {
-			r := honestRelay(t, p, "relay-3")
-			r.request = func(nonce [pki.NonceSize]byte) ([]byte, error) {
-				out, err := r.id.Request(nonce)
+			relays := three(t)
+			relays[2].request = func(nonce [pki.NonceSize]byte) ([]byte, error) {
+				out, err := relays[2].id.Request(nonce)
 				out[len(out)-1] ^= 1
 				return out, err
 			}
-			return []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), r}
-		}, pki.ErrRequestSignature, false},
-		{"two relays with one identity", func(t *testing.T) []*fakeRelay {
-			relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), honestRelay(t, p, "relay-3")}
-			shared(t, relays[0], relays[2])
 			return relays
-		}, pki.ErrDuplicate, false},
+		}, pki.ErrRequestSignature, ""},
+		{"well-formed request under a foreign identity", func(t *testing.T) []*fakeRelay {
+			relays := three(t)
+			foreign, err := pki.NewIdentity(p, "relay-2", addrOf("relay-2"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(foreign.Close)
+			relays[1].request = foreign.Request
+			return relays
+		}, errIdentityPin, ""},
 		{"relay refuses its certificate", func(t *testing.T) []*fakeRelay {
-			r := honestRelay(t, p, "relay-3")
-			r.refuseCert = true
-			return []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), r}
-		}, nil, true},
+			relays := three(t)
+			relays[2].refuseCert = true
+			return relays
+		}, nil, "relay-1, relay-2"},
 		{"relay serves another relay's descriptor", func(t *testing.T) []*fakeRelay {
-			relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), honestRelay(t, p, "relay-3")}
+			relays := three(t)
 			relays[2].descriptor = relays[1].id.Bundle
 			return relays
-		}, pki.ErrWrongAddr, true},
+		}, pki.ErrWrongAddr, "relay-1, relay-2, relay-3"},
 		{"relay serves no descriptor", func(t *testing.T) []*fakeRelay {
-			relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), honestRelay(t, p, "relay-3")}
+			relays := three(t)
 			relays[1].descriptor = func() ([]byte, bool) { return nil, false }
 			return relays
-		}, nil, true},
+		}, nil, "relay-1, relay-2, relay-3"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			relays := c.setup(t)
@@ -260,15 +285,39 @@ func TestEnrollIsAllOrNothing(t *testing.T) {
 			if stdout.Len() != 0 {
 				t.Fatalf("a failed enrollment printed %q", stdout.String())
 			}
-			if c.issued {
+			notice := "relays " + c.installed + " now hold certificates of a discarded CA"
+			if c.installed != "" {
+				if !strings.Contains(stderr.String(), notice) || !strings.Contains(stderr.String(), "until enroll runs again") {
+					t.Fatalf("no notice about %s in %q", c.installed, stderr.String())
+				}
 				return
 			}
+			if strings.Contains(stderr.String(), "discarded CA") {
+				t.Fatalf("notice about a discarded CA although nothing was installed: %q", stderr.String())
+			}
 			for _, r := range relays {
-				if n := r.installs.Load(); n != 0 {
-					t.Fatalf("%s got a certificate although the batch failed", r.name)
+				if n := r.puts.Load(); n != 0 {
+					t.Fatalf("%s was sent a certificate although the batch failed", r.name)
 				}
 			}
 		})
+	}
+}
+
+// the roster refuses two equal pins, so this reaches the check in run only
+// through a roster built by hand
+func TestDuplicateIdentityIsRefusedBeforeIssuing(t *testing.T) {
+	p := provider(t, jcrypto.SuiteC25519)
+	relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2")}
+	shareKey(t, p, relays...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	e := &enrollment{p: p, nodes: roster{relays[0].entry(), relays[1].entry()}, certTTL: time.Hour, web: newWebClient(), now: time.Now, log: io.Discard}
+	if _, err := e.run(ctx); !errors.Is(err, pki.ErrDuplicate) {
+		t.Fatalf("run = %v, want %v", err, pki.ErrDuplicate)
+	}
+	if relays[0].puts.Load()+relays[1].puts.Load() != 0 {
+		t.Fatal("a certificate went out for a repeated identity")
 	}
 }
 
@@ -288,8 +337,8 @@ func TestEnrollGivesUpOnAnUnreachableRelay(t *testing.T) {
 	if d := time.Since(start); d < 500*time.Millisecond {
 		t.Fatalf("gave up after %v, a refused connection should be retried until the deadline", d)
 	}
-	if relays[0].installs.Load() != 0 {
-		t.Fatal("relay-1 got a certificate although relay-2 never answered")
+	if relays[0].puts.Load() != 0 {
+		t.Fatal("relay-1 was sent a certificate although relay-2 never answered")
 	}
 }
 
@@ -297,30 +346,35 @@ func TestRosterIsCheckedBeforeAnyRequest(t *testing.T) {
 	s := jcrypto.SuiteC25519
 	p := provider(t, s)
 	r1, r2 := honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2")
-	host := func(url string) string { return strings.TrimPrefix(url, "http://") }
 	a1, i1, a2, i2 := host(r1.admin.URL), host(r1.info.URL), host(r2.admin.URL), host(r2.info.URL)
-	entry := func(name, addr, admin, info string) string {
-		return fmt.Sprintf("%s=%s,admin=%s,info=%s", name, addr, admin, info)
+	h1, h2 := r1.pin, r2.pin
+	entry := func(name, addr, admin, info, identity string) string {
+		return fmt.Sprintf("%s=%s,admin=%s,info=%s,identity=%s", name, addr, admin, info, identity)
 	}
-	good := entry("relay-1", addrOf("relay-1"), a1, i1)
+	good := entry("relay-1", addrOf("relay-1"), a1, i1, h1)
 
 	for _, c := range []struct {
 		name  string
 		nodes []string
 	}{
 		{"no nodes", nil},
-		{"no address", []string{"relay-1,admin=" + a1 + ",info=" + i1}},
-		{"no admin endpoint", []string{"relay-1=" + addrOf("relay-1") + ",info=" + i1}},
-		{"no info endpoint", []string{"relay-1=" + addrOf("relay-1") + ",admin=" + a1}},
+		{"no address", []string{"relay-1,admin=" + a1 + ",info=" + i1 + ",identity=" + h1}},
+		{"no admin endpoint", []string{"relay-1=" + addrOf("relay-1") + ",info=" + i1 + ",identity=" + h1}},
+		{"no info endpoint", []string{"relay-1=" + addrOf("relay-1") + ",admin=" + a1 + ",identity=" + h1}},
+		{"no identity", []string{"relay-1=" + addrOf("relay-1") + ",admin=" + a1 + ",info=" + i1}},
+		{"short identity", []string{entry("relay-1", addrOf("relay-1"), a1, i1, h1[:62])}},
+		{"identity in upper case", []string{entry("relay-1", addrOf("relay-1"), a1, i1, strings.ToUpper(h1))}},
+		{"identity not hex", []string{entry("relay-1", addrOf("relay-1"), a1, i1, "g"+h1[1:])}},
 		{"unknown part", []string{good + ",debug=1"}},
 		{"repeated part", []string{good + ",admin=" + a2}},
-		{"bad name", []string{entry("Relay_1", addrOf("relay-1"), a1, i1)}},
-		{"address without a port", []string{entry("relay-1", "relay-1", a1, i1)}},
-		{"address over the field", []string{entry("relay-1", strings.Repeat("a", 60)+":9000", a1, i1)}},
-		{"endpoint without a port", []string{entry("relay-1", addrOf("relay-1"), "127.0.0.1", i1)}},
-		{"repeated name", []string{good, entry("relay-1", addrOf("relay-2"), a2, i2)}},
-		{"repeated address", []string{good, entry("relay-2", addrOf("relay-1"), a2, i2)}},
-		{"repeated endpoint", []string{good, entry("relay-2", addrOf("relay-2"), a2, i1)}},
+		{"bad name", []string{entry("Relay_1", addrOf("relay-1"), a1, i1, h1)}},
+		{"address without a port", []string{entry("relay-1", "relay-1", a1, i1, h1)}},
+		{"address over the field", []string{entry("relay-1", strings.Repeat("a", 60)+":9000", a1, i1, h1)}},
+		{"endpoint without a port", []string{entry("relay-1", addrOf("relay-1"), "127.0.0.1", i1, h1)}},
+		{"repeated name", []string{good, entry("relay-1", addrOf("relay-2"), a2, i2, h2)}},
+		{"repeated address", []string{good, entry("relay-2", addrOf("relay-1"), a2, i2, h2)}},
+		{"repeated endpoint", []string{good, entry("relay-2", addrOf("relay-2"), a2, i1, h2)}},
+		{"repeated identity", []string{good, entry("relay-2", addrOf("relay-2"), a2, i2, h1)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			args := []string{"-suite", s.String(), "-keymem", "zero", "-harden=false"}
@@ -358,6 +412,7 @@ func TestKeygenCA(t *testing.T) {
 }
 
 func TestCommandLine(t *testing.T) {
+	pin := strings.Repeat("ab", pki.HashSize)
 	for _, c := range []struct {
 		args []string
 		code int
@@ -368,7 +423,7 @@ func TestCommandLine(t *testing.T) {
 		{[]string{"keygen-ca", "-suite", "rsa"}, 1},
 		{[]string{"keygen-ca", "extra"}, 1},
 		{[]string{"enroll", "-h"}, 0},
-		{[]string{"enroll", "-cert-ttl", "1s", "-node", "relay-1=" + addrOf("relay-1") + ",admin=127.0.0.1:1,info=127.0.0.1:2"}, 1},
+		{[]string{"enroll", "-cert-ttl", "1s", "-node", "relay-1=" + addrOf("relay-1") + ",admin=127.0.0.1:1,info=127.0.0.1:2,identity=" + pin}, 1},
 	} {
 		if code := run(c.args, io.Discard, io.Discard); code != c.code {
 			t.Errorf("jimichi %v: exit %d, want %d", c.args, code, c.code)

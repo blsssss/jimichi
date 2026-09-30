@@ -25,11 +25,14 @@ const (
 )
 
 type rosterEntry struct {
-	name  string
-	addr  string
-	admin string
-	info  string
+	name     string
+	addr     string
+	admin    string
+	info     string
+	identity string
 }
+
+var errIdentityPin = errors.New("request signed by another key than the one the relay logged at start")
 
 type roster []rosterEntry
 
@@ -48,7 +51,7 @@ func parseNode(s string) (rosterEntry, error) {
 	parts := strings.Split(s, ",")
 	name, addr, ok := strings.Cut(parts[0], "=")
 	if !ok {
-		return rosterEntry{}, fmt.Errorf("%q: want name=host:port,admin=host:port,info=host:port", s)
+		return rosterEntry{}, fmt.Errorf("%q: want name=host:port,admin=host:port,info=host:port,identity=hash", s)
 	}
 	e := rosterEntry{name: name, addr: addr}
 	for _, kv := range parts[1:] {
@@ -58,6 +61,8 @@ func parseNode(s string) (rosterEntry, error) {
 			e.admin = v
 		case ok && k == "info" && e.info == "":
 			e.info = v
+		case ok && k == "identity" && e.identity == "":
+			e.identity = v
 		default:
 			return rosterEntry{}, fmt.Errorf("%q: unknown or repeated part %q", s, kv)
 		}
@@ -73,7 +78,22 @@ func parseNode(s string) (rosterEntry, error) {
 			return rosterEntry{}, fmt.Errorf("%q: %s wants host:port", s, ep.key)
 		}
 	}
+	if !validKeyHash(e.identity) {
+		return rosterEntry{}, fmt.Errorf("%q: identity wants the %d hex digits of identity_hash from the relay log", s, 2*pki.HashSize)
+	}
 	return e, nil
+}
+
+func validKeyHash(s string) bool {
+	if len(s) != 2*pki.HashSize {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && (s[i] < 'a' || s[i] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // two entries for one relay would get it two certificates, and two relays
@@ -84,7 +104,7 @@ func checkRoster(nodes roster) error {
 	}
 	seen := make(map[string]bool)
 	for _, n := range nodes {
-		for _, v := range []string{"name " + n.name, "address " + n.addr, "endpoint " + n.admin, "endpoint " + n.info} {
+		for _, v := range []string{"name " + n.name, "address " + n.addr, "endpoint " + n.admin, "endpoint " + n.info, "identity " + n.identity} {
 			if seen[v] {
 				return fmt.Errorf("%s repeated in the roster", v)
 			}
@@ -100,7 +120,7 @@ func runEnroll(args []string, stdout, stderr io.Writer) error {
 	suiteName := fs.String("suite", suite.Default.String(), "primitive suite of the relays: gost or c25519")
 	certTTL := fs.Duration("cert-ttl", 72*time.Hour, "lifetime of the certificates")
 	var nodes roster
-	fs.Var(&nodes, "node", "one relay as name=host:port,admin=host:port,info=host:port: name and address go into its certificate, admin reaches its loopback listener, info its descriptor; repeat per relay")
+	fs.Var(&nodes, "node", "one relay as name=host:port,admin=host:port,info=host:port,identity=hash: name and address go into its certificate, admin reaches its loopback listener, info its descriptor, identity is the identity_hash it logged at start; repeat per relay")
 	timeout := fs.Duration("timeout", 30*time.Second, "deadline for the whole enrollment")
 	keymem := fs.String("keymem", "all", "key memory measures for the CA key: all, none, or a list of offheap, lock, dontdump, zero")
 	harden := fs.Bool("harden", true, "disable core dumps and ptrace access for the process")
@@ -177,7 +197,7 @@ func protectKeyMemory(keymem string, harden bool, stderr io.Writer) error {
 		missing = append(missing, "process hardening")
 	}
 	if len(missing) > 0 {
-		fmt.Fprintf(stderr, "WARNING: the CA key is held without %s for the seconds of this run\n", strings.Join(missing, " and "))
+		fmt.Fprintf(stderr, "WARNING: the CA key is held without %s while it issues the certificates\n", strings.Join(missing, " and "))
 	}
 	return nil
 }
@@ -207,13 +227,7 @@ type enrollment struct {
 // nothing is issued until every request has passed, and the anchor is returned
 // only once every relay serves a descriptor that verifies against it the way
 // a client checks it
-func (e *enrollment) run(ctx context.Context) (pki.Anchor, error) {
-	ca, err := pki.NewCA(e.p)
-	if err != nil {
-		return pki.Anchor{}, err
-	}
-	defer ca.Close()
-
+func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 	reqs := make([]*pki.Request, len(e.nodes))
 	for i, n := range e.nodes {
 		var nonce [pki.NonceSize]byte
@@ -231,6 +245,11 @@ func (e *enrollment) run(ctx context.Context) (pki.Anchor, error) {
 		if err != nil {
 			return pki.Anchor{}, fmt.Errorf("node %s: %w", n.name, err)
 		}
+		// the port-forward reaches whatever answers on the pod's loopback; the
+		// hash read from the relay's own log ties the request to its key
+		if got := pki.KeyHash(e.p, r.Identity); got != n.identity {
+			return pki.Anchor{}, fmt.Errorf("node %s: %w (logged %s, request %s)", n.name, errIdentityPin, n.identity, got)
+		}
 		reqs[i] = r
 	}
 	for i := range reqs {
@@ -241,6 +260,11 @@ func (e *enrollment) run(ctx context.Context) (pki.Anchor, error) {
 		}
 	}
 
+	ca, err := pki.NewCA(e.p)
+	if err != nil {
+		return pki.Anchor{}, err
+	}
+	defer ca.Close()
 	now := e.now()
 	certs := make([]*pki.Cert, len(reqs))
 	for i, r := range reqs {
@@ -248,13 +272,23 @@ func (e *enrollment) run(ctx context.Context) (pki.Anchor, error) {
 			return pki.Anchor{}, fmt.Errorf("node %s: issuing: %w", e.nodes[i].name, err)
 		}
 	}
-	anchor := ca.Anchor()
+	anchor = ca.Anchor()
 	ca.Close()
 
+	// installing is not atomic across relays: once one has taken a certificate
+	// of this CA, a failure leaves it serving under an anchor nobody will get
+	var installed []string
+	defer func() {
+		if err != nil && len(installed) > 0 {
+			fmt.Fprintf(e.log, "relays %s now hold certificates of a discarded CA; clients refuse them until enroll runs again\n",
+				strings.Join(installed, ", "))
+		}
+	}()
 	for i, n := range e.nodes {
 		if _, err := e.call(ctx, http.MethodPut, "http://"+n.admin+"/cert", certs[i].Marshal(), http.StatusNoContent); err != nil {
 			return pki.Anchor{}, fmt.Errorf("node %s: installing the certificate: %w", n.name, err)
 		}
+		installed = append(installed, n.name)
 	}
 
 	addrs := make([]string, len(e.nodes))
