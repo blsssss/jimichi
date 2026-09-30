@@ -140,13 +140,27 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
 - The client knows the addresses of the nodes and their long-term public keys.
 - For each node it generates an ephemeral pair and agrees a shared secret with that node's
   long-term key, bound to the identifier of the link into that node.
-- Two keys are derived from the secret: one for the control cell, one for data cells.
+- Two keys are derived from the secret, one for the control cell and one for data cells, and a
+  replay tag.
 - The control cell is nested like a data cell: the layer of each node holds its ephemeral public
   key, the address of the next node, the identifier of the next link and the layer for the next
   node.
 - The hop index travels in the counter field: a node must know its position before it can tell how
   much of the body belongs to its layer.
 - After stripping its layer a node refills the cell to 512 bytes and forwards it.
+- A node remembers a tag of every control cell it opened for as long as its key lives, and drops a
+  copy, including after the original circuit has closed. Otherwise the copy would create the hop
+  key again and the counters would restart from zero under the same key. The tag is derived from
+  the shared secret under a KDF label of its own rather than read off the wire: keys that differ
+  by a point of small order (8 points on X25519, 4 on GOST) and an X25519 encoding with the top
+  bit set give one secret.
+- The number of tags is bounded (-setup-cache); a full node refuses new circuits rather than
+  forget tags. A control cell on a link that already carries a circuit is dropped before the key
+  agreement and takes no tag.
+- The cache protects only while the layer agreement key dies with the process: a restart clears
+  the tags. The agreement key therefore lives only in process memory and never reaches a disk; a
+  long-term node key, where there is one, only signs it and takes no part in the layer agreement
+  itself.
 
 An empty next address marks the exit node.
 

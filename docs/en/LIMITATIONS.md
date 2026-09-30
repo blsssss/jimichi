@@ -33,6 +33,14 @@ English | [Русский](../ru/LIMITATIONS.md)
   restarts and takes part in the layer agreement. A neighbour that kept the setup cells can, once
   the key is stolen, open that node's layers for the time it ran. A wire capture cannot be read
   without the links' ephemeral keys.
+- Control cell tags live as long as the node key, and the key lives until the node restarts. Once
+  their number reaches the bound the node refuses new circuits until it restarts: forgetting a tag
+  would mean accepting a copy again. Anyone who builds circuits can fill the cache, each tag
+  costing a TCP connection and a link handshake. This is a denial of service.
+- A tag takes 16 bytes (about 36 bytes of heap) of ordinary node memory per opened control cell
+  until restart. It holds no key, but a memory dump gives an upper bound on the number of
+  circuits, and together with the node key and a kept control cell it confirms that the node
+  carried that circuit.
 - The cell format uses constant size and replay protection but is not full Sphinx: beyond the
   constant size there is no processing that hides the position of a node in the chain.
 - Each circuit opens its own TCP connections between nodes and closes them in a cascade when it
