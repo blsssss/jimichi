@@ -82,6 +82,16 @@ func sizesOf(p jcrypto.CryptoProvider) (suiteSizes, error) {
 	return sz, nil
 }
 
+// length of the agreement keys GenerateEphemeral returns, which setup and link
+// expect from a node
+func PublicKeySize(p jcrypto.CryptoProvider) (int, error) {
+	sz, err := sizesOf(p)
+	if err != nil {
+		return 0, err
+	}
+	return sz.pub, nil
+}
+
 func perHopCost(pubLen, overhead int) int { return pubLen + overhead + setupHdr }
 
 // builds the nested setup and returns the per-hop cell keys the client keeps
