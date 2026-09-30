@@ -1,5 +1,7 @@
 # sourced by the other scripts
 NAMESPACE="${NAMESPACE:-jimichi}"
+# Git Bash rewrites arguments that look like paths, and a base64 anchor can
+export MSYS_NO_PATHCONV=1
 
 # prints the one running pod of the newest rollout of a deployment; right after a
 # restart the old pods still exist, and kubectl would happily read their logs

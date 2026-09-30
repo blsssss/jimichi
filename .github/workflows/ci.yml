@@ -63,6 +63,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - name: build images
         run: |
           docker build --build-arg TARGET=relay -t jimichi/relay:dev .
@@ -73,5 +76,8 @@ jobs:
           config: deploy/kind/ci.yaml
       - name: load images
         run: kind load docker-image jimichi/relay:dev jimichi/client:dev --name jimichi
-      - name: deploy and wait for a round trip
+      # enroll.sh builds cmd/jimichi on the runner, where the CA lives for the run
+      - name: deploy, enroll and wait for a round trip
+        env:
+          CERT_TTL: 1h
         run: bash scripts/e2e.sh
