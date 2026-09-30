@@ -20,7 +20,7 @@ English | [Русский](../ru/LIMITATIONS.md)
   up sooner or later. The testbed gives nodes a period 5% shorter than the client's.
 - Any break in the counter order closes the circuit. Whoever can put a frame on a link (a
   neighbouring node, a man in the middle on an anonymous link between nodes) can close a circuit,
-  as it could before by breaking the connection. This is a denial of service.
+  just as breaking the connection does. This is a denial of service.
 - A link is covered by own-clock sending only if the node sending on it has the measure turned on.
   The client cannot check that the nodes of its chain do: a node without the measure carries the
   timing onwards, and the protection is gone on its outgoing links.

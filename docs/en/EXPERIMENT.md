@@ -114,7 +114,7 @@ This is stronger than passive correlation and tests whether batching helps.
 | Watermark detectability | AUC of the watermark detector at the exit |
 | Resistance threshold | batching parameters at which the watermark stops being detected |
 | Price of resistance | added delivery latency that buys it |
-| Loss tolerance | fraction of dropped cells at which the circuit breaks |
+| Circuit survival | share of circuits still open at the end of a run and time to the first closed circuit, against the ratio of the node period to the client's; one lost or reordered cell closes a circuit |
 
 ### Block 3. Node compromise, adversary A4
 
@@ -124,7 +124,7 @@ This is stronger than passive correlation and tests whether batching helps.
 | Entry and exit nodes | fraction of correctly linked pairs, time to link |
 | Middle and one edge node | the same, for comparison |
 | Inserted node with a valid certificate | fraction of intercepted sessions, fraction decrypted |
-| Replay and tampering | fraction rejected, one hundred percent expected |
+| Replay and tampering | share of replayed, reordered or altered cells that go no further than the first node that sees them (a cell out of turn closes the circuit, an altered one is dropped), one hundred percent expected |
 
 The block concludes which share of the chain must be compromised to destroy the property, and
 whether that matches the theoretical probability of picking a compromised chain.
