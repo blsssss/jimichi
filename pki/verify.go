@@ -17,6 +17,9 @@ const (
 	// so no window is ever extended past its end
 	Skew              = 2 * time.Minute
 	MaxDescriptorLife = 24 * time.Hour
+	// how long after its certificate request a node still accepts the
+	// certificate; the node enforces it, an enrollment run keeps inside it
+	InstallWindow = time.Minute
 )
 
 var (

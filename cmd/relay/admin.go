@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -18,9 +19,7 @@ import (
 )
 
 const (
-	maxAdminBody = 4 << 10
-	// how long a certificate request keeps the node open to one installation
-	installWindow = time.Minute
+	maxAdminBody  = 4 << 10
 	maxCheckEvery = time.Minute
 )
 
@@ -31,8 +30,10 @@ const (
 )
 
 var (
-	errNoRequest = fmt.Errorf("no open certificate request: install within %v of POST /csr, once per request", installWindow)
+	errNoRequest = fmt.Errorf("no open certificate request: install within %v of POST /csr, once per request", pki.InstallWindow)
 	errStaleCert = errors.New("certificate issued before the open request")
+	// jimichi enroll recognises this text and prints the restart hint
+	errInstalled = errors.New("certificate already installed and valid: a new one needs a relay restart, which gives a fresh identity")
 )
 
 // the bundle clients get, with the times that end it
@@ -60,6 +61,7 @@ type node struct {
 
 	mu          sync.Mutex
 	requestAt   time.Time
+	installed   []byte
 	signedState string
 }
 
@@ -160,6 +162,10 @@ func (n *node) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	copy(nonce[:], body)
+	if n.certState() == certValid {
+		http.Error(w, errInstalled.Error(), http.StatusConflict)
+		return
+	}
 	req, err := n.id.Request(nonce)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -172,9 +178,11 @@ func (n *node) handleRequest(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(req)
 }
 
-// the loopback port is reachable by anyone allowed to port-forward to the pod,
-// so a working certificate is replaced only right after a request and only by
-// one issued after it, never by a certificate kept from an earlier enrollment
+// the loopback port is reachable by anyone allowed to port-forward to the pod
+// and Install cannot check a CA signature, so a valid certificate is never
+// replaced for the life of the process; a new one needs a restart and with it a
+// fresh identity. Sending the installed bytes again succeeds, so a retry after a
+// lost answer does not fail
 func (n *node) handleCert(w http.ResponseWriter, r *http.Request) {
 	raw, ok := readBody(w, r)
 	if !ok {
@@ -189,7 +197,13 @@ func (n *node) handleCert(w http.ResponseWriter, r *http.Request) {
 	defer n.mu.Unlock()
 	now := n.now()
 	switch {
-	case n.requestAt.IsZero() || now.Sub(n.requestAt) > installWindow:
+	case bytes.Equal(raw, n.installed) && n.certState() == certValid:
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case n.certState() == certValid:
+		http.Error(w, errInstalled.Error(), http.StatusConflict)
+		return
+	case n.requestAt.IsZero() || now.Sub(n.requestAt) > pki.InstallWindow:
 		http.Error(w, errNoRequest.Error(), http.StatusConflict)
 		return
 	case cert.NotBefore < n.requestAt.Add(-pki.Skew).Unix():
@@ -201,6 +215,7 @@ func (n *node) handleCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.requestAt = time.Time{}
+	n.installed = raw
 	n.notAfter.Store(cert.NotAfter)
 	n.logger.Printf("certificate installed serial=%x not_after=%s",
 		cert.Serial, time.Unix(cert.NotAfter, 0).UTC().Format(time.RFC3339))
@@ -263,11 +278,17 @@ func servedFrom(b []byte) (*served, error) {
 // descriptor; the timer runs on the monotonic clock, which stops while the
 // host sleeps, hence the frequent look at the wall-clock age
 func (n *node) keepFresh() {
-	t := time.NewTicker(min(n.ttl/2, maxCheckEvery))
+	t := time.NewTicker(checkEvery(n.ttl))
 	defer t.Stop()
 	for range t.C {
 		n.refreshIfDue()
 	}
+}
+
+// a quarter of the lifetime keeps a re-signing due at half of it from
+// slipping past the expiry, even for the shortest lifetime of a minute
+func checkEvery(ttl time.Duration) time.Duration {
+	return min(ttl/4, maxCheckEvery)
 }
 
 func (n *node) refreshIfDue() {
