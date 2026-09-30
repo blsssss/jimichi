@@ -68,6 +68,8 @@ Decisions taken:
   comes first and the random circuit id last.
 - GenerateSigning issues the long-term pair for node authentication, separate from the ephemeral
   one.
+- crypto/rand is the only standard-library crypto package used outside crypto/: randomness for
+  identifiers, serial numbers and padding. It is not counted as a primitive.
 
 ## Signatures
 
@@ -84,10 +86,18 @@ and has no primitives of its own.
   object never verifies as a signature over another, even if the bodies coincide byte for byte.
 - ca_id (the first 8 bytes) and cert_hash (32 bytes) come from the suite's Hash: SHA-256 or
   Streebog-256.
-- In GOST the signing key comes from the same generator on the same curve as the ephemeral pair,
-  so the roles are kept apart: the signing key takes no part in key agreement, and an agreement
-  key signs nothing.
-- The CA key and the node signing key live in secmem buffers; only the public keys leave them.
+- Verify rejects a public key of small order before it looks at the signature: under such a key a
+  signature for any message can be made without the private key. crypto/ed25519 verifies without
+  the cofactor and accepts such keys (under the neutral point R = [S]B passes), so c25519 first
+  decodes the key, requires its canonical encoding and rejects a point that the cofactor 8 takes
+  to the neutral point. GOST rejects points off the curve and points of order 2 and 4; the neutral
+  point has no affine encoding. providertest checks small-order keys for both suites.
+- A rule for callers: in GOST the signing key comes from the same generator on the same curve as
+  the ephemeral pair, so a signing key must never be used for key agreement, nor an agreement key
+  for signing. The interface does not check this.
+- The CA key and the node signing key are held in secmem buffers, and pki hands out only the
+  public keys. The copies libraries make during generation and signing are listed under
+  "Known gaps".
 
 ## Memory (crypto/secmem)
 
@@ -129,9 +139,11 @@ and has no primitives of its own.
   caches the expanded key under a weak pointer to the key: on mmap memory the runtime aborts, and on
   the heap the expanded key lives until garbage collection.
 - GenerateSigning in c25519 reads the seed from crypto/rand straight into the secmem buffer and
-  derives the public key there, following RFC 8032 (section 5.1.5). crypto/ed25519.GenerateKey
-  would leave the seed and the expanded key on the heap, while the node signing key lives as long as
-  the process. A test checks the public key and the signatures against ed25519.NewKeyFromSeed.
+  derives the public key from it by RFC 8032 (section 5.1.5) on filippo.io/edwards25519, wiping
+  its own scalars and digests. crypto/ed25519.GenerateKey would leave the seed and the expanded key
+  on the heap, while the node signing key lives as long as the process. The copies inside SHA-512
+  and edwards25519 remain and are listed under "Known gaps". A test checks the public key and the
+  signatures against ed25519.NewKeyFromSeed.
 
 ## Known gaps
 

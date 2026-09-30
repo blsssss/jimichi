@@ -22,7 +22,11 @@ English | [Русский](../ru/GLOSSARY.md)
 | Node certificate | a CA-signed record binding a node's name, address and signing key for a validity period |
 | Node signing key | the node's long-term signing pair (identity key): it signs the certificate request and the descriptor and takes no part in key agreement |
 | Onion key | the node key the client agrees a layer secret with during circuit setup |
+| Link key | the node public key (LinkPub in the descriptor) the client mixes into the link handshake with the entry node |
 | Node descriptor | a record signed by the node signing key: certificate hash, link key, onion key, epoch and a short validity |
+| Epoch | the number of the link and onion key set in a descriptor: it counts the node's changes of those keys, 0 for the first set |
+| Node bundle | the node certificate and descriptor in one JSON object, which the node serves to clients |
+| Operator roster | the list of node names and addresses the operator allows certificates for |
 | Certificate issuance | the CA checks a node's signed request, carrying a nonce the CA chose, against the operator roster and signs the certificate |
 | Counter window | the range of cell numbers a node accepts, the replay defence |
 | Memory dump | a snapshot of process memory, used in key extraction scenarios |
