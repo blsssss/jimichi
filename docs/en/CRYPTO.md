@@ -68,6 +68,36 @@ Decisions taken:
   comes first and the random circuit id last.
 - GenerateSigning issues the long-term pair for node authentication, separate from the ephemeral
   one.
+- crypto/rand is the only standard-library crypto package used outside crypto/: randomness for
+  identifiers, serial numbers and padding. It is not counted as a primitive.
+
+## Signatures
+
+The pki package takes signatures and hashes only through the CryptoProvider (Sign, Verify, Hash)
+and has no primitives of its own.
+
+| Key | What it signs | Domain string |
+|---|---|---|
+| CA key | node certificate | `jimichi/cert/v1\x00` |
+| node signing key | certificate request | `jimichi/csr/v1\x00` |
+| node signing key | node descriptor | `jimichi/descriptor/v1\x00` |
+
+- The domain string precedes the body in the signed message only. A signature over one kind of
+  object never verifies as a signature over another, even if the bodies coincide byte for byte.
+- ca_id (the first 8 bytes) and cert_hash (32 bytes) come from the suite's Hash: SHA-256 or
+  Streebog-256.
+- Verify rejects a public key of small order before it looks at the signature: under such a key a
+  signature for any message can be made without the private key. crypto/ed25519 verifies without
+  the cofactor and accepts such keys (under the neutral point R = [S]B passes), so c25519 first
+  decodes the key, requires its canonical encoding and rejects a point that the cofactor 8 takes
+  to the neutral point. GOST rejects points off the curve and points of order 2 and 4; the neutral
+  point has no affine encoding. providertest checks small-order keys for both suites.
+- A rule for callers: in GOST the signing key comes from the same generator on the same curve as
+  the ephemeral pair, so a signing key must never be used for key agreement, nor an agreement key
+  for signing. The interface does not check this.
+- The CA key and the node signing key are held in secmem buffers, and pki hands out only the
+  public keys. The copies libraries make during generation and signing are listed under
+  "Known gaps".
 
 ## Memory (crypto/secmem)
 
@@ -108,6 +138,12 @@ Decisions taken:
   RFC 8032 on filippo.io/edwards25519, directly over the secmem buffer. Since Go 1.25 crypto/ed25519
   caches the expanded key under a weak pointer to the key: on mmap memory the runtime aborts, and on
   the heap the expanded key lives until garbage collection.
+- GenerateSigning in c25519 reads the seed from crypto/rand straight into the secmem buffer and
+  derives the public key from it by RFC 8032 (section 5.1.5) on filippo.io/edwards25519, wiping
+  its own scalars and digests. crypto/ed25519.GenerateKey would leave the seed and the expanded key
+  on the heap, while the node signing key lives as long as the process. The copies inside SHA-512
+  and edwards25519 remain and are listed under "Known gaps". A test checks the public key and the
+  signatures against ed25519.NewKeyFromSeed.
 
 ## Known gaps
 
@@ -119,10 +155,11 @@ some of them live long:
 | x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct | the whole life of the circuit or link, never wiped |
 | crypto/ecdh | the X25519 scalar, the node's long-term key included, and the shared secret | until the freed heap memory is reused |
 | x/crypto hkdf, crypto/hmac | the PRK, the HMAC pads (key XOR a constant), the last derived block | until the heap memory is reused |
-| Ed25519 signing | the SHA-512 state with the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; signing always wipes its own scalars and digests, -keymem none included |
+| Ed25519 generation and signing | the SHA-512 state with the seed or the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; generation and signing always wipe their own scalars and digests, -keymem none included |
 | gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them, except under -keymem none |
 | gogost, KDF | the HMAC-Streebog pads holding the VKO secret and the circuit secret | until the heap memory is reused |
 | gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points | until the heap memory is reused; the provider wipes the number, not the copies made inside the computation |
+| gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 
 gogost arithmetic on math/big is not constant time. The node's static key could leak through VKO
 timing to an adversary who times the node's responses; side-channel attacks are outside the threat

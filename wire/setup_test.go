@@ -11,6 +11,7 @@ import (
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
+	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/wire"
 )
 
@@ -327,5 +328,22 @@ func TestSetupCacheDefaultSize(t *testing.T) {
 	}
 	if err := c.Add(wire.SetupTag{0xff}); !errors.Is(err, wire.ErrSetupCacheFull) {
 		t.Fatalf("tag past the default size: %v, want ErrSetupCacheFull", err)
+	}
+}
+
+func TestPublicKeySizeIsTheGeneratedKeyLength(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		p, err := suite.New(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		priv.Release()
+		if n, err := wire.PublicKeySize(p); err != nil || n != len(pub) {
+			t.Fatalf("%v: PublicKeySize = %d, %v, want %d", s, n, err, len(pub))
+		}
 	}
 }
