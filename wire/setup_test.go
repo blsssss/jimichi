@@ -378,6 +378,15 @@ func TestSetupHandsBothSidesTheSameOffsets(t *testing.T) {
 				if layer.Offsets != setup.Offsets[i] {
 					t.Fatalf("hop %d derived %x, the client %x", i, layer.Offsets, setup.Offsets[i])
 				}
+				// the exit learns the value the first forward cell arrives with:
+				// the base counter 0 plus the forward offsets of the hops before it
+				want := uint64(0)
+				if i == hops-1 {
+					want = (setup.Offsets[0][wire.Forward] + setup.Offsets[1][wire.Forward]) % (1 << 62)
+				}
+				if layer.First != want {
+					t.Fatalf("hop %d expects the first forward counter %#x, want %#x", i, layer.First, want)
+				}
 				if cell, err = wire.ForwardSetup(layer, i); err != nil {
 					t.Fatalf("ForwardSetup %d: %v", i, err)
 				}

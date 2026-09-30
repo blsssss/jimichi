@@ -167,3 +167,16 @@ func TestSequenceBounds(t *testing.T) {
 		t.Fatal("a value past cellLimit accepted")
 	}
 }
+
+// a sequence told its first value takes nothing else first, so a lost start
+// shows up as a break
+func TestSequenceWithAFixedStart(t *testing.T) {
+	var s Sequence
+	s.Expect(counterLimit - 1)
+	if s.Next(0) {
+		t.Fatal("a value after the expected first one accepted")
+	}
+	if !s.Next(counterLimit-1) || !s.Next(0) {
+		t.Fatal("the expected first value and its successor refused")
+	}
+}

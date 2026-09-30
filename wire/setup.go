@@ -44,7 +44,8 @@ type SetupHop struct {
 	StaticPub []byte
 	// address of the next relay, empty at the exit
 	NextAddr string
-	// circuit identifier the next link will use
+	// circuit identifier the next link will use; the exit has no next link,
+	// and BuildSetup puts its first forward counter in the field instead
 	NextCircuit uint64
 	// identifier of the link into this relay
 	Link uint64
@@ -180,13 +181,16 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 
 	for i := len(chain) - 1; i >= 0; i-- {
 		plain := make([]byte, setupHdr+len(body))
+		next := chain[i].NextCircuit
 		if chain[i].NextAddr != "" {
 			plain[0] = 1
+		} else {
+			next = firstForward(offsets[:i])
 		}
 		if err := putAddr(plain[setupFlags:setupFlags+AddrSize], chain[i].NextAddr); err != nil {
 			return nil, err
 		}
-		binary.BigEndian.PutUint64(plain[setupFlags+AddrSize:setupHdr], chain[i].NextCircuit)
+		binary.BigEndian.PutUint64(plain[setupFlags+AddrSize:setupHdr], next)
 		copy(plain[setupHdr:], body)
 
 		aead, err := p.NewAEAD(setupKeys[i])
@@ -220,12 +224,25 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 	return &SetupResult{Cell: cell, CellKeys: cellKeys, Offsets: offsets}, nil
 }
 
+// the counter the first forward cell carries into the hop after these: every
+// relay seeds on the first cell it sees, so a prefix lost upstream would go
+// unnoticed if the exit did not know where the sequence starts
+func firstForward(before []Offsets) uint64 {
+	var sum uint64
+	for _, o := range before {
+		sum = shift(sum, o[Forward])
+	}
+	return sum
+}
+
 type SetupLayer struct {
 	NextAddr    string
 	NextCircuit uint64
 	Inner       []byte
 	CellKey     *secmem.Buffer
 	Offsets     Offsets
+	// at the exit, the counter the first forward cell arrives with
+	First uint64
 	// the same for every copy of one setup and for no other setup
 	Tag SetupTag
 }
@@ -313,10 +330,17 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 	}
 
 	out := &SetupLayer{CellKey: cellKey, Offsets: offsets, Inner: plain[setupHdr:], Tag: tag}
+	next := binary.BigEndian.Uint64(plain[setupFlags+AddrSize : setupHdr])
 	if plain[0] == 1 {
 		out.NextAddr = takeAddr(plain[setupFlags : setupFlags+AddrSize])
+		out.NextCircuit = next
+		return out, nil
 	}
-	out.NextCircuit = binary.BigEndian.Uint64(plain[setupFlags+AddrSize : setupHdr])
+	if next >= counterLimit {
+		cellKey.Release()
+		return nil, ErrFraming
+	}
+	out.First = next
 	return out, nil
 }
 

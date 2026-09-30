@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -714,7 +715,7 @@ func TestForgedFarCounterDoesNotBlockTheCircuit(t *testing.T) {
 	if err := conn.WriteCell(forged); err != nil {
 		t.Fatalf("forged: %v", err)
 	}
-	genuine, err := circuit.Seal(1, []byte("still counted"))
+	genuine, err := circuit.Seal(0, []byte("still counted"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -779,7 +780,7 @@ func TestForgedFarCounterAtAForwardingRelay(t *testing.T) {
 	if err := conn.WriteCell(forged); err != nil {
 		t.Fatalf("forged: %v", err)
 	}
-	genuine, err := circuit.Seal(1, []byte("through the middle"))
+	genuine, err := circuit.Seal(0, []byte("through the middle"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -1232,7 +1233,9 @@ func TestFailedSetupCannotComeBack(t *testing.T) {
 // so the test sees every cell header the way the two relays do and can put
 // cells of its own on the way back
 type linkTap struct {
-	p       jcrypto.CryptoProvider
+	p jcrypto.CryptoProvider
+	// forward data cells the tap swallows before it passes any on
+	drop    int
 	mu      sync.Mutex
 	fwd     []uint64
 	bwd     []uint64
@@ -1274,10 +1277,15 @@ func (lt *linkTap) run(far, up net.Conn) {
 	}
 	go func() {
 		defer out.Close()
+		dropped := 0
 		for {
 			var c wire.Cell
 			if in.ReadCell(&c) != nil {
 				return
+			}
+			if h, err := c.Header(); err == nil && h.Kind == wire.KindData && dropped < lt.drop {
+				dropped++
+				continue
 			}
 			lt.note(&c, &lt.fwd)
 			if h, err := c.Header(); err == nil && h.Kind == wire.KindData {
@@ -1545,12 +1553,13 @@ func (rc *rawClient) send(t *testing.T, counter uint64, payload string) *wire.Ce
 // of every key the circuit held
 func TestForwardCellOutOfTurnEndsTheCircuit(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
+		name string
+		// the last counter breaks the order, the ones before it are fine
 		order []uint64
 	}{
-		{"copy", []uint64{1, 1}},
+		{"copy", []uint64{0, 0}},
 		{"gap", []uint64{0, 2}},
-		{"step back", []uint64{1, 0}},
+		{"step back", []uint64{0, 1, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := c25519.New()
@@ -1563,18 +1572,21 @@ func TestForwardCellOutOfTurnEndsTheCircuit(t *testing.T) {
 			entry := startRelay(t, counted, relay.Config{})
 
 			rc := dialRaw(t, p, entry, exit.addr, exit.pub, []uint64{11, 22})
-			for i, c := range tc.order {
+			last := len(tc.order) - 1
+			// the cells in turn arrive before the break is sent: a circuit that
+			// closes may take cells still in flight on its links with it
+			for i, c := range tc.order[:last] {
 				rc.send(t, c, string(rune('a'+i)))
-			}
-
-			select {
-			case got := <-delivered:
-				if string(got) != "a" {
-					t.Fatalf("delivered %q, want the first cell", got)
+				select {
+				case got := <-delivered:
+					if want := string(rune('a' + i)); string(got) != want {
+						t.Fatalf("delivered %q, want %q", got, want)
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatalf("cell %d never reached the exit", i)
 				}
-			case <-time.After(3 * time.Second):
-				t.Fatal("the first cell never reached the exit")
 			}
+			rc.send(t, tc.order[last], "break")
 			expectClosed(t, rc.conn, rc.raw)
 			expectBroken(t, entry, 1)
 			counted.expectNone(t)
@@ -2044,5 +2056,43 @@ func TestPacedChainRunsThousandsOfCells(t *testing.T) {
 	}
 	if cl.Broken() || replies == 0 {
 		t.Fatalf("client broken %v after %d replies", cl.Broken(), replies)
+	}
+}
+
+// every relay but the exit seeds on the first cell it sees, so cells lost at
+// the start of a circuit would pass unnoticed there; the exit knows the value
+// the first cell must carry and closes the circuit instead
+func TestLostFirstCellsEndTheCircuitAtTheExit(t *testing.T) {
+	for _, k := range []int{1, 3} {
+		t.Run(strconv.Itoa(k), func(t *testing.T) {
+			p := c25519.New()
+			delivered := make(chan []byte, 8)
+			exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+				delivered <- append([]byte(nil), payload...)
+				return payload
+			})
+			middle := startNode(t, p, nil)
+			tap := newLinkTap(p)
+			tap.drop = k
+			entry := startRelay(t, p, relay.Config{Dial: tap.dial})
+			cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer cl.Close()
+			for i := 0; i <= k; i++ {
+				_ = cl.Send([]byte("ping"))
+			}
+			expectEnd(t, cl)
+			expectBroken(t, exit, 1)
+			if n := len(delivered); n != 0 {
+				t.Fatalf("the exit delivered %d cells of a circuit that lost its first", n)
+			}
+			for name, n := range map[string]*node{"entry": entry, "middle": middle} {
+				if b := n.r.Stats().Snapshot().Broken; b != 0 {
+					t.Fatalf("%s closed the circuit, the exit should have", name)
+				}
+			}
+		})
 	}
 }

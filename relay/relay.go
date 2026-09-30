@@ -444,6 +444,9 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 		hopIndex: index,
 		done:     make(chan struct{}),
 	}
+	if c.isExit {
+		c.fwdSeq.Expect(layer.First)
+	}
 
 	// registered before the next hop is dialled: a second setup with the same id,
 	// replayed or not, must not replace a circuit whose keys only this map can release

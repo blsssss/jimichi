@@ -79,6 +79,9 @@ Every cell is 512 bytes, payload and cover cells alike.
   taken as it comes, since it depends on the offsets of the other nodes. A copy, a gap, a step back
   or a jump closes the circuit and the cell goes no further: forwarding a replay would hand an
   active observer a free timing mark, and a gap or a reorder would carry on to every later link.
+- The exit knows the counter the first forward cell arrives with: the client puts that value in
+  the exit's setup layer. Cells lost at the start of a circuit at any node reach the exit as a
+  break in the order, and the exit closes the circuit.
 - A node opens a forward cell first and checks its counter after. A cell that does not open is
   dropped and does not affect the order.
 - The client assigns the counter when it writes the cell to the link, after the random delay, so
@@ -190,7 +193,9 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
   the node signing key only signs the descriptor that carries it and takes no part in the layer
   agreement itself.
 
-An empty next address marks the exit node.
+An empty next address marks the exit node. The exit has no next link, so the field for its
+identifier in the exit's layer carries the counter of the first forward cell, and the setup cell
+does not grow.
 
 Circuit teardown:
 

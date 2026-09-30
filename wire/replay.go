@@ -16,6 +16,12 @@ type Sequence struct {
 	seeded bool
 }
 
+// Expect fixes the first value instead of taking it from the first cell
+func (s *Sequence) Expect(first uint64) {
+	s.seeded = true
+	s.next = first
+}
+
 // Next reports whether counter is the one due and takes it if so. No more than
 // cellLimit values are taken, so a link never comes round the modulus to a
 // value it has carried already
