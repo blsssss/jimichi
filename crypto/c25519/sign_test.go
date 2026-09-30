@@ -109,8 +109,9 @@ func TestVerifyRefusesSmallOrderKeys(t *testing.T) {
 	if new(edwards25519.Point).MultByCofactor(a).Equal(edwards25519.NewIdentityPoint()) == 1 {
 		t.Fatal("the test point has small order")
 	}
-	if p.Verify(large, msg, forged) {
-		t.Fatal("Verify accepted a non-canonical encoding of a large-order point")
+	// nobody knows a signing key for it, so only the key check can say no
+	if validPublicKey(large) {
+		t.Fatal("a non-canonical encoding of a large-order point passed the key check")
 	}
 }
 
