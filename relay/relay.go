@@ -272,7 +272,7 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	}
 
 	if c.isExit {
-		payload, cover, err := c.hop.OpenLast(cell, wire.Forward)
+		payload, cover, err := c.hop.OpenLast(cell)
 		if err != nil {
 			return err
 		}
@@ -289,7 +289,7 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		return r.reply(c, reply)
 	}
 
-	out, err := c.hop.Peel(cell, wire.Forward)
+	out, err := c.hop.Peel(cell)
 	if err != nil {
 		return err
 	}
@@ -425,7 +425,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	}
 	index := int(hdr.Counter)
 
-	hop, err := wire.NewHop(r.cfg.Provider, layer.CellKey, index)
+	hop, err := wire.NewHop(r.cfg.Provider, layer.CellKey, layer.Offsets, index)
 	layer.CellKey.Release()
 	if err != nil {
 		return r.setupFailed(from, err)

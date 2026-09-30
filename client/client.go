@@ -128,7 +128,7 @@ func Dial(cfg Config) (*Client, error) {
 		}
 	}
 
-	circuit, err := wire.NewCircuit(cfg.Provider, setup.CellKeys, links)
+	circuit, err := wire.NewCircuit(cfg.Provider, setup.CellKeys, setup.Offsets, links)
 	if err != nil {
 		release()
 		return nil, err

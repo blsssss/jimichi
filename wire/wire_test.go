@@ -7,6 +7,7 @@ import (
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/c25519"
+	"github.com/jimichi-org/jimichi/crypto/gost"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/wire"
 )
@@ -33,6 +34,16 @@ func hopKeys(t *testing.T, p jcrypto.CryptoProvider, n int) []*secmem.Buffer {
 	return keys
 }
 
+// distinct, deterministic offsets per hop; setup derives them from the shared
+// secret, here only their effect matters
+func hopOffsets(n int) []wire.Offsets {
+	offs := make([]wire.Offsets, n)
+	for i := range offs {
+		offs[i] = wire.Offsets{uint64(i+1) * 0x9e3779b97f4a7c15 % (1 << 62), uint64(i+7) * 0xc2b2ae3d27d4eb4f % (1 << 62)}
+	}
+	return offs
+}
+
 func newCircuit(t *testing.T, p jcrypto.CryptoProvider, keys []*secmem.Buffer, links ...uint64) *wire.Circuit {
 	t.Helper()
 	if len(links) == 0 {
@@ -41,7 +52,7 @@ func newCircuit(t *testing.T, p jcrypto.CryptoProvider, keys []*secmem.Buffer, l
 			links[i] = uint64(100 + i)
 		}
 	}
-	c, err := wire.NewCircuit(p, keys, links)
+	c, err := wire.NewCircuit(p, keys, hopOffsets(len(keys)), links)
 	if err != nil {
 		t.Fatalf("NewCircuit: %v", err)
 	}
@@ -65,11 +76,11 @@ func TestChainRoundTrip(t *testing.T) {
 
 	current := cell
 	for i := 0; i < hops-1; i++ {
-		hop, err := wire.NewHop(p, keys[i], i)
+		hop, err := wire.NewHop(p, keys[i], hopOffsets(hops)[i], i)
 		if err != nil {
 			t.Fatalf("NewHop %d: %v", i, err)
 		}
-		next, err := hop.Peel(current, wire.Forward)
+		next, err := hop.Peel(current)
 		hop.Close()
 		if err != nil {
 			t.Fatalf("Peel %d: %v", i, err)
@@ -81,13 +92,13 @@ func TestChainRoundTrip(t *testing.T) {
 		current = next
 	}
 
-	exit, err := wire.NewHop(p, keys[hops-1], hops-1)
+	exit, err := wire.NewHop(p, keys[hops-1], hopOffsets(hops)[hops-1], hops-1)
 	if err != nil {
 		t.Fatalf("NewHop exit: %v", err)
 	}
 	defer exit.Close()
 
-	got, cover, err := exit.OpenLast(current, wire.Forward)
+	got, cover, err := exit.OpenLast(current)
 	if err != nil || cover {
 		t.Fatalf("OpenLast: cover %v, err %v", cover, err)
 	}
@@ -169,7 +180,7 @@ func TestTamperingIsDetected(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 
-	hop, err := wire.NewHop(p, keys[0], 0)
+	hop, err := wire.NewHop(p, keys[0], hopOffsets(hops)[0], 0)
 	if err != nil {
 		t.Fatalf("NewHop: %v", err)
 	}
@@ -177,19 +188,19 @@ func TestTamperingIsDetected(t *testing.T) {
 
 	tampered := *cell
 	tampered[wire.CellSize-1] ^= 0xFF
-	if _, err := hop.Peel(&tampered, wire.Forward); err == nil {
+	if _, err := hop.Peel(&tampered); err == nil {
 		t.Fatal("a modified body must not open")
 	}
 
 	movedCounter := *cell
 	movedCounter[17] ^= 0x01
-	if _, err := hop.Peel(&movedCounter, wire.Forward); err == nil {
+	if _, err := hop.Peel(&movedCounter); err == nil {
 		t.Fatal("a modified counter must not open")
 	}
 
 	movedKind := *cell
 	movedKind[1] = byte(wire.KindControl)
-	if _, err := hop.Peel(&movedKind, wire.Forward); err == nil {
+	if _, err := hop.Peel(&movedKind); err == nil {
 		t.Fatal("a modified kind must not open")
 	}
 }
@@ -206,13 +217,13 @@ func TestLayerIsBoundToHopIndex(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 
-	wrong, err := wire.NewHop(p, keys[0], 1) // right key, wrong position
+	wrong, err := wire.NewHop(p, keys[0], hopOffsets(hops)[0], 1) // right key, wrong position
 	if err != nil {
 		t.Fatalf("NewHop: %v", err)
 	}
 	defer wrong.Close()
 
-	if _, err := wrong.Peel(cell, wire.Forward); err == nil {
+	if _, err := wrong.Peel(cell); err == nil {
 		t.Fatal("a layer must not open at the wrong hop index")
 	}
 }
@@ -230,7 +241,7 @@ func TestCircuitIDIsPerLink(t *testing.T) {
 	}
 	cell.SetCircuit(999)
 
-	hop, err := wire.NewHop(p, keys[0], 0)
+	hop, err := wire.NewHop(p, keys[0], hopOffsets(hops)[0], 0)
 	if err != nil {
 		t.Fatalf("NewHop: %v", err)
 	}
@@ -238,7 +249,7 @@ func TestCircuitIDIsPerLink(t *testing.T) {
 
 	// the nonce is derived from the circuit id, so rewriting it changes the
 	// nonce and the cell must not open with the old one
-	if _, err := hop.Peel(cell, wire.Forward); err == nil {
+	if _, err := hop.Peel(cell); err == nil {
 		t.Fatal("rewritten circuit id must change the nonce")
 	}
 }
@@ -340,7 +351,7 @@ func TestCoverIsHiddenFromEveryHopButTheExit(t *testing.T) {
 
 	cells := []*wire.Cell{payload, cover}
 	for i := 0; i < hops-1; i++ {
-		hop, err := wire.NewHop(p, keys[i], i)
+		hop, err := wire.NewHop(p, keys[i], hopOffsets(hops)[i], i)
 		if err != nil {
 			t.Fatalf("NewHop %d: %v", i, err)
 		}
@@ -349,7 +360,7 @@ func TestCoverIsHiddenFromEveryHopButTheExit(t *testing.T) {
 			if !bytes.Equal(c[:18], first[:18]) {
 				t.Fatalf("hop %d sees a different header on cell %d", i, j)
 			}
-			out, err := hop.Peel(c, wire.Forward)
+			out, err := hop.Peel(c)
 			if err != nil {
 				t.Fatalf("hop %d Peel: %v", i, err)
 			}
@@ -359,15 +370,15 @@ func TestCoverIsHiddenFromEveryHopButTheExit(t *testing.T) {
 		hop.Close()
 	}
 
-	exit, err := wire.NewHop(p, keys[hops-1], hops-1)
+	exit, err := wire.NewHop(p, keys[hops-1], hopOffsets(hops)[hops-1], hops-1)
 	if err != nil {
 		t.Fatalf("NewHop exit: %v", err)
 	}
 	defer exit.Close()
-	if got, isCover, err := exit.OpenLast(cells[0], wire.Forward); err != nil || isCover || string(got) != "real" {
+	if got, isCover, err := exit.OpenLast(cells[0]); err != nil || isCover || string(got) != "real" {
 		t.Fatalf("payload at the exit: %q, cover %v, err %v", got, isCover, err)
 	}
-	if got, isCover, err := exit.OpenLast(cells[1], wire.Forward); err != nil || !isCover || len(got) != 0 {
+	if got, isCover, err := exit.OpenLast(cells[1]); err != nil || !isCover || len(got) != 0 {
 		t.Fatalf("cover at the exit: %q, cover %v, err %v", got, isCover, err)
 	}
 }
@@ -379,5 +390,113 @@ func TestRetiredCoverKindIsRejected(t *testing.T) {
 	c[0], c[1] = wire.Version, 2
 	if _, err := c.Header(); !errors.Is(err, wire.ErrKind) {
 		t.Fatalf("Header: %v, want ErrKind", err)
+	}
+}
+
+// a cell out and its reply back through three hops on either suite: every link
+// carries its own counter, and the layers still open at the exit and at the
+// client
+func TestEveryLinkCarriesItsOwnCounter(t *testing.T) {
+	for _, p := range []jcrypto.CryptoProvider{c25519.New(), gost.New()} {
+		t.Run(p.Suite().String(), func(t *testing.T) {
+			keys := hopKeys(t, p, hops)
+			links := []uint64{100, 101, 102}
+			circuit := newCircuit(t, p, keys, links...)
+			nodes := make([]*wire.Hop, hops)
+			for i := range nodes {
+				h, err := wire.NewHop(p, keys[i], hopOffsets(hops)[i], i)
+				if err != nil {
+					t.Fatalf("NewHop %d: %v", i, err)
+				}
+				defer h.Close()
+				nodes[i] = h
+			}
+
+			cell, err := circuit.Seal(7, []byte("out"))
+			if err != nil {
+				t.Fatalf("Seal: %v", err)
+			}
+			var fwd []uint64
+			for i := 0; i < hops-1; i++ {
+				h, _ := cell.Header()
+				fwd = append(fwd, h.Counter)
+				if cell, err = nodes[i].Peel(cell); err != nil {
+					t.Fatalf("Peel %d: %v", i, err)
+				}
+				cell.SetCircuit(links[i+1])
+			}
+			h, _ := cell.Header()
+			fwd = append(fwd, h.Counter)
+			if got, _, err := nodes[hops-1].OpenLast(cell); err != nil || string(got) != "out" {
+				t.Fatalf("OpenLast: %q, %v", got, err)
+			}
+
+			back, err := nodes[hops-1].SealReply(links[hops-1], 7, []byte("back"))
+			if err != nil {
+				t.Fatalf("SealReply: %v", err)
+			}
+			var bwd []uint64
+			for i := hops - 2; i >= 0; i-- {
+				h, _ := back.Header()
+				bwd = append(bwd, h.Counter)
+				if back, err = nodes[i].Wrap(back, links[i]); err != nil {
+					t.Fatalf("Wrap %d: %v", i, err)
+				}
+			}
+			h, _ = back.Header()
+			bwd = append(bwd, h.Counter)
+			if got, _, err := circuit.OpenExit(back, wire.Backward); err != nil || string(got) != "back" {
+				t.Fatalf("OpenExit: %q, %v", got, err)
+			}
+
+			if fwd[0] != 7 {
+				t.Fatalf("the client's own link carries %d, want the base counter 7", fwd[0])
+			}
+			for _, values := range [][]uint64{fwd, bwd} {
+				for i := range values {
+					for j := i + 1; j < len(values); j++ {
+						if values[i] == values[j] {
+							t.Fatalf("two links carry counter %d: %v", values[i], values)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// the base counter stops short of the nonce limit, so a link value never wraps
+// onto one already used
+func TestCounterPastTheLimitIsRefused(t *testing.T) {
+	p := provider()
+	keys := hopKeys(t, p, hops)
+	circuit := newCircuit(t, p, keys)
+	if _, err := circuit.Seal(1<<60, []byte("late")); err == nil {
+		t.Fatal("Seal accepted a base counter at the limit")
+	}
+	exit, err := wire.NewHop(p, keys[hops-1], hopOffsets(hops)[hops-1], hops-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exit.Close()
+	if _, err := exit.SealReply(1, 1<<60, nil); err == nil {
+		t.Fatal("SealReply accepted a base counter at the limit")
+	}
+	middle, err := wire.NewHop(p, keys[1], hopOffsets(hops)[1], 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer middle.Close()
+	reply, err := exit.SealReply(1, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := reply.Header()
+	far, err := wire.NewCell(wire.Header{Kind: wire.KindData, Circuit: 1, Counter: h.Counter | 1<<62}, reply.Body())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := middle.Wrap(far, 2); err == nil {
+		t.Fatal("Wrap accepted a counter past the nonce limit")
 	}
 }

@@ -47,14 +47,23 @@ Every cell is 512 bytes, payload and cover cells alike.
 | version | 1 | format version |
 | kind | 1 | data, control, link padding |
 | circuit | 8 | circuit identifier, different on every link |
-| counter | 8 | cell number, the source of the nonce and of replay protection |
+| counter | 8 | cell number on the link, the source of the nonce and of replay protection; a value of its own on every link |
 | body | 494 | layers: three 16-byte tags, the length prefix and the payload |
 
 - The nonce never travels: it is derived from the direction, the circuit identifier and the
   counter. A key belongs to one hop of one circuit, so the pair never repeats under it.
+- The counter takes a value of its own on every link of the circuit. At setup each node derives
+  two offsets from the secret it shares with the client, one per direction, and adds its offset
+  modulo 2^62 to the counter of every cell it passes on. The client knows the offsets of all nodes and seals the
+  layer of each node with the value that arrives on the link into that node. The setup cell does
+  not grow for it.
+- The cell number stays below 2^60 in each direction, so the values of one link lie less than half
+  the modulus apart and the replay window can tell which of them is newer.
 - Every layer is an AEAD over the next layer. The associated data covers the version, the kind,
-  the counter and the hop index, so a cell cannot be moved to another position in the chain.
-- The circuit identifier is not authenticated: every link rewrites it.
+  the counter on the link into the node and the hop index, so a cell cannot be moved to another
+  position in the chain and a node cannot shift the counter without breaking the layer.
+- The circuit identifier is rewritten on every link and is not part of the associated data: the
+  layer is bound to it through the nonce.
 - The layer of hop i occupies the first 494 - 16 * i bytes of the body. After stripping its layer
   a node refills the body with random bytes, so every link carries the same size and the position
   in the chain is invisible on the wire.
@@ -65,14 +74,15 @@ Every cell is 512 bytes, payload and cover cells alike.
   bytes for a message, in both suites.
 - The setup cell holds four hops on c25519 and three on GOST: a GOST public key is 64 bytes
   against 32, and every setup layer grows by the difference.
-- A node keeps a window of accepted counters and drops a replay: forwarding one would hand an
-  active observer a free timing mark.
+- A node keeps a window of accepted counters on every link and drops a replay: forwarding one
+  would hand an active observer a free timing mark. The values on a link follow one another, and
+  the window compares them modulo 2^62.
 
 ## Link encryption
 
 A cell never crosses a link in the clear: it travels inside an encrypted frame. Without this layer
-the cell header is visible on the wire, and its counter is the same on every link of the chain: an
-observer at the entry and at the exit would link a flow by matching numbers, with no statistics.
+the cell header is visible on the wire: an observer on a link would see the kind, the circuit
+identifier and the counter of every cell.
 
 - Handshake: the initiator sends an ephemeral public key, the responder answers with its own. The
   secret of the two ephemeral keys gives the link forward secrecy.
@@ -129,7 +139,8 @@ encryption and tells padding from a real cell by its kind, so it does not help a
 A reply travels the same chain in reverse: the exit applies its layer, every relay towards the
 client adds its own, and only the client strips them all. The direction enters the nonce, so a
 forward and a backward cell never share one under the same key. The backward counter is separate,
-and each relay keeps its own replay window per direction.
+and each relay keeps its own replay window per direction. Like the forward one, it takes a value of
+its own on every link: the exit and every relay on the way back add their backward offset.
 
 The exit answers every data cell with exactly one backward cell: a message with its reply, a cover
 cell with a cover reply. Replies to messages only would show every node on the way back, by their
@@ -143,8 +154,8 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
 - The client knows the addresses of the nodes and their onion keys from verified descriptors.
 - For each node it generates an ephemeral pair and agrees a shared secret with that node's onion
   key, bound to the identifier of the link into that node.
-- Two keys are derived from the secret, one for the control cell and one for data cells, and a
-  replay tag.
+- Two keys are derived from the secret, one for the control cell and one for data cells, two
+  counter offsets and a replay tag.
 - The control cell is nested like a data cell: the layer of each node holds its ephemeral public
   key, the address of the next node, the identifier of the next link and the layer for the next
   node.

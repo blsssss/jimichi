@@ -21,6 +21,11 @@ const (
 	LabelSetup  = "jimichi/setup"
 	LabelCell   = "jimichi/cell"
 	LabelReplay = "jimichi/setup/replay"
+
+	// taken from the shared secret like the cell key, so the offsets need no
+	// bytes in the setup cell
+	LabelCounterForward  = "jimichi/counter/fwd"
+	LabelCounterBackward = "jimichi/counter/bwd"
 )
 
 // no suite fits more layers into one setup cell; the bound also keeps a
@@ -48,6 +53,7 @@ type SetupHop struct {
 type SetupResult struct {
 	Cell     *Cell
 	CellKeys []*secmem.Buffer
+	Offsets  []Offsets
 }
 
 func setupLayerLen(index, perHop int) int { return BodySize - index*perHop }
@@ -113,6 +119,7 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 	}
 
 	cellKeys := make([]*secmem.Buffer, len(chain))
+	offsets := make([]Offsets, len(chain))
 	setupKeys := make([]*secmem.Buffer, len(chain))
 	ephPubs := make([][]byte, len(chain))
 	built := false
@@ -151,6 +158,12 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 			return nil, err
 		}
 		cellKeys[i], err = p.DeriveKey(secret, []byte(LabelCell), p.KeySize())
+		if err != nil {
+			secret.Release()
+			release()
+			return nil, err
+		}
+		offsets[i], err = deriveOffsets(p, secret)
 		secret.Release()
 		if err != nil {
 			release()
@@ -204,7 +217,7 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 		return nil, err
 	}
 	built = true
-	return &SetupResult{Cell: cell, CellKeys: cellKeys}, nil
+	return &SetupResult{Cell: cell, CellKeys: cellKeys, Offsets: offsets}, nil
 }
 
 type SetupLayer struct {
@@ -212,6 +225,7 @@ type SetupLayer struct {
 	NextCircuit uint64
 	Inner       []byte
 	CellKey     *secmem.Buffer
+	Offsets     Offsets
 	// the same for every copy of one setup and for no other setup
 	Tag SetupTag
 }
@@ -265,8 +279,14 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 		return nil, err
 	}
 	cellKey, err := p.DeriveKey(secret, []byte(LabelCell), p.KeySize())
+	if err != nil {
+		secret.Release()
+		return nil, err
+	}
+	offsets, err := deriveOffsets(p, secret)
 	secret.Release()
 	if err != nil {
+		cellKey.Release()
 		return nil, err
 	}
 
@@ -292,7 +312,7 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 		return nil, ErrFraming
 	}
 
-	out := &SetupLayer{CellKey: cellKey, Inner: plain[setupHdr:], Tag: tag}
+	out := &SetupLayer{CellKey: cellKey, Offsets: offsets, Inner: plain[setupHdr:], Tag: tag}
 	if plain[0] == 1 {
 		out.NextAddr = takeAddr(plain[setupFlags : setupFlags+AddrSize])
 	}

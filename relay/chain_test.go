@@ -182,7 +182,7 @@ func TestRelayRejectsReplay(t *testing.T) {
 		}
 	}()
 
-	circuit, err := wire.NewCircuit(p, setup.CellKeys, links)
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, setup.Offsets, links)
 	if err != nil {
 		t.Fatalf("NewCircuit: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestDuplicateSetupIsRefused(t *testing.T) {
 			k.Release()
 		}
 	}()
-	circuit, err := wire.NewCircuit(p, setup.CellKeys, links)
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, setup.Offsets, links)
 	if err != nil {
 		t.Fatalf("NewCircuit: %v", err)
 	}
@@ -607,7 +607,7 @@ func TestSecondCircuitOnOneLinkIsRefused(t *testing.T) {
 				k.Release()
 			}
 		})
-		c, err := wire.NewCircuit(p, setup.CellKeys, []uint64{in, out})
+		c, err := wire.NewCircuit(p, setup.CellKeys, setup.Offsets, []uint64{in, out})
 		if err != nil {
 			t.Fatalf("NewCircuit: %v", err)
 		}
@@ -797,7 +797,7 @@ func TestForgedFarCounterDoesNotBlockTheCircuit(t *testing.T) {
 			k.Release()
 		}
 	}()
-	circuit, err := wire.NewCircuit(p, setup.CellKeys, links[:1])
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, setup.Offsets, links[:1])
 	if err != nil {
 		t.Fatalf("NewCircuit: %v", err)
 	}
@@ -863,7 +863,7 @@ func TestForgedFarCounterAtAForwardingRelay(t *testing.T) {
 			k.Release()
 		}
 	}()
-	circuit, err := wire.NewCircuit(p, setup.CellKeys, links)
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, setup.Offsets, links)
 	if err != nil {
 		t.Fatalf("NewCircuit: %v", err)
 	}
@@ -994,7 +994,7 @@ func TestSetupReplayAfterTeardownIsRefused(t *testing.T) {
 			k.Release()
 		}
 	}()
-	circuit, err := wire.NewCircuit(p, setup.CellKeys, links)
+	circuit, err := wire.NewCircuit(p, setup.CellKeys, setup.Offsets, links)
 	if err != nil {
 		t.Fatalf("NewCircuit: %v", err)
 	}
@@ -1334,5 +1334,161 @@ func TestFailedSetupCannotComeBack(t *testing.T) {
 	}
 	if n := dials.Load(); n != 1 {
 		t.Fatalf("the setup that failed once made the middle dial %d times", n)
+	}
+}
+
+// ends the encryption of the anonymous link between two relays on both sides,
+// so the test sees every cell header the way the two relays do and can put
+// cells of its own on the way back
+type linkTap struct {
+	p   jcrypto.CryptoProvider
+	mu  sync.Mutex
+	fwd []uint64
+	bwd []uint64
+	in  chan *link.Conn
+}
+
+func newLinkTap(p jcrypto.CryptoProvider) *linkTap {
+	return &linkTap{p: p, in: make(chan *link.Conn, 1)}
+}
+
+func (lt *linkTap) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	var d net.Dialer
+	up, err := d.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	near, far := net.Pipe()
+	go lt.run(far, up)
+	return near, nil
+}
+
+func (lt *linkTap) run(far, up net.Conn) {
+	in, err := link.Accept(far, lt.p, nil)
+	if err != nil {
+		_ = far.Close()
+		_ = up.Close()
+		return
+	}
+	out, err := link.Dial(up, lt.p, nil)
+	if err != nil {
+		_ = in.Close()
+		_ = up.Close()
+		return
+	}
+	select {
+	case lt.in <- in:
+	default:
+	}
+	go func() {
+		defer out.Close()
+		for {
+			var c wire.Cell
+			if in.ReadCell(&c) != nil {
+				return
+			}
+			lt.note(&c, &lt.fwd)
+			if out.WriteCell(&c) != nil {
+				return
+			}
+		}
+	}()
+	defer in.Close()
+	for {
+		var c wire.Cell
+		if out.ReadCell(&c) != nil {
+			return
+		}
+		lt.note(&c, &lt.bwd)
+		if in.WriteCell(&c) != nil {
+			return
+		}
+	}
+}
+
+func (lt *linkTap) note(c *wire.Cell, to *[]uint64) {
+	h, err := c.Header()
+	if err != nil || h.Kind != wire.KindData {
+		return
+	}
+	lt.mu.Lock()
+	*to = append(*to, h.Counter)
+	lt.mu.Unlock()
+}
+
+func (lt *linkTap) seen() (fwd, bwd []uint64) {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	return append([]uint64(nil), lt.fwd...), append([]uint64(nil), lt.bwd...)
+}
+
+// one cell carries a different counter on every link, in both directions, while
+// each link still sees its own values one after another
+func TestEveryLinkCarriesItsOwnCounter(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteGOST, jcrypto.SuiteC25519} {
+		t.Run(s.String(), func(t *testing.T) {
+			p, err := suite.New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, second := newLinkTap(p), newLinkTap(p)
+			exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
+				return append([]byte("echo:"), payload...)
+			})
+			middle := startRelay(t, p, relay.Config{Dial: second.dial})
+			entry := startRelay(t, p, relay.Config{Dial: first.dial})
+
+			cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit)})
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer cl.Close()
+
+			const cells = 5
+			for i := 0; i < cells; i++ {
+				msg := string(rune('a' + i))
+				if err := cl.Send([]byte(msg)); err != nil {
+					t.Fatalf("Send: %v", err)
+				}
+				select {
+				case reply := <-cl.Replies():
+					if string(reply) != "echo:"+msg {
+						t.Fatalf("reply %q, want %q", reply, "echo:"+msg)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("no reply to cell %d", i)
+				}
+			}
+
+			one, oneBack := first.seen()
+			two, twoBack := second.seen()
+			for name, values := range map[string][]uint64{
+				"entry to middle": one, "middle to exit": two,
+				"middle to entry": oneBack, "exit to middle": twoBack,
+			} {
+				if len(values) != cells {
+					t.Fatalf("%s: %d data cells, want %d", name, len(values), cells)
+				}
+				for k, v := range values {
+					if v != (values[0]+uint64(k))%(1<<62) {
+						t.Fatalf("%s: counters %v do not follow one another", name, values)
+					}
+				}
+			}
+			// the client's own link carries its base counters 0..cells-1
+			sent := make([]uint64, cells)
+			for i := range sent {
+				sent[i] = uint64(i)
+			}
+			for _, pair := range [][2][]uint64{{sent, one}, {sent, two}, {one, two}, {oneBack, twoBack}} {
+				for _, a := range pair[0] {
+					for _, b := range pair[1] {
+						if a == b {
+							t.Fatalf("counter %d appears on two links: %v and %v", a, pair[0], pair[1])
+						}
+					}
+				}
+			}
+		})
 	}
 }

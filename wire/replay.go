@@ -8,12 +8,18 @@ import (
 // a relay that forwards a replayed cell hands an active observer a free timing
 // mark, so this is metadata protection and not only integrity
 type ReplayWindow struct {
-	mu     sync.Mutex
-	size   uint64
-	top    uint64 // highest counter recorded
+	mu   sync.Mutex
+	size uint64
+	top  uint64 // highest counter recorded, as it came off the wire
+	// counters wrap at the nonce limit, so the window keeps them on a line of
+	// its own where the order is plain; pos is where top sits on it
+	pos    uint64
 	bits   []uint64
 	seeded bool
 }
+
+// high enough that a counter behind the first one still lands on the line
+const origin = counterLimit
 
 // counters older than size behind the highest one are rejected: a delayed cell
 // is cheaper to lose than a replay is to accept. The size is rounded up to a
@@ -51,54 +57,78 @@ func (w *ReplayWindow) Accept(counter uint64) bool {
 	return w.Commit(counter)
 }
 
-func (w *ReplayWindow) fresh(counter uint64) bool {
-	if !w.seeded || counter > w.top {
-		return true
+// place puts a counter on the line: of the two ways round the modulus the
+// shorter one says whether it is ahead of top or behind it. Values of one link
+// stay within cellLimit of the first, so the shorter way is always the true
+// one, and a counter further ahead has no place at all
+func (w *ReplayWindow) place(counter uint64) (uint64, bool) {
+	if counter >= counterLimit {
+		return 0, false
 	}
-	if w.top-counter >= w.size {
+	if !w.seeded {
+		return origin, true
+	}
+	d := (counter - w.top) & (counterLimit - 1)
+	if d < counterLimit/2 {
+		p := w.pos + d
+		return p, p-origin < cellLimit
+	}
+	return w.pos - (counterLimit - d), true
+}
+
+func (w *ReplayWindow) fresh(counter uint64) bool {
+	p, ok := w.place(counter)
+	if !ok {
 		return false
 	}
-	return !w.has(counter)
+	if !w.seeded || p > w.pos {
+		return true
+	}
+	if w.pos-p >= w.size {
+		return false
+	}
+	return !w.has(p)
 }
 
 func (w *ReplayWindow) record(counter uint64) {
+	p, _ := w.place(counter)
 	switch {
 	case !w.seeded:
 		w.seeded = true
-		w.top = counter
-	case counter > w.top:
+		w.top, w.pos = counter, p
+	case p > w.pos:
 		// slots between the old top and the new one belong to counters never
 		// seen at this distance, so they start empty
-		if counter-w.top >= w.size {
+		if p-w.pos >= w.size {
 			clear(w.bits)
 		} else {
-			for c := w.top + 1; c < counter; c++ {
-				w.unset(c)
+			for q := w.pos + 1; q < p; q++ {
+				w.unset(q)
 			}
-			w.unset(counter)
+			w.unset(p)
 		}
-		w.top = counter
+		w.top, w.pos = counter, p
 	}
-	w.set(counter)
+	w.set(p)
 }
 
-func (w *ReplayWindow) slot(counter uint64) (int, uint64) {
-	i := counter % w.size
+func (w *ReplayWindow) slot(p uint64) (int, uint64) {
+	i := p % w.size
 	return int(i / 64), uint64(1) << (i % 64)
 }
 
-func (w *ReplayWindow) has(counter uint64) bool {
-	word, bit := w.slot(counter)
+func (w *ReplayWindow) has(p uint64) bool {
+	word, bit := w.slot(p)
 	return w.bits[word]&bit != 0
 }
 
-func (w *ReplayWindow) set(counter uint64) {
-	word, bit := w.slot(counter)
+func (w *ReplayWindow) set(p uint64) {
+	word, bit := w.slot(p)
 	w.bits[word] |= bit
 }
 
-func (w *ReplayWindow) unset(counter uint64) {
-	word, bit := w.slot(counter)
+func (w *ReplayWindow) unset(p uint64) {
+	word, bit := w.slot(p)
 	w.bits[word] &^= bit
 }
 
