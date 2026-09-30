@@ -131,8 +131,8 @@ func TestNamesAndAddresses(t *testing.T) {
 		{"relay.1", false},
 		{"rélay", false},
 	} {
-		if validName(c.name) != c.ok {
-			t.Fatalf("validName(%q) = %v", c.name, !c.ok)
+		if ValidName(c.name) != c.ok {
+			t.Fatalf("ValidName(%q) = %v", c.name, !c.ok)
 		}
 	}
 
@@ -170,8 +170,8 @@ func TestNamesAndAddresses(t *testing.T) {
 		{"relay-1:http", false},
 		{"relay-1:9O00", false},
 	} {
-		if validAddr(c.addr) != c.ok {
-			t.Fatalf("validAddr(%q) = %v", c.addr, !c.ok)
+		if ValidAddr(c.addr) != c.ok {
+			t.Fatalf("ValidAddr(%q) = %v", c.addr, !c.ok)
 		}
 	}
 

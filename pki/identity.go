@@ -31,7 +31,7 @@ type Identity struct {
 }
 
 func NewIdentity(p jcrypto.CryptoProvider, name, addr string) (*Identity, error) {
-	if !validName(name) || !validAddr(addr) {
+	if !ValidName(name) || !ValidAddr(addr) {
 		return nil, ErrFormat
 	}
 	priv, pub, err := p.GenerateSigning()
