@@ -34,6 +34,34 @@ type rosterEntry struct {
 
 var errIdentityPin = errors.New("request signed by another key than the one the relay logged at start")
 
+// replaced in tests to see that no refusal ever gets as far as a CA key
+var newCA = pki.NewCA
+
+// an answer the relay gave, as opposed to a request that may or may not have
+// reached it
+type statusError struct {
+	code int
+	text string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("%d %s: %s", e.code, http.StatusText(e.code), e.text)
+}
+
+// the relay's answer to a request or certificate while a valid certificate is
+// installed; only a restart, with its fresh identity, makes it enrollable again
+func alreadyInstalled(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusConflict && strings.Contains(se.text, "already installed")
+}
+
+// a transport error or a 5xx after the certificate went out leaves open
+// whether the relay installed it
+func ambiguous(err error) bool {
+	var se *statusError
+	return !errors.As(err, &se) || se.code >= http.StatusInternalServerError
+}
+
 type roster []rosterEntry
 
 func (r *roster) String() string { return "" }
@@ -121,7 +149,8 @@ func runEnroll(args []string, stdout, stderr io.Writer) error {
 	certTTL := fs.Duration("cert-ttl", 72*time.Hour, "lifetime of the certificates")
 	var nodes roster
 	fs.Var(&nodes, "node", "one relay as name=host:port,admin=host:port,info=host:port,identity=hash: name and address go into its certificate, admin reaches its loopback listener, info its descriptor, identity is the identity_hash it logged at start; repeat per relay")
-	timeout := fs.Duration("timeout", 30*time.Second, "deadline for the whole enrollment")
+	timeout := fs.Duration("timeout", 30*time.Second, fmt.Sprintf("deadline for the whole enrollment, at most %v: a relay accepts its certificate only that long after its request", pki.InstallWindow))
+	namespace := fs.String("namespace", "jimichi", "namespace named in restart hints; deployments are taken to be named after the relays")
 	keymem := fs.String("keymem", "all", "key memory measures for the CA key: all, none, or a list of offheap, lock, dontdump, zero")
 	harden := fs.Bool("harden", true, "disable core dumps and ptrace access for the process")
 	if err := fs.Parse(args); err != nil {
@@ -136,8 +165,8 @@ func runEnroll(args []string, stdout, stderr io.Writer) error {
 	if *certTTL < time.Minute {
 		return fmt.Errorf("-cert-ttl %v: want at least 1m", *certTTL)
 	}
-	if *timeout <= 0 {
-		return fmt.Errorf("-timeout %v: must be positive", *timeout)
+	if *timeout <= 0 || *timeout > pki.InstallWindow {
+		return fmt.Errorf("-timeout %v: want more than 0 and at most %v, the time a relay waits for its certificate", *timeout, pki.InstallWindow)
 	}
 	chosen, err := suite.Parse(*suiteName)
 	if err != nil {
@@ -153,7 +182,7 @@ func runEnroll(args []string, stdout, stderr io.Writer) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	e := &enrollment{p: p, nodes: nodes, certTTL: *certTTL, web: newWebClient(), now: time.Now, log: stderr}
+	e := &enrollment{p: p, nodes: nodes, certTTL: *certTTL, web: newWebClient(), now: time.Now, log: stderr, namespace: *namespace}
 	anchor, err := e.run(ctx)
 	if err != nil {
 		return err
@@ -216,12 +245,21 @@ func newWebClient() *http.Client {
 }
 
 type enrollment struct {
-	p       jcrypto.CryptoProvider
-	nodes   roster
-	certTTL time.Duration
-	web     *http.Client
-	now     func() time.Time
-	log     io.Writer
+	p         jcrypto.CryptoProvider
+	nodes     roster
+	certTTL   time.Duration
+	web       *http.Client
+	now       func() time.Time
+	log       io.Writer
+	namespace string
+}
+
+func (e *enrollment) restartHint(names []string) string {
+	deployments := make([]string, len(names))
+	for i, n := range names {
+		deployments[i] = "deployment/" + n
+	}
+	return fmt.Sprintf("kubectl -n %s rollout restart %s", e.namespace, strings.Join(deployments, " "))
 }
 
 // nothing is issued until every request has passed, and the anchor is returned
@@ -235,6 +273,10 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 			return pki.Anchor{}, err
 		}
 		raw, err := e.call(ctx, http.MethodPost, "http://"+n.admin+"/csr", nonce[:], http.StatusOK)
+		if alreadyInstalled(err) {
+			fmt.Fprintf(e.log, "relay %s already holds a valid certificate; re-enrollment needs a fresh identity: %s, then run enroll again\n",
+				n.name, e.restartHint([]string{n.name}))
+		}
 		if err != nil {
 			return pki.Anchor{}, fmt.Errorf("node %s: certificate request: %w", n.name, err)
 		}
@@ -260,7 +302,7 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 		}
 	}
 
-	ca, err := pki.NewCA(e.p)
+	ca, err := newCA(e.p)
 	if err != nil {
 		return pki.Anchor{}, err
 	}
@@ -276,19 +318,36 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 	ca.Close()
 
 	// installing is not atomic across relays: once one has taken a certificate
-	// of this CA, a failure leaves it serving under an anchor nobody will get
-	var installed []string
+	// of this CA, a failure leaves it serving under an anchor nobody will get,
+	// and it keeps that certificate until it restarts
+	var installed, mayHold []string
 	defer func() {
-		if err != nil && len(installed) > 0 {
-			fmt.Fprintf(e.log, "relays %s now hold certificates of a discarded CA; clients refuse them until enroll runs again\n",
-				strings.Join(installed, ", "))
+		if err == nil || len(installed)+len(mayHold) == 0 {
+			return
 		}
+		held := "relays " + strings.Join(installed, ", ") + " now hold"
+		switch {
+		case len(installed) == 0:
+			held = "relays " + strings.Join(mayHold, ", ") + " may hold"
+		case len(mayHold) > 0:
+			held += " and " + strings.Join(mayHold, ", ") + " may hold"
+		}
+		fmt.Fprintf(e.log, "%s certificates of a discarded CA; clients refuse them, restart them with %s, then run enroll again\n",
+			held, e.restartHint(append(installed, mayHold...)))
 	}()
 	for i, n := range e.nodes {
-		if _, err := e.call(ctx, http.MethodPut, "http://"+n.admin+"/cert", certs[i].Marshal(), http.StatusNoContent); err != nil {
-			return pki.Anchor{}, fmt.Errorf("node %s: installing the certificate: %w", n.name, err)
+		_, err := e.call(ctx, http.MethodPut, "http://"+n.admin+"/cert", certs[i].Marshal(), http.StatusNoContent)
+		switch {
+		case err == nil:
+			installed = append(installed, n.name)
+			continue
+		case alreadyInstalled(err):
+			fmt.Fprintf(e.log, "relay %s already holds a valid certificate; re-enrollment needs a fresh identity: %s\n",
+				n.name, e.restartHint([]string{n.name}))
+		case ambiguous(err):
+			mayHold = append(mayHold, n.name)
 		}
-		installed = append(installed, n.name)
+		return pki.Anchor{}, fmt.Errorf("node %s: installing the certificate: %w", n.name, err)
 	}
 
 	addrs := make([]string, len(e.nodes))
@@ -335,7 +394,7 @@ func (e *enrollment) call(ctx context.Context, method, url string, body []byte, 
 		case len(out) > maxAnswer:
 			return nil, fmt.Errorf("answer over %d bytes", maxAnswer)
 		case resp.StatusCode != want:
-			return nil, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(out)))
+			return nil, &statusError{code: resp.StatusCode, text: strings.TrimSpace(string(out))}
 		}
 		return out, nil
 	}

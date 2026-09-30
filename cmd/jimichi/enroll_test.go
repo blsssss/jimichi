@@ -37,8 +37,17 @@ type fakeRelay struct {
 
 	request    func(nonce [pki.NonceSize]byte) ([]byte, error)
 	refuseCert bool
-	descriptor func() ([]byte, bool)
+	// answers requests and certificates the way a relay with a valid
+	// certificate does
+	holdsCert bool
+	// fails the certificate with 500 after taking it
+	failAfterInstall bool
+	// installs the first certificate, then drops the connection unanswered
+	dropFirstPut bool
+	descriptor   func() ([]byte, bool)
 }
+
+const installedText = "certificate already installed and valid: a new one needs a relay restart"
 
 func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr string) *fakeRelay {
 	t.Helper()
@@ -58,6 +67,10 @@ func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr s
 	admin := http.NewServeMux()
 	admin.HandleFunc("POST /csr", func(w http.ResponseWriter, req *http.Request) {
 		r.requests.Add(1)
+		if r.holdsCert {
+			http.Error(w, installedText, http.StatusConflict)
+			return
+		}
 		body, _ := io.ReadAll(req.Body)
 		var nonce [pki.NonceSize]byte
 		if len(body) != len(nonce) {
@@ -73,10 +86,14 @@ func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr s
 		_, _ = w.Write(out)
 	})
 	admin.HandleFunc("PUT /cert", func(w http.ResponseWriter, req *http.Request) {
-		r.puts.Add(1)
+		n := r.puts.Add(1)
 		raw, _ := io.ReadAll(req.Body)
-		if r.refuseCert {
+		switch {
+		case r.refuseCert:
 			http.Error(w, pki.ErrRoster.Error(), http.StatusBadRequest)
+			return
+		case r.holdsCert:
+			http.Error(w, installedText, http.StatusConflict)
 			return
 		}
 		now := time.Now()
@@ -89,7 +106,14 @@ func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr s
 			return
 		}
 		r.installs.Add(1)
-		w.WriteHeader(http.StatusNoContent)
+		switch {
+		case r.failAfterInstall:
+			http.Error(w, "signing failed", http.StatusInternalServerError)
+		case r.dropFirstPut && n == 1:
+			panic(http.ErrAbortHandler)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
 	})
 	info := http.NewServeMux()
 	info.HandleFunc("GET /descriptor", func(w http.ResponseWriter, _ *http.Request) {
@@ -126,6 +150,20 @@ func enrollArgs(s jcrypto.Suite, relays ...*fakeRelay) []string {
 		args = append(args, "-node", r.roster())
 	}
 	return args
+}
+
+// counts every CA key made from here on, so a test can show that a refusal
+// never got as far as one
+func countCAs(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var made atomic.Int32
+	orig := newCA
+	newCA = func(p jcrypto.CryptoProvider) (*pki.CA, error) {
+		made.Add(1)
+		return orig(p)
+	}
+	t.Cleanup(func() { newCA = orig })
+	return &made
 }
 
 func provider(t *testing.T, s jcrypto.Suite) jcrypto.CryptoProvider {
@@ -217,12 +255,13 @@ func TestEnrollIsAllOrNothing(t *testing.T) {
 		return []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), honestRelay(t, p, "relay-3")}
 	}
 
+	made := countCAs(t)
 	for _, c := range []struct {
 		name string
 		// relays 1 to 3, one of them bent by the setup
 		setup func(t *testing.T) []*fakeRelay
 		want  error
-		// relays that took a certificate before the failure
+		// the notice about relays left with a certificate of the discarded CA
 		installed string
 	}{
 		{"relay certified under another name", func(t *testing.T) []*fakeRelay {
@@ -259,23 +298,34 @@ func TestEnrollIsAllOrNothing(t *testing.T) {
 			relays[1].request = foreign.Request
 			return relays
 		}, errIdentityPin, ""},
+		{"relay already holding a valid certificate", func(t *testing.T) []*fakeRelay {
+			relays := three(t)
+			relays[1].holdsCert = true
+			return relays
+		}, nil, ""},
 		{"relay refuses its certificate", func(t *testing.T) []*fakeRelay {
 			relays := three(t)
 			relays[2].refuseCert = true
 			return relays
-		}, nil, "relay-1, relay-2"},
+		}, nil, "relays relay-1, relay-2 now hold"},
+		{"relay fails after taking its certificate", func(t *testing.T) []*fakeRelay {
+			relays := three(t)
+			relays[2].failAfterInstall = true
+			return relays
+		}, nil, "relays relay-1, relay-2 now hold and relay-3 may hold"},
 		{"relay serves another relay's descriptor", func(t *testing.T) []*fakeRelay {
 			relays := three(t)
 			relays[2].descriptor = relays[1].id.Bundle
 			return relays
-		}, pki.ErrWrongAddr, "relay-1, relay-2, relay-3"},
+		}, pki.ErrWrongAddr, "relays relay-1, relay-2, relay-3 now hold"},
 		{"relay serves no descriptor", func(t *testing.T) []*fakeRelay {
 			relays := three(t)
 			relays[1].descriptor = func() ([]byte, bool) { return nil, false }
 			return relays
-		}, nil, "relay-1, relay-2, relay-3"},
+		}, nil, "relays relay-1, relay-2, relay-3 now hold"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			made.Store(0)
 			relays := c.setup(t)
 			var stdout, stderr bytes.Buffer
 			err := runEnroll(enrollArgs(s, relays...), &stdout, &stderr)
@@ -285,15 +335,18 @@ func TestEnrollIsAllOrNothing(t *testing.T) {
 			if stdout.Len() != 0 {
 				t.Fatalf("a failed enrollment printed %q", stdout.String())
 			}
-			notice := "relays " + c.installed + " now hold certificates of a discarded CA"
+			log := stderr.String()
 			if c.installed != "" {
-				if !strings.Contains(stderr.String(), notice) || !strings.Contains(stderr.String(), "until enroll runs again") {
-					t.Fatalf("no notice about %s in %q", c.installed, stderr.String())
+				if !strings.Contains(log, c.installed+" certificates of a discarded CA") || !strings.Contains(log, "rollout restart deployment/relay-1") {
+					t.Fatalf("no notice %q with a restart hint in %q", c.installed, log)
 				}
 				return
 			}
-			if strings.Contains(stderr.String(), "discarded CA") {
-				t.Fatalf("notice about a discarded CA although nothing was installed: %q", stderr.String())
+			if strings.Contains(log, "discarded CA") {
+				t.Fatalf("notice about a discarded CA although nothing was installed: %q", log)
+			}
+			if n := made.Load(); n != 0 {
+				t.Fatalf("a refused enrollment made %d CA keys", n)
 			}
 			for _, r := range relays {
 				if n := r.puts.Load(); n != 0 {
@@ -307,6 +360,7 @@ func TestEnrollIsAllOrNothing(t *testing.T) {
 // the roster refuses two equal pins, so this reaches the check in run only
 // through a roster built by hand
 func TestDuplicateIdentityIsRefusedBeforeIssuing(t *testing.T) {
+	made := countCAs(t)
 	p := provider(t, jcrypto.SuiteC25519)
 	relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2")}
 	shareKey(t, p, relays...)
@@ -316,12 +370,45 @@ func TestDuplicateIdentityIsRefusedBeforeIssuing(t *testing.T) {
 	if _, err := e.run(ctx); !errors.Is(err, pki.ErrDuplicate) {
 		t.Fatalf("run = %v, want %v", err, pki.ErrDuplicate)
 	}
-	if relays[0].puts.Load()+relays[1].puts.Load() != 0 {
-		t.Fatal("a certificate went out for a repeated identity")
+	if relays[0].puts.Load()+relays[1].puts.Load() != 0 || made.Load() != 0 {
+		t.Fatal("a repeated identity got as far as a CA key")
+	}
+}
+
+func TestHoldingRelayGetsARestartHint(t *testing.T) {
+	s := jcrypto.SuiteC25519
+	p := provider(t, s)
+	relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2")}
+	relays[1].holdsCert = true
+	var stdout, stderr bytes.Buffer
+	if err := runEnroll(append(enrollArgs(s, relays...), "-namespace", "lab"), &stdout, &stderr); err == nil || stdout.Len() != 0 {
+		t.Fatalf("enroll = %v, stdout %q", err, stdout.String())
+	}
+	want := "relay relay-2 already holds a valid certificate; re-enrollment needs a fresh identity: kubectl -n lab rollout restart deployment/relay-2"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("no restart hint in %q", stderr.String())
+	}
+}
+
+func TestRetryAfterALostAnswerSucceeds(t *testing.T) {
+	s := jcrypto.SuiteC25519
+	p := provider(t, s)
+	relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2")}
+	relays[1].dropFirstPut = true
+	var stdout, stderr bytes.Buffer
+	if err := runEnroll(enrollArgs(s, relays...), &stdout, &stderr); err != nil {
+		t.Fatalf("enroll: %v\n%s", err, stderr.String())
+	}
+	if n := relays[1].puts.Load(); n != 2 {
+		t.Fatalf("relay-2 got %d certificate uploads, want the lost one and its retry", n)
+	}
+	if _, err := pki.ParseAnchor(strings.TrimSpace(stdout.String())); err != nil {
+		t.Fatalf("stdout %q: %v", stdout.String(), err)
 	}
 }
 
 func TestEnrollGivesUpOnAnUnreachableRelay(t *testing.T) {
+	made := countCAs(t)
 	s := jcrypto.SuiteC25519
 	p := provider(t, s)
 	relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2")}
@@ -337,12 +424,13 @@ func TestEnrollGivesUpOnAnUnreachableRelay(t *testing.T) {
 	if d := time.Since(start); d < 500*time.Millisecond {
 		t.Fatalf("gave up after %v, a refused connection should be retried until the deadline", d)
 	}
-	if relays[0].puts.Load() != 0 {
-		t.Fatal("relay-1 was sent a certificate although relay-2 never answered")
+	if relays[0].puts.Load() != 0 || made.Load() != 0 {
+		t.Fatal("an unreachable relay did not stop the run before any CA key")
 	}
 }
 
 func TestRosterIsCheckedBeforeAnyRequest(t *testing.T) {
+	made := countCAs(t)
 	s := jcrypto.SuiteC25519
 	p := provider(t, s)
 	r1, r2 := honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2")
@@ -385,7 +473,7 @@ func TestRosterIsCheckedBeforeAnyRequest(t *testing.T) {
 			if err := runEnroll(args, &stdout, io.Discard); err == nil || stdout.Len() != 0 {
 				t.Fatalf("enroll = %v, stdout %q", err, stdout.String())
 			}
-			if r1.requests.Load()+r2.requests.Load() != 0 {
+			if r1.requests.Load()+r2.requests.Load() != 0 || made.Load() != 0 {
 				t.Fatal("a relay was asked for a request before the roster was checked")
 			}
 		})
@@ -412,7 +500,7 @@ func TestKeygenCA(t *testing.T) {
 }
 
 func TestCommandLine(t *testing.T) {
-	pin := strings.Repeat("ab", pki.HashSize)
+	node := "relay-1=" + addrOf("relay-1") + ",admin=127.0.0.1:1,info=127.0.0.1:2,identity=" + strings.Repeat("ab", pki.HashSize)
 	for _, c := range []struct {
 		args []string
 		code int
@@ -423,7 +511,9 @@ func TestCommandLine(t *testing.T) {
 		{[]string{"keygen-ca", "-suite", "rsa"}, 1},
 		{[]string{"keygen-ca", "extra"}, 1},
 		{[]string{"enroll", "-h"}, 0},
-		{[]string{"enroll", "-cert-ttl", "1s", "-node", "relay-1=" + addrOf("relay-1") + ",admin=127.0.0.1:1,info=127.0.0.1:2,identity=" + pin}, 1},
+		{[]string{"enroll", "-cert-ttl", "1s", "-node", node}, 1},
+		{[]string{"enroll", "-timeout", "61s", "-node", node}, 1},
+		{[]string{"enroll", "-timeout", "0s", "-node", node}, 1},
 	} {
 		if code := run(c.args, io.Discard, io.Discard); code != c.code {
 			t.Errorf("jimichi %v: exit %d, want %d", c.args, code, c.code)
