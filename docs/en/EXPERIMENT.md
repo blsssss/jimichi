@@ -17,9 +17,10 @@ the windows.
 
 Seeds: each repeat's seed is derived from the series' base seed, and separate streams for client
 phases and for each flow's gaps are derived from it (splitmix64). Neighbouring repeats and flows
-share no random sequence. The phases of node clocks come from the node's own generator, not from
-the seed, as in a real deployment. Every report row records the configuration, the seeds, the code
-revision and the host load before and after the run.
+share no random sequence. The chains sampled in block 3 are drawn from a stream of their own,
+derived from the seed in the same way. The phases of node clocks come from the node's own
+generator, not from the seed, as in a real deployment. Every report row records the
+configuration, the seeds, the code revision and the host load before and after the run.
 
 ## Adversary models
 
@@ -30,7 +31,7 @@ The codes are used in every results table.
 | A1 | Passive on both sides | timestamps and packet sizes on the client-to-entry and exit-to-recipient links |
 | A2 | Passive on one side | the same, but only at the entry |
 | A3 | Active network | delays, duplicates and drops cells, embeds a timing watermark in a flow |
-| A4 | Node compromise | full access to one or two nodes of three, including process memory |
+| A4 | Node compromise | full access to some of the nodes, including process memory: one or two of the three nodes of a chain, k of the N nodes a client draws its chains from |
 | A5 | Local on a machine | memory and disk of a node or a client during a session and after |
 | A6 | Local with history | several snapshots of the container file over time |
 
@@ -49,6 +50,13 @@ indistinguishability, not on the secrecy of the implementation.
 | Precision at the base rate | fraction correct among positive decisions at the real number of flows | guards against a false claim: with a thousand flows AUC 0.9 is nearly useless to the adversary |
 | Degree of anonymity | entropy of the posterior sender distribution over its maximum | a standard measure, comparable with the literature |
 | Anonymity set size | number of candidates the adversary cannot separate | the intuitive form for the defence |
+
+### Compromised chains
+
+| Metric | Definition |
+|---|---|
+| Share of chains with a rogue entry and exit | share of the chains whose first and last node are both rogue, that is held by the adversary, who then links the two ends of the circuit; a chain of one node counts when that node is rogue. A uniform choice of h distinct nodes among N, k of them rogue, gives k(k-1)/(N(N-1)), and k/N for h = 1 |
+| Share of chains with a rogue node | share of the chains that hold at least one rogue node; a uniform choice gives 1 - C(N-k,h)/C(N,h) |
 
 ### Traffic indistinguishability
 
@@ -125,10 +133,26 @@ This is stronger than passive correlation and tests whether batching helps.
 | Entry and exit nodes | fraction of correctly linked pairs, time to link |
 | Middle and one edge node | the same, for comparison |
 | Inserted node with a valid certificate | fraction of intercepted sessions, fraction decrypted |
+| Choice of the chain with k rogue nodes among N | share of chains with a rogue entry and exit and share of chains with a rogue node, over chains drawn with the client's own choice, against the values of a uniform choice |
 | Replay and tampering | share of replayed, reordered or altered cells that go no further than the first node that sees them (a cell out of turn closes the circuit, an altered one is dropped), one hundred percent expected |
 
 The block concludes which share of the chain must be compromised to destroy the property, and
 whether that matches the theoretical probability of picking a compromised chain.
+
+The choice of the chain is measured without traffic and without nodes. `cmd/lab -set paths` draws
+-samples chains of -hops nodes among -nodes with the function the client uses (client.Choose),
+on a stream derived from -seed in place of the system generator, takes the first -rogue nodes
+as rogue and reports both shares next to the values of a uniform choice. The report row carries
+nodes, hops, rogue_nodes, samples, seed and rev, so the same sample can be drawn again.
+
+For N = 5, k = 2 and h = 3 there are 5 * 4 * 3 = 60 ordered chains. Six have rogue nodes at both
+ends (2 choices of the entry, the other rogue node as the exit, any of the 3 honest nodes
+between them): 6/60 = 0.1 = k(k-1)/(N(N-1)). Six hold no rogue node (the three honest nodes in
+any order), so 54/60 = 0.9 = 1 - C(3,3)/C(5,3) hold one. The test of the metric enumerates the
+60 chains and requires exactly these values.
+
+The correlation series of blocks 1 and 2 run with as many nodes as hops, in an order the harness
+sets itself: the choice of the chain does not enter them.
 
 ### Block 4. Key material, adversary A5
 

@@ -7,7 +7,11 @@ English | [Русский](../ru/GLOSSARY.md)
 | Cell | the unit of transmission, constant 512 bytes |
 | Layer | one level of encryption, stripped by one node of the chain |
 | Hop | a step between neighbouring nodes of the chain |
-| Circuit | the three nodes a message travels through, chosen by the client |
+| Circuit | the nodes a message travels through, three by default, drawn by the client from its node list; also called the chain |
+| Node list | the static list of nodes a client draws its chains from; every listed node is verified before a chain is built |
+| Entry, middle, exit | the places of a node in a chain: the entry is the first node and the only one the client connects to, the exit is the last one and delivers the message, the middle is between them |
+| Rogue node | a node the adversary holds: a compromised one or one inserted with a valid certificate |
+| Fixed chain | the first nodes of the list in the listed order instead of a random choice, for measurements that need a known path |
 | Ephemeral key | a key that lives for one session and is zeroed afterwards |
 | UKM | the value binding an agreed secret to a session |
 | AEAD | authenticated encryption with associated data |

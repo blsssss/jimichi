@@ -19,12 +19,12 @@
 A confidential messaging system that protects metadata, and the measurements that show what
 that protection is worth.
 
-Messages travel through a chain of three relay nodes under nested encryption: every hop strips
-exactly one layer and learns only its neighbours. Session keys are ephemeral, the buffers that hold
-them sit in mlocked memory outside the Go heap and are zeroed after use, and nothing reaches disk.
-Copies that the crypto libraries keep on the heap are not covered, see
-[LIMITATIONS](docs/en/LIMITATIONS.md). Every cell is the same size, so the length of a message
-says nothing about it.
+Messages travel through a chain of three relay nodes under nested encryption: the client draws
+the chain at random from the nodes it lists, every hop strips exactly one layer and learns only
+its neighbours. Session keys are ephemeral, the buffers that hold them sit in mlocked memory
+outside the Go heap and are zeroed after use, and nothing reaches disk. Copies that the crypto
+libraries keep on the heap are not covered, see [LIMITATIONS](docs/en/LIMITATIONS.md). Every cell
+is the same size, so the length of a message says nothing about it.
 
 Protecting content is the easy part. What this work measures is the harder question: how much
 an observer who sees only timings and volumes can still learn, and what it costs to take that
@@ -39,7 +39,8 @@ away. The repository therefore contains both the system and the attack against i
 - **Metadata.** A traffic correlation attack links senders to receivers from timings and volumes
   alone; its ROC and AUC are reported against cover traffic rate, cell size policy and delays.
 - **Partial compromise.** One and two nodes of three are compromised, including a node holding a
-  valid certificate from a compromised CA; residual leakage is measured.
+  valid certificate from a compromised CA; residual leakage is measured, and so is how often a
+  randomly drawn chain meets rogue nodes.
 - **Cost.** Latency per hop, throughput, CPU, padding overhead, GOST versus X25519.
 
 Threat modelling follows the FSTEC methodology of 2021-02-05; scenarios are named in plain words.
@@ -121,7 +122,7 @@ wire/         fixed-size cells, nested layers, counter order
 link/         link encryption between neighbours, frames of one size
 pki/          node certificates, descriptors and requests, issuing and checking
 relay/        relay node
-client/       sender, receiver, cover traffic
+client/       choice of the chain, sender, receiver, cover traffic
 vault/        client container with two volumes
 lab/          scenario/, metrics/, report/
 web/          testbed dashboard
@@ -150,16 +151,23 @@ bash scripts/enroll.sh
 kubectl apply -f deploy/base/client.yaml
 ```
 
-`make deploy` runs the last four steps. Three relays and a client appear in the `jimichi`
+`make deploy` runs the last four steps. Five relays and a client appear in the `jimichi`
 namespace. A relay creates its signing key in memory at start and waits for enrollment:
 `scripts/enroll.sh` builds `cmd/jimichi` and runs `jimichi enroll` on the host, which certifies
 every relay through a port-forward under a CA that exists only for that run, gives each relay the
 roster of the certified nodes and stores the CA public key, the anchor, in ConfigMap `jimichi-ca`.
 The relay then publishes a signed descriptor on port 9100, keeps the verified descriptors of the
-other roster nodes and extends circuits only to them over authenticated links. The client obtains
-the signed bundles of the chain nodes from its entry node and verifies them against the anchor
-before it builds the circuit. A restarted relay needs `make enroll` again. Aggregated counters go
-to stdout once a minute and to port 9101 on loopback only, read through a port-forward:
+other roster nodes and extends circuits only to them over authenticated links. A restarted relay
+needs `make enroll` again.
+
+The client lists all five relays and builds a chain of three (`-hops`). At every start it draws
+its entry at random, obtains the signed bundles of every listed node from that entry, verifies
+them against the anchor and only then draws the other two hops. It does not log the chain, and
+after any failure it exits and draws a new one at its next start. `-fixed-chain` keeps the listed
+order for measurements that need a known path.
+
+Aggregated counters go to stdout once a minute and to port 9101 on loopback only, read through a
+port-forward:
 
 ```
 kubectl -n jimichi port-forward deployment/relay-3 9101:9101
