@@ -134,8 +134,8 @@ English | [Русский](../ru/LIMITATIONS.md)
 - On the GOST suite every signature leaves heap copies of the signing scalar and the one-time
   number k as math/big: the request, the certificate, every timer re-signing of the descriptor,
   each half of its lifetime, and the signing at every rotation of the onion key (CRYPTO, known
-  gaps). When issuance runs on a Windows host, the CA key
-  stays in unlocked memory of a process without dump prevention while it issues.
+  gaps). When issuance runs on a Windows host, the CA key stays in unlocked memory of a process
+  without dump prevention while it issues.
 - The node limits (ARCHITECTURE) give one address at most 32 of the 512 links, 4 of the 32
   concurrent handshakes, 10 new links and 0.2 setups per second; an IPv6 /64 counts as one
   address. The shared caps equal 16 per-address shares of links and 8 of handshakes; once a
