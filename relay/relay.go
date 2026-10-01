@@ -308,8 +308,10 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		}
 		return nil
 	}
+	// the circuit ends here as surely as on a cell out of turn, so it is counted
+	// the same way
 	if err := c.write(out); err != nil {
-		return fmt.Errorf("%w: %v", errFatal, err)
+		return fmt.Errorf("%w: forward write: %v", errBroken, err)
 	}
 	r.stats.add(&r.stats.Forwarded)
 	return nil
@@ -325,11 +327,17 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 	var cell *wire.Cell
 	var err error
 	if payload != nil {
-		// the number is taken either way and a gap would close the circuit a
-		// relay further on, so a reply that does not seal, one too long for a
-		// cell, leaves as cover under the same number
-		if cell, err = c.hop.SealReply(c.inbound, counter, payload); err != nil {
+		cell, err = c.hop.SealReply(c.inbound, counter, payload)
+		// the number is taken and a gap would close the circuit a relay further
+		// on, so a reply too long for a cell leaves as cover under the same
+		// number; the length is refused before anything is sealed, so the cover
+		// reuses no nonce, while any other failure may come after the seal
+		if errors.Is(err, wire.ErrPayloadSize) {
 			r.stats.add(&r.stats.Dropped)
+			cell, err = nil, nil
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %v", errBroken, err)
 		}
 	}
 	if cell == nil {

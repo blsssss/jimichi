@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"encoding/binary"
+	"errors"
 	"math/rand/v2"
 	"testing"
 
@@ -178,5 +180,71 @@ func TestSequenceWithAFixedStart(t *testing.T) {
 	}
 	if !s.Next(counterLimit-1) || !s.Next(0) {
 		t.Fatal("the expected first value and its successor refused")
+	}
+}
+
+// an exit layer sealed by hand, so its first forward counter can be any value
+func exitSetup(t *testing.T, p jcrypto.CryptoProvider, nodePub []byte, link, first uint64) *Cell {
+	t.Helper()
+	ephPriv, ephPub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := p.Agree(ephPriv, nodePub, linkUKM(link))
+	ephPriv.Release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupKey, err := p.DeriveKey(secret, []byte(LabelSetup), p.KeySize())
+	secret.Release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer setupKey.Release()
+	sz, err := sizesOf(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := make([]byte, setupHdr+setupLayerLen(1, perHopCost(sz.pub, sz.overhead)))
+	binary.BigEndian.PutUint64(plain[setupFlags+AddrSize:setupHdr], first)
+	aead, err := p.NewAEAD(setupKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aead.Destroy()
+	nonce, err := nonceFor(aead.NonceSize(), Forward, link, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := append(append([]byte{}, ephPub...), aead.Seal(nil, nonce, plain, setupAAD(0))...)
+	cell, err := NewCell(Header{Kind: KindControl, Circuit: link}, append(body, make([]byte, BodySize-len(body))...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cell
+}
+
+// no counter of a link reaches the nonce limit, so an exit told to expect one
+// that does refuses the setup
+func TestOpenSetupRefusesAFirstCounterPastTheLimit(t *testing.T) {
+	p := c25519.New()
+	priv, pub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer priv.Release()
+
+	layer, err := OpenSetup(p, priv, exitSetup(t, p, pub, 77, counterLimit-1))
+	if err != nil {
+		t.Fatalf("OpenSetup with the last valid first counter: %v", err)
+	}
+	layer.CellKey.Release()
+	if layer.First != counterLimit-1 || layer.NextAddr != "" || layer.NextCircuit != 0 {
+		t.Fatalf("exit layer: first %#x, next %q %d", layer.First, layer.NextAddr, layer.NextCircuit)
+	}
+	for _, first := range []uint64{counterLimit, ^uint64(0)} {
+		if _, err := OpenSetup(p, priv, exitSetup(t, p, pub, 78, first)); !errors.Is(err, ErrFraming) {
+			t.Fatalf("first counter %#x: %v, want ErrFraming", first, err)
+		}
 	}
 }
