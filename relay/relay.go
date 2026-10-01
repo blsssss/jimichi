@@ -70,8 +70,9 @@ type Counters struct {
 	Delivered uint64
 	Dropped   uint64
 	Padding   uint64
-	// circuits closed because a cell came out of turn, came back as another
-	// kind or found its queue full
+	// circuits this node closed: a cell out of turn, a backward cell of another
+	// kind or one it could not wrap, a cell with no room in its queue, a cell it
+	// could not write to either neighbour, or a reply the exit could not seal
 	Broken uint64
 }
 
@@ -308,10 +309,8 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		}
 		return nil
 	}
-	// the circuit ends here as surely as on a cell out of turn, so it is counted
-	// the same way
 	if err := c.write(out); err != nil {
-		return fmt.Errorf("%w: forward write: %v", errBroken, err)
+		return writeFailure(err)
 	}
 	r.stats.add(&r.stats.Forwarded)
 	return nil
@@ -351,8 +350,23 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 		}
 		return nil
 	}
-	return c.writeBack(cell)
+	if err := c.writeBack(cell); err != nil {
+		return writeFailure(err)
+	}
+	return nil
 }
+
+// a cell that cannot be written ends its circuit as surely as one out of turn,
+// so it is counted the same way; a link this node closed itself belongs to a
+// teardown already under way and is not counted again
+func writeFailure(err error) error {
+	if lostToTeardown(err) {
+		return fmt.Errorf("%w: %v", errFatal, err)
+	}
+	return fmt.Errorf("%w: write: %v", errBroken, err)
+}
+
+func lostToTeardown(err error) bool { return errors.Is(err, net.ErrClosed) }
 
 // a circuit dies with the link it came in on; closing the link onwards makes the
 // next relay do the same, so a break anywhere reaches both ends of the chain
@@ -414,6 +428,9 @@ func (r *Relay) backward(c *circuit) {
 			continue
 		}
 		if err := c.writeBack(out); err != nil {
+			if !lostToTeardown(err) {
+				r.stats.add(&r.stats.Broken)
+			}
 			return
 		}
 		r.stats.add(&r.stats.Forwarded)

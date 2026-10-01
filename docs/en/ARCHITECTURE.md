@@ -212,8 +212,8 @@ Circuit teardown:
 - Closing a link anywhere closes the neighbouring links of the circuit in both directions, so the
   break reaches the client and the exit node.
 - A node closes a circuit itself when a cell arrives out of turn, a cell of another kind or one
-  it cannot wrap comes back, a cell finds no room in its queue, a cell cannot be written onward, or
-  the exit cannot seal a reply. The close takes the same path as a closed link and
+  it cannot wrap comes back, a cell finds no room in its queue, a cell cannot be written to either
+  neighbour, or the exit cannot seal a reply. The close takes the same path as a closed link and
   is counted with the closed circuits.
 - Circuit keys are released once every goroutine using them has stopped.
 - The client sees the break as its reply channel closing and exits. The orchestrator restarts it

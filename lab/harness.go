@@ -71,11 +71,11 @@ type Run struct {
 	Dropped   uint64
 	// cells the relays themselves dropped, from their aggregated counters
 	RelayDropped uint64
-	// circuits the relays closed because a cell came out of turn or found a
-	// full queue; such a flow stops before the run ends
+	// circuits the relays closed, for any cause in relay.Counters.Broken; such a
+	// flow stops before the run ends
 	RelayBroken uint64
-	// clients that closed their circuit over a reply out of turn or one that
-	// did not open
+	// clients that closed their circuit over a reply out of turn, one that did
+	// not open or one beyond the cells written
 	BrokenFlows int
 	// per flow, as its client saw it, whatever closed the circuit; the relay
 	// counters above sum what each relay noticed and may count one circuit

@@ -83,7 +83,11 @@ func (p *pacer) run() {
 	for {
 		if err := p.send(); err != nil {
 			// the link is broken; closing it lets the circuit teardown run the
-			// same way it does for a failed read
+			// same way it does for a failed read, and it counts as a circuit the
+			// node closed unless the node closed the link itself
+			if !lostToTeardown(err) {
+				p.stats.add(&p.stats.Broken)
+			}
 			_ = p.out.Close()
 			return
 		}

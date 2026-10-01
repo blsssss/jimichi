@@ -232,7 +232,8 @@ func (c *Client) open(cell *wire.Cell, want uint64) ([]byte, bool, error) {
 	return c.circuit.OpenExit(cell, wire.Backward)
 }
 
-// whether the circuit ended because a reply came out of turn or did not open
+// whether this client closed its circuit over a reply out of turn, one that
+// did not open or one beyond the cells it wrote
 func (c *Client) Broken() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

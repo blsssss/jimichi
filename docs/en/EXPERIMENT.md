@@ -179,7 +179,10 @@ hold. It is reported as a measured boundary, not passed over.
 - A relay closes a circuit when a counter breaks the order (a copy, a gap, a step back, a jump, or
   at the exit a first forward counter other than the one in its setup layer), a cell finds no room
   in a queue in either direction, a backward cell of another kind or one it cannot wrap arrives,
-  the exit cannot seal even a cover reply, or a cell cannot be written onward. A client closes its
+  the exit cannot seal a reply for any reason other than its length (a reply too long for a cell
+  goes back as cover under the same number), or a cell cannot be written to the next node or back
+  towards the client. A write on a link the node closed itself while closing a circuit is not
+  counted again. A client closes its
   circuit on a reply out of turn, a reply that does not open, or a reply beyond the number of cells
   it wrote. The flow then stops before the run ends and its traces are shorter.
 - A report row carries relay_broken_circuits (the sum of the closures each relay noticed, so one

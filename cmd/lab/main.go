@@ -200,8 +200,15 @@ func main() {
 				os.Exit(1)
 			}
 			after := loadavg()
-			if run.RelayBroken > 0 || run.BrokenFlows > 0 {
-				fmt.Fprintf(os.Stderr, "%s: relays closed %d circuits and clients %d during the run\n", v.label, run.RelayBroken, run.BrokenFlows)
+			closed := 0
+			for _, c := range run.Closures {
+				if c.Closed {
+					closed++
+				}
+			}
+			if run.RelayBroken > 0 || run.BrokenFlows > 0 || closed > 0 {
+				fmt.Fprintf(os.Stderr, "%s: relays closed %d circuits, clients %d, and %d flows saw their circuit close during the run\n",
+					v.label, run.RelayBroken, run.BrokenFlows, closed)
 			}
 			for _, bin := range bins {
 				res, d := analyse(run, v.label, bin)
