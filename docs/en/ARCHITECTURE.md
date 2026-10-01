@@ -613,8 +613,14 @@ finds by the label of their deployments (app=relay).
   -auth extends nowhere until its roster arrives.
 - GET /descriptors on the info port is the mirror: the node's own bundle and the cached
   bundles of its roster peers. It is encoded when the cache is refreshed and when the node signs
-  its own descriptor; a request copies ready bytes. The answer is 503 until the node holds a
-  valid bundle of every roster node, and again from the moment one of them expires.
+  its own descriptor; a request copies ready bytes. The mirror lists what the node holds: a peer
+  whose bundle it does not hold, or whose bundle has expired, is left out. The answer is 503 only
+  while the node has no descriptor of its own in service.
+- The client (-missing, 1 by default, at most the listed nodes beyond -hops) accepts a mirror that
+  lists the entry itself and all but that many listed nodes, verifies every bundle the mirror
+  does list, and draws the other hops among those nodes. A bundle that is listed and fails the
+  check refuses the circuit; it is never treated as a node left out. A fixed chain needs the
+  bundles of its own nodes.
 - A cached bundle may name an onion key its node has already replaced. The node holds that key
   until the bundle has expired (section "Circuit setup", onion key epochs), so a client that
   takes the bundle from the mirror still builds its circuit.

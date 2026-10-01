@@ -30,9 +30,22 @@ English | [Русский](../ru/LIMITATIONS.md)
   observer only. Its client takes the unverified keys of every hop from the entry alone, and a
   node serves them only when started with -advertise and -peers. It serves measurements on the
   testbed.
-- The entry serves the bundles of every listed node. It cannot alter them, but it can withhold
-  them: the client then exits and draws another entry at its next start. The entry also sees
-  when a client prepares a circuit: the request for the descriptors precedes the setup.
+- The entry serves the bundles of the listed nodes it holds. It cannot alter them, but it can
+  withhold the mirror: the client then exits and draws another entry at its next start. It can
+  also leave out up to -missing listed nodes (one by default), and the chain is then drawn among
+  the rest. On the testbed (five nodes, chains of three, two rogue nodes) both ends of a chain
+  are rogue with probability 2/5 x 1/4 = 0.1 when no node is left out, and 2/5 x 1/3 = 2/15 when
+  a rogue entry leaves out one honest node: the exit is then drawn among three nodes, one of them
+  rogue. The entry also sees when a client prepares a circuit: the request for the descriptors
+  precedes the setup.
+- A node that withholds its descriptor from the others removes itself from their mirrors. When
+  more nodes do so than -missing allows, the mirrors of honest nodes no longer satisfy a client
+  and only the mirrors of the withholding nodes do, so -missing has to be at least the number of
+  nodes assumed to misbehave, and a larger value gives a rogue entry more room to steer. There is
+  no directory signed by several parties that would settle which nodes exist.
+- A node can serve a different validly signed onion key to each of the other nodes. The key that
+  opens a setup cell then tells it whose mirror the client used, so a rogue exit can learn the
+  entry of a circuit and with it the whole chain of three.
 - The node list of a client is static: there is no node discovery and no directory. The setup
   cell bounds a chain at four hops on c25519 and three on GOST. The roster a node accepts bounds
   the network: 4 KiB hold 58 nodes of the testbed address form on c25519 and 57 on GOST.
