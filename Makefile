@@ -1,7 +1,7 @@
 CLUSTER ?= jimichi
 NAMESPACE ?= jimichi
 
-.PHONY: check test lint images kind-up kind-load deploy up redeploy start stop down logs stats sweep
+.PHONY: check test lint images kind-up kind-load deploy enroll up redeploy start stop down logs stats sweep
 
 check:
 	@test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }
@@ -32,7 +32,11 @@ deploy:
 	kubectl rollout status -n $(NAMESPACE) deployment/relay-1
 	kubectl rollout status -n $(NAMESPACE) deployment/relay-2
 	kubectl rollout status -n $(NAMESPACE) deployment/relay-3
+	bash scripts/enroll.sh
 	kubectl apply -f deploy/base/client.yaml
+
+enroll:
+	bash scripts/enroll.sh
 
 up: kind-up kind-load deploy
 
@@ -42,6 +46,10 @@ redeploy:
 start:
 	docker start $(CLUSTER)-control-plane $(CLUSTER)-worker $(CLUSTER)-worker2
 	kubectl wait --for=condition=Ready nodes --all --timeout=180s
+	kubectl -n $(NAMESPACE) rollout status deployment/relay-1 --timeout=180s
+	kubectl -n $(NAMESPACE) rollout status deployment/relay-2 --timeout=180s
+	kubectl -n $(NAMESPACE) rollout status deployment/relay-3 --timeout=180s
+	bash scripts/enroll.sh
 	kubectl -n $(NAMESPACE) rollout status deployment/client-a --timeout=180s
 
 stop:

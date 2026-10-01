@@ -41,6 +41,37 @@ English | [Русский](../ru/LIMITATIONS.md)
   until restart. It holds no key, but a memory dump gives an upper bound on the number of
   circuits, and together with the node key and a kept control cell it confirms that the node
   carried that circuit.
+- Trust in certificate issuance rests on the operator's kubeconfig and the path from the kube API
+  through the kubelet into the pod: both the port-forward that carries the request and the
+  certificate and the container log that gives the hash of the node signing key take that path.
+  kind does not verify the kubelet certificate, so whoever controls the host or its docker network
+  can substitute both during issuance and impersonate a node. That is the runtime administrator
+  of the threat model.
+- The integrity of the anchor equals write access to ConfigMap jimichi-ca and to the client pod
+  spec: whoever can change them decides which nodes the client trusts.
+- A certificate is installed once per node process, and re-enrollment, including after the
+  certificate expires, needs a restart. Whoever holds the pods/portforward right on a node's pod
+  can enroll a fresh node process under a CA of their own before the operator does: clients
+  holding the operator's anchor refuse that node, and it stays out of service until it restarts.
+  That is operator-level power, the runtime administrator of the threat model.
+- There is no revocation beyond not_after and a node restart with a new issuance under a new CA.
+  A signing key extracted from the memory of a live node impersonates that node until whichever
+  of the two comes first.
+- Every node restart needs scripts/enroll.sh: the new process gets a new signing key and no
+  certificate. Until then clients refuse the node, and readiness does not show it; it shows as a
+  503 on /descriptor, as cert=none in the counters line and in the client log.
+- Whoever holds the CA key, that is the operator or someone who stole it during issuance, can
+  certify an identity of their own for any name and address and, with a position in the network,
+  substitute nodes. What that costs the properties of the system is yet to be
+  measured in the lab (experiment block 3). Past circuits stay closed to such a substitution.
+- Nodes publish their descriptors themselves and there is no directory: a node can show
+  different keys to different clients.
+- The clocks of nodes and clients must agree within 2 minutes (the Skew allowance). kind nodes run
+  on the host clock.
+- On the GOST suite every signature leaves heap copies of the signing scalar and the one-time
+  number k as math/big: the request, the certificate and every timer re-signing of the descriptor,
+  each half of its lifetime (CRYPTO, known gaps). When issuance runs on a Windows host, the CA key
+  stays in unlocked memory of a process without dump prevention while it issues.
 - The cell format uses constant size and replay protection but is not full Sphinx: beyond the
   constant size there is no processing that hides the position of a node in the chain.
 - Each circuit opens its own TCP connections between nodes and closes them in a cascade when it

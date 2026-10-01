@@ -27,10 +27,11 @@ the same size.
 client-a -> relay-1 -> relay-2 -> relay-3 -> client-b
 ```
 
-1. The client picks three nodes from a directory of addresses and long-term keys.
-2. It agrees an ephemeral session key with each node separately. A node's keys are meant to be
-   vouched for by a node bundle signed along the chain from the CA. The pki package implements the
-   bundle check (section "Node authentication"); the client does not run it yet.
+1. The client obtains the signed bundles of the three chain nodes. A bundle is the node's
+   certificate from the CA and a descriptor with the node keys, signed by the node signing key.
+2. Before the circuit setup the client checks every bundle against the trust anchor (section
+   "Node authentication"). If any node fails the check, the client refuses to build the circuit.
+   It then agrees an ephemeral session key with each node separately.
 3. The client wraps the message in three layers: the outer one for relay-1, the inner one for
    relay-3.
 4. Each node strips exactly its own layer and learns only the next hop.
@@ -75,9 +76,10 @@ observer at the entry and at the exit would link a flow by matching numbers, wit
 
 - Handshake: the initiator sends an ephemeral public key, the responder answers with its own. The
   secret of the two ephemeral keys gives the link forward secrecy.
-- The client knows the long-term key of the entry node and mixes it into the secret, so the first
-  link is authenticated. Links between nodes are anonymous: they hide headers from a passive
-  observer, while the onion layers bind the content to the nodes the client chose.
+- The client mixes the link key of the entry node, taken from its verified descriptor, into the
+  secret, so the first link is authenticated. Links between nodes are anonymous: they hide
+  headers from a passive observer, while the onion layers bind the content to the nodes the
+  client chose.
 - Two keys are derived from the secret, one per direction. The nonce is the frame number in that
   direction.
 - A frame is the 512-byte cell plus a 16-byte tag, 528 bytes. After the handshake the wire carries
@@ -138,9 +140,9 @@ only when the delivery at the exit takes constant time or the nodes send on thei
 
 Setup takes one control cell of the same 512 bytes, with no extra round trips.
 
-- The client knows the addresses of the nodes and their long-term public keys.
-- For each node it generates an ephemeral pair and agrees a shared secret with that node's
-  long-term key, bound to the identifier of the link into that node.
+- The client knows the addresses of the nodes and their onion keys from verified descriptors.
+- For each node it generates an ephemeral pair and agrees a shared secret with that node's onion
+  key, bound to the identifier of the link into that node.
 - Two keys are derived from the secret, one for the control cell and one for data cells, and a
   replay tag.
 - The control cell is nested like a data cell: the layer of each node holds its ephemeral public
@@ -159,9 +161,9 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
   forget tags. A control cell on a link that already carries a circuit is dropped before the key
   agreement and takes no tag.
 - The cache protects only while the layer agreement key dies with the process: a restart clears
-  the tags. The agreement key therefore lives only in process memory and never reaches a disk; a
-  long-term node key, where there is one, only signs it and takes no part in the layer agreement
-  itself.
+  the tags. The agreement key therefore lives only in process memory and never reaches a disk;
+  the node signing key only signs the descriptor that carries it and takes no part in the layer
+  agreement itself.
 
 An empty next address marks the exit node.
 
@@ -177,31 +179,32 @@ Circuit teardown:
 
 ## Node authentication
 
-The pki package implements the chain of trust from the CA key to the node keys that go into
-circuit setup, together with certificate issuance and verification. The CA key only signs
-certificates and takes no part in the layer agreement: compromising it lets an attacker certify a
-node of their own, but it does not open past sessions.
+The client takes node keys only from a bundle verified against the trust anchor. The pki package
+implements the chain of trust from the CA key to the node keys, certificate issuance and
+verification; cmd/relay, cmd/client and cmd/jimichi use it. The CA key only signs certificates and
+takes no part in the layer agreement.
 
 ### Chain of trust
 
 | Link | What it binds | Signed by |
 |---|---|---|
-| Trust anchor | the CA public key as the string `<suite>:<base64>`; ca_id is the first 8 bytes of Hash(key) | nothing, it is meant to reach the client as configuration |
+| Trust anchor | the CA public key as the string `<suite>:<base64>`; ca_id is the first 8 bytes of Hash(key) | nothing, it reaches the client as configuration (ConfigMap jimichi-ca) |
 | Node certificate | suite, serial number, ca_id, validity, name, address, node signing key | the CA key |
 | Node descriptor | certificate hash, link key, onion key, epoch, validity | the node signing key |
 | Certificate request | a nonce chosen by the CA, name, address, node signing key | the node signing key |
 
 - The address in the certificate is exactly the host:port the client dials or writes as the next
   node's address.
-- The onion key is meant for circuit setup, the link key for the link to the entry node. The
-  descriptor carries both fields so the onion key can change independently of the link key.
+- The onion key goes into circuit setup, the link key into the link to the entry node. For now a
+  node publishes its static agreement key in both fields. The descriptor carries both fields so
+  the onion key can change independently of the link key.
 - The request is used only for issuance and is never shown to clients. It proves possession of the
   signing key, and the nonce chosen by the CA proves freshness. Request.Check accepts a request
   only if the nonce matches and the name and address match the operator roster.
 - Identity.Install installs a certificate only if the signing key, suite, name, address and
   validity all match. The node does not check the CA signature: it has no anchor. Whoever issues
   the certificate must therefore verify the node's bundle against the anchor after the install,
-  as pki.Verify does for a client.
+  as pki.Verify does for a client; jimichi enroll does exactly that.
 - The CA key and the node signing key are generated through the CryptoProvider straight into
   secmem buffers. Close releases them; callers defer it.
 
@@ -275,12 +278,122 @@ The first failure stops the check; every check after parsing has its own error:
 - Request.Check at issuance checks the suite (ErrSuite), the nonce (ErrNonce), the name and
   address against the roster (ErrRoster) and the request signature (ErrRequestSignature).
 
+### Client check
+
+- Before any network request: with -auth (the default) an empty -ca is fatal, and the anchor
+  suite must equal -suite.
+- The client obtains the bundles of the chain nodes with a 5 s timeout per request and a 16 KiB
+  limit, retrying up to 30 times 1 s apart only on a connection error or a 503 answer; decoding
+  is strict.
+- pki.VerifyChain checks every node of the chain. On the first error the client exits with
+  `refusing to build the circuit: node <address>: <reason>`, or, when a node repeats, with
+  `refusing to build the circuit: nodes <address> and <address>: pki: node repeated in the chain`.
+  There is no fallback to unverified keys and no partial chain. On success it logs one line per
+  node: the signing key fingerprint and the certificate and descriptor validity.
+- The onion key from the descriptor goes into circuit setup, the entry node's link key into
+  link.Dial. client.Dial refuses a node with an empty key or a key of the wrong size: an empty
+  link key would make the link to the entry anonymous.
+- With -auth=false the client reads the same bundles through pki.Unverified and logs one WARNING
+  line. A node run with -auth=false serves an unsigned bundle (pki.Unsigned). This is the baseline
+  for measuring what authentication is worth.
+
+### Certificate issuance
+
+Certificates are issued by `jimichi enroll` (cmd/jimichi) outside the cluster: on the operator's
+machine or the CI runner. scripts/enroll.sh runs it for every node of the testbed.
+
+1. The operator passes a roster: for each node the name and address for its certificate, two
+   local addresses that reach the node's admin port and descriptor port, and the hash of the
+   node signing key. The node prints this hash once at start, before any port serves
+   (identity_hash=). scripts/enroll.sh reads it from the log of the pod's current container
+   through the kube API (kubectl logs) and requires exactly one such line. Names, addresses, local
+   addresses and hashes must be well formed and pairwise distinct.
+2. The process sets the secmem policy (-keymem, -harden). If memory locking was requested and
+   does not work, issuance does not start.
+3. Each node gets POST /csr with a fresh 16-byte nonce and answers with a request signed by its
+   signing key. Request.Check matches the nonce, name and address against the roster, the key
+   hash in the request must equal the hash from the log, and the signing keys of the nodes must
+   be pairwise distinct. A node that has already taken a certificate, valid or expired, answers
+   POST /csr with 409, and enroll prints the command that restarts it.
+4. Only when every request has passed is the CA key created in a secmem buffer. The CA issues
+   every certificate and its key is released at once (Close): it lives for the issuance only.
+5. Each certificate goes to its node with PUT /cert. The node accepts a certificate only if it
+   has taken none before, within 60 s of POST /csr (pki.InstallWindow), once per request and only
+   with a not_before no earlier than the request time minus Skew; otherwise it answers 409 with
+   the error class. It then installs the certificate, signs a descriptor and answers 204, or 400
+   if the install is refused. Sending the installed certificate again while it is valid gets 204,
+   so a retry after a lost answer goes through.
+6. enroll reads /descriptor of every node and checks the whole chain with pki.VerifyChain against
+   the new anchor, exactly as a client does.
+7. Only then is the anchor printed on stdout. On any error stdout stays empty and the exit code
+   is 1.
+
+- A certificate is installed once per node process: an installed certificate is never replaced, not
+  even an expired one, and re-enrollment needs a node restart, which brings a new identity. Install
+  does not check the CA signature, so without this rule anyone who reaches the admin port could
+  replace a working certificate with their own.
+- Installation across the nodes is not atomic. If issuance fails after the first PUT /cert, the
+  nodes that already took a certificate keep it under a discarded CA until they restart, and
+  clients refuse them. enroll lists those nodes on stderr, together with the nodes whose answer
+  was lost or a 5xx (may hold), and prints the `kubectl rollout restart` command for them;
+  enroll.sh prints the same guidance. Issuance runs again after the restart.
+- enroll's -timeout is at most 60 s, so the whole run fits the window in which a node waits for
+  its certificate.
+- The request and the certificate travel over `kubectl port-forward` to one specific pod, to the
+  node's admin port 127.0.0.1:9101, the same one that serves the counters. The kube API lets the
+  operator reach the pod and its log by kubeconfig and the pods/portforward and pods/log rights.
+  A port-forward reaches whatever process listens on the pod's loopback, so the request is tied
+  to the node by the key hash from the container log: a request under another key is refused and
+  no certificate is issued. With -auth a node refuses to start unless the -stats address is a
+  loopback IP. Request bodies on that port are capped at 4 KiB.
+- The anchor goes into ConfigMap jimichi-ca (key anchor), from there into the JIMICHI_CA variable
+  and the client's -ca flag. After a new issuance enroll.sh restarts the client.
+- A Windows host has no mlock and no prctl: enroll.sh passes `-keymem zero -harden=false`, and
+  enroll warns that the CA key stays in unlocked memory while it issues. The locked path runs in
+  Linux: WSL2 and CI.
+- `jimichi keygen-ca` prints the anchor of a key that is thrown away at once. e2e uses it to check
+  that a client holding a foreign anchor refuses to build the circuit.
+
+### Key lifetime and revocation
+
+| Key | Created by | Held in | Lives |
+|---|---|---|---|
+| CA key | `jimichi enroll`, pki.NewCA, after every request has passed | secmem of the enroll process | the issuance only; Close releases it on every exit path |
+| Anchor | the same process | stdout, ConfigMap, client environment | until the next issuance, public |
+| Node signing key | cmd/relay at start, before any port opens | secmem; a node told to lock memory does not start without the lock | until the process ends |
+| Static node agreement key (onion and link) | cmd/relay, GenerateEphemeral | secmem | until the process ends |
+| Certificate, descriptor | CA, node | node heap, public; the bundle is kept encoded | certificate until not_after or the node restarts; descriptor 1 h (-descriptor-ttl) |
+
+- A node restart gives a new signing key and no certificate. The node is ready (readiness on
+  /healthz), but /descriptor answers 503 and clients refuse to build a circuit through it until
+  scripts/enroll.sh runs. make deploy, make start and scripts/e2e.sh run it themselves.
+- A new issuance needs fresh node processes. scripts/redeploy.sh restarts the nodes itself, make
+  start after make stop brings them up anew, while running make deploy again, make start without
+  make stop or scripts/e2e.sh on certified nodes stops with a restart hint. Certificates of the
+  previous CA die when the nodes restart with new identities and the clients with the new anchor:
+  revocation by forgetting. There is no other revocation.
+- The certificate lifetime comes from -cert-ttl: 72 h on the testbed, 1 h in CI.
+- The descriptor is signed when the certificate is installed and after that only by the timer; a
+  /descriptor request serves the ready bundle and never triggers a signature. The timer fires
+  every min(ttl/4, 1 min) and signs again once the descriptor's wall-clock age reaches half its
+  lifetime or the certificate state changes. The wall clock matters because the timer runs on
+  the monotonic clock, which stands still while the host sleeps.
+- After the descriptor's expires or the certificate's not_after the node answers 503. A node
+  whose certificate expired comes back only through a restart and a new issuance.
+
+### CA compromise
+
+The CA key takes no part in key agreement. Whoever holds it, that is the operator or someone who
+stole the key during the issuance, can certify an identity of their own for any name and address
+and, with a position in the network, substitute a node. It gives no layer keys of past circuits:
+those come from the nodes' agreement keys, which the CA never sees.
+
 ## What is recorded during measurements
 
 | Source | Data |
 |---|---|
-| client | send and receive timestamps per cell, losses, flow identifier |
-| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding. No flow identifiers. The counters are not published on the network: polled often, they would show which ticks carried a real cell |
+| client | send and receive timestamps per cell, losses, flow identifier; at start the fingerprint and validity of every verified node |
+| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, state of the installed certificate (cert: none, valid, expired). No flow identifiers. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after |
 | network | traffic captures at the entry and the exit for the correlation attack |
 | memory | dumps of the relay process in the key extraction scenario |
 
@@ -315,13 +428,22 @@ adversary with several snapshots) are stated in LIMITATIONS.
 | lab/* | scenarios, observer, metrics, reports | client, relay, link, crypto/suite |
 | web | testbed dashboard | lab |
 | cmd/relay, cmd/client, cmd/lab | entry points and configuration | the packages above |
+| cmd/jimichi | testbed CLI: certificate issuance | pki, crypto/suite, crypto/secmem |
 
-Rule: relay, client and wire know nothing about lab. The experiment harness depends on the system,
-not the other way round.
+Rule: relay, client, wire and cmd/jimichi know nothing about lab. The experiment harness depends
+on the system, not the other way round.
 
 ## Deployment
 
-- deploy/compose: docker-compose with three relays and two clients, the development mode.
-- deploy/kind and deploy/base: the same set in a Kubernetes cluster, for the defence demo.
-  The manifests hold no Secret with keys, volumes are tmpfs in RAM, the root filesystem is
-  read-only.
+- deploy/kind: kind cluster configurations, cluster.yaml for the testbed (a control plane and two
+  workers) and ci.yaml for CI (a single node).
+- deploy/base: the jimichi namespace, three relays with their Services and the client client-a.
+  There are no volumes, the root filesystem is read-only, the user is 65532, seccomp is
+  RuntimeDefault and every capability is dropped; relays keep only IPC_LOCK for mlock.
+- The manifests hold no Secret at all: node keys are created in process memory and never leave
+  it. The only thing that enters the cluster is the public anchor, in ConfigMap jimichi-ca.
+- The CA runs outside the cluster: `jimichi enroll` (cmd/jimichi) through scripts/enroll.sh on the
+  operator's machine or the CI runner.
+- Nodes are deployed with the Recreate strategy, so each Deployment has exactly one live pod and
+  issuance finds exactly that one. The -name and -advertise flags set the name and address in the
+  certificate, and the address is the one the client knows.

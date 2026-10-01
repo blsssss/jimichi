@@ -58,7 +58,7 @@ func decodeRequest(b []byte) (*Request, error) {
 	if err := rd.end(); err != nil {
 		return nil, err
 	}
-	if !validName(r.Name) || !validAddr(r.Addr) {
+	if !ValidName(r.Name) || !ValidAddr(r.Addr) {
 		return nil, ErrFormat
 	}
 	return r, nil

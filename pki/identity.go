@@ -31,7 +31,7 @@ type Identity struct {
 }
 
 func NewIdentity(p jcrypto.CryptoProvider, name, addr string) (*Identity, error) {
-	if !validName(name) || !validAddr(addr) {
+	if !ValidName(name) || !ValidAddr(addr) {
 		return nil, ErrFormat
 	}
 	priv, pub, err := p.GenerateSigning()
@@ -48,6 +48,8 @@ func (id *Identity) Locked() bool {
 }
 
 func (id *Identity) Fingerprint() string { return Fingerprint(id.p, id.pub) }
+
+func (id *Identity) KeyHash() string { return KeyHash(id.p, id.pub) }
 
 func (id *Identity) Request(nonce [NonceSize]byte) ([]byte, error) {
 	r := &Request{Suite: id.p.Suite(), Nonce: nonce, Name: id.name, Addr: id.addr, Identity: id.pub}

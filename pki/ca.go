@@ -38,7 +38,7 @@ func (c *CA) Issue(r *Request, notBefore, notAfter time.Time) (*Cert, error) {
 	if r.Suite != c.p.Suite() {
 		return nil, ErrSuite
 	}
-	if !validName(r.Name) || !validAddr(r.Addr) || len(r.Identity) == 0 || len(r.Identity) > maxKey {
+	if !ValidName(r.Name) || !ValidAddr(r.Addr) || len(r.Identity) == 0 || len(r.Identity) > maxKey {
 		return nil, ErrFormat
 	}
 	if err := r.verify(c.p); err != nil {

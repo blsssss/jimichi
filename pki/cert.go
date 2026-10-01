@@ -92,7 +92,7 @@ func decodeCert(b []byte) (*Cert, error) {
 	if err := r.end(); err != nil {
 		return nil, err
 	}
-	if !validName(c.Name) || !validAddr(c.Addr) {
+	if !ValidName(c.Name) || !ValidAddr(c.Addr) {
 		return nil, ErrFormat
 	}
 	return c, nil
@@ -102,7 +102,7 @@ func signed(domain string, body []byte) []byte {
 	return append([]byte(domain), body...)
 }
 
-func validName(s string) bool {
+func ValidName(s string) bool {
 	if len(s) == 0 || len(s) > maxName {
 		return false
 	}
@@ -117,7 +117,7 @@ func validName(s string) bool {
 
 // wire drops trailing NULs from the address field, so an address with a NUL,
 // a space or a byte outside ASCII could name one node and reach another
-func validAddr(s string) bool {
+func ValidAddr(s string) bool {
 	if len(s) == 0 || len(s) > wire.AddrSize {
 		return false
 	}

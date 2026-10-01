@@ -1,10 +1,10 @@
 package main
 
 import (
-	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -13,13 +13,22 @@ import (
 	"time"
 
 	"github.com/jimichi-org/jimichi/client"
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/pki"
+)
+
+const (
+	maxBundle     = 16 << 10
+	fetchAttempts = 30
+	fetchPause    = time.Second
+	fetchTimeout  = 5 * time.Second
 )
 
 func main() {
 	nodes := flag.String("nodes", "", "comma separated host:port of the chain, in order")
-	infoPort := flag.String("info-port", "9100", "port where a node publishes its key")
+	infoPort := flag.String("info-port", "9100", "port where a node publishes its descriptor")
 	message := flag.String("message", "hello from the chain", "payload to send")
 	count := flag.Int("count", 1, "how many messages to send, 0 for endless")
 	interval := flag.Duration("interval", time.Second, "pause between messages")
@@ -30,6 +39,9 @@ func main() {
 	suiteName := flag.String("suite", suite.Default.String(), "primitive suite: gost or c25519, must match the nodes")
 	harden := flag.Bool("harden", true, "disable core dumps and ptrace access for the process")
 	keymem := flag.String("keymem", "all", "key memory measures: all, none, or a list of offheap, lock, dontdump, zero")
+	auth := flag.Bool("auth", true, "verify every node descriptor against -ca before building the circuit; false takes the keys unverified")
+	ca := flag.String("ca", "", "trust anchor <suite>:<base64>, the CA public key printed by jimichi enroll")
+	skew := flag.Duration("skew", pki.Skew, "tolerated lag of this clock behind the nodes' clocks")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
@@ -73,17 +85,42 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	chain := make([]client.Node, 0, len(addrs))
-	for _, addr := range addrs {
-		pub, nodeSuite, err := fetchKey(addr, *infoPort)
-		if err != nil {
-			logger.Fatalf("key of %s: %v", addr, err)
-		}
-		if nodeSuite != chosen.String() {
-			logger.Fatalf("%s runs suite %q, this client %q", addr, nodeSuite, chosen)
-		}
-		chain = append(chain, client.Node{Addr: addr, StaticPub: pub})
+	trust, err := trustPolicy(*auth, *ca, chosen, *skew)
+	if err != nil {
+		logger.Fatal(err)
 	}
+	if !*auth {
+		logger.Print("WARNING: -auth=false, node keys are taken unverified from whoever answers the descriptor request")
+	}
+
+	web := &http.Client{
+		Timeout: fetchTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	bundles := make([][]byte, len(addrs))
+	for i, addr := range addrs {
+		url, err := descriptorURL(addr, *infoPort)
+		if err == nil {
+			bundles[i], err = fetchBundle(web, url, fetchAttempts, fetchPause)
+		}
+		if err != nil {
+			logger.Fatalf("refusing to build the circuit: node %s: %v", addr, err)
+		}
+	}
+	verified, err := resolve(provider, *auth, trust, addrs, bundles, time.Now())
+	if err != nil {
+		logger.Fatalf("refusing to build the circuit: %v", err)
+	}
+	if *auth {
+		for _, v := range verified {
+			logger.Printf("node %s identity=%s certificate until %s, descriptor until %s",
+				v.Name, pki.Fingerprint(provider, v.Identity),
+				v.CertUntil.UTC().Format(time.RFC3339), v.DescUntil.UTC().Format(time.RFC3339))
+		}
+	}
+	chain := chainOf(verified)
 
 	cfg := client.Config{
 		Provider:  provider,
@@ -142,34 +179,93 @@ func splitList(s string) []string {
 	return out
 }
 
-// a node publishes only its public key, so fetching it over plain http leaks
-// nothing an observer could not derive from the directory anyway
-func fetchKey(addr, infoPort string) (pub []byte, suiteName string, err error) {
+// settled before any network request, so a client that cannot check what it
+// fetches never asks for it
+func trustPolicy(auth bool, ca string, s jcrypto.Suite, skew time.Duration) (pki.Policy, error) {
+	if !auth {
+		return pki.Policy{}, nil
+	}
+	if ca == "" {
+		return pki.Policy{}, errors.New("-auth needs -ca, the anchor printed by jimichi enroll")
+	}
+	anchor, err := pki.ParseAnchor(ca)
+	if err != nil {
+		return pki.Policy{}, fmt.Errorf("-ca: %w", err)
+	}
+	if anchor.Suite != s {
+		return pki.Policy{}, fmt.Errorf("-ca is an anchor for suite %s, the client runs %s: %w", anchor.Suite, s, pki.ErrSuite)
+	}
+	if skew < 0 {
+		return pki.Policy{}, fmt.Errorf("-skew %v: must not be negative", skew)
+	}
+	return pki.Policy{Anchor: anchor, Skew: skew}, nil
+}
+
+func descriptorURL(addr, infoPort string) (string, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, "", err
+		return "", err
 	}
-	url := fmt.Sprintf("http://%s/key", net.JoinHostPort(host, infoPort))
+	return "http://" + net.JoinHostPort(host, infoPort) + "/descriptor", nil
+}
 
+// only a failed connection or a node still waiting for its certificate is
+// worth another try; anything else it answered stays wrong on the next one
+func fetchBundle(web *http.Client, url string, attempts int, pause time.Duration) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt < 30; attempt++ {
-		resp, err := http.Get(url)
-		if err != nil {
-			lastErr = err
-			time.Sleep(time.Second)
-			continue
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(pause)
 		}
-		var body struct {
-			Pub   string `json:"pub"`
-			Suite string `json:"suite"`
+		body, retry, err := getBundle(web, url)
+		if err == nil {
+			return body, nil
 		}
-		err = json.NewDecoder(resp.Body).Decode(&body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, "", err
+		if !retry {
+			return nil, err
 		}
-		pub, err := base64.StdEncoding.DecodeString(body.Pub)
-		return pub, body.Suite, err
+		lastErr = err
 	}
-	return nil, "", lastErr
+	return nil, lastErr
+}
+
+func getBundle(web *http.Client, url string) (body []byte, retry bool, err error) {
+	resp, err := web.Get(url)
+	if err != nil {
+		return nil, true, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusServiceUnavailable:
+		return nil, true, errors.New("no descriptor published, the node has no valid certificate")
+	default:
+		return nil, false, fmt.Errorf("descriptor request answered %s", resp.Status)
+	}
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxBundle+1))
+	if err != nil {
+		return nil, true, err
+	}
+	if len(body) > maxBundle {
+		return nil, false, fmt.Errorf("descriptor over %d bytes", maxBundle)
+	}
+	if _, err := pki.ParseBundle(body); err != nil {
+		return nil, false, err
+	}
+	return body, false, nil
+}
+
+func resolve(p jcrypto.CryptoProvider, auth bool, trust pki.Policy, addrs []string, bundles [][]byte, now time.Time) ([]pki.Verified, error) {
+	if auth {
+		return pki.VerifyChain(p, trust, addrs, bundles, now)
+	}
+	return pki.Unverified(p, addrs, bundles)
+}
+
+func chainOf(nodes []pki.Verified) []client.Node {
+	chain := make([]client.Node, len(nodes))
+	for i, v := range nodes {
+		chain[i] = client.Node{Addr: v.Addr, StaticPub: v.OnionPub, LinkPub: v.LinkPub}
+	}
+	return chain
 }

@@ -21,7 +21,14 @@ spec:
         - name: client
           image: jimichi/client:dev
           imagePullPolicy: IfNotPresent
+          # the anchor is public; the CA key itself never enters the cluster
+          env:
+            - name: JIMICHI_CA
+              valueFrom:
+                configMapKeyRef: {name: jimichi-ca, key: anchor}
           args:
+            - "-ca"
+            - "$(JIMICHI_CA)"
             - "-nodes"
             - "relay-1.jimichi.svc.cluster.local:9000,relay-2.jimichi.svc.cluster.local:9000,relay-3.jimichi.svc.cluster.local:9000"
             - "-count"

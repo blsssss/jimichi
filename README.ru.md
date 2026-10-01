@@ -112,7 +112,7 @@ XChaCha20-Poly1305 и Ed25519, поэтому результаты сравни�
 ## Раскладка
 
 ```
-cmd/          точки входа: relay, client, lab
+cmd/          точки входа: relay, client, jimichi (CLI стенда), lab
 crypto/       интерфейс CryptoProvider
   gost/       набор ГОСТ
   c25519/     набор X25519 / XChaCha20-Poly1305 / Ed25519
@@ -127,7 +127,7 @@ client/       отправка, приём, фоновый трафик
 vault/        контейнер клиента с двумя томами
 lab/          scenario/, metrics/, report/
 web/          дашборд стенда
-deploy/       compose/ для разработки, kind/ и base/ для демонстрации
+deploy/       kind/ конфигурации кластера и base/ манифесты стенда
 docs/         документация, en/ и ru/
 ```
 
@@ -147,12 +147,20 @@ kind create cluster --config deploy/kind/cluster.yaml
 make images
 kind load docker-image jimichi/relay:dev jimichi/client:dev --name jimichi
 kubectl apply -f deploy/base/relay.yaml
+kubectl -n jimichi wait --for=condition=Available deployment -l app=relay --timeout=180s
+bash scripts/enroll.sh
 kubectl apply -f deploy/base/client.yaml
 ```
 
-В пространстве имён `jimichi` поднимаются три узла и клиент. Узел публикует свой открытый ключ на
-порту 9100. Агрегированные счётчики раз в минуту идут в stdout и на порт 9101 только на loopback,
-читаются через port-forward:
+Последние четыре шага выполняет `make deploy`. В пространстве имён `jimichi` поднимаются три узла
+и клиент. Узел при старте создаёт ключ подписи в памяти и ждёт выдачи сертификата:
+`scripts/enroll.sh` собирает `cmd/jimichi` и запускает на хосте `jimichi enroll`, который через
+port-forward сертифицирует каждый узел под УЦ, живущим только этот прогон, и кладёт открытый ключ
+УЦ, якорь, в ConfigMap `jimichi-ca`. После этого узел публикует подписанный дескриптор на порту
+9100, а клиент получает подписанные комплекты узлов цепочки и до построения цепочки проверяет
+их по якорю. Перезапущенному узлу
+снова нужен `make enroll`. Агрегированные счётчики раз в минуту идут в stdout и на порт 9101
+только на loopback, читаются через port-forward:
 
 ```
 kubectl -n jimichi port-forward deployment/relay-3 9101:9101
@@ -163,7 +171,7 @@ curl -s localhost:9101/stats
 
 Go 1.27. Блокировка памяти, запрет дампов и сценарии извлечения ключей работают только на Linux;
 на других платформах собираются заглушки, которые сообщают, что память не заблокирована, и узел
-отказывается стартовать. Docker Compose для разработки, kind для демонстрации в кластере.
+отказывается стартовать. Docker и kind для стенда; сборки на Compose нет.
 
 ## Лицензия
 

@@ -11,6 +11,8 @@ metadata:
   labels: {app: relay, hop: "1"}
 spec:
   replicas: 1
+  # a new pod is a new identity that enrollment must find alone
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app: relay, hop: "1"}
   template:
@@ -26,7 +28,7 @@ spec:
         - name: relay
           image: jimichi/relay:dev
           imagePullPolicy: IfNotPresent
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms"]
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-name", "relay-1", "-advertise", "relay-1.jimichi.svc.cluster.local:9000"]
           ports:
             - {name: cells, containerPort: 9000}
             - {name: info, containerPort: 9100}
@@ -61,6 +63,7 @@ metadata:
   labels: {app: relay, hop: "2"}
 spec:
   replicas: 1
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app: relay, hop: "2"}
   template:
@@ -76,7 +79,7 @@ spec:
         - name: relay
           image: jimichi/relay:dev
           imagePullPolicy: IfNotPresent
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms"]
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-name", "relay-2", "-advertise", "relay-2.jimichi.svc.cluster.local:9000"]
           ports:
             - {name: cells, containerPort: 9000}
             - {name: info, containerPort: 9100}
@@ -111,6 +114,7 @@ metadata:
   labels: {app: relay, hop: "3"}
 spec:
   replicas: 1
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app: relay, hop: "3"}
   template:
@@ -126,7 +130,7 @@ spec:
         - name: relay
           image: jimichi/relay:dev
           imagePullPolicy: IfNotPresent
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms"]
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-name", "relay-3", "-advertise", "relay-3.jimichi.svc.cluster.local:9000"]
           ports:
             - {name: cells, containerPort: 9000}
             - {name: info, containerPort: 9100}

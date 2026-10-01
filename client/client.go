@@ -18,10 +18,22 @@ import (
 	"github.com/jimichi-org/jimichi/wire"
 )
 
-// what the client knows about a relay before it builds a circuit
+// the keys must come from a verified descriptor: whoever supplied them can
+// open the node's layer or stand in for the entry
 type Node struct {
 	Addr      string
 	StaticPub []byte
+	// the entry link key; empty means StaticPub
+	LinkPub []byte
+}
+
+var ErrNodeKey = errors.New("client: node key missing or of the wrong size")
+
+func (n Node) linkKey() []byte {
+	if len(n.LinkPub) == 0 {
+		return n.StaticPub
+	}
+	return n.LinkPub
 }
 
 type Mode uint8
@@ -75,6 +87,17 @@ func Dial(cfg Config) (*Client, error) {
 	if len(cfg.Chain) == 0 {
 		return nil, errors.New("client: empty chain")
 	}
+	// link.Dial reads an empty entry key as an anonymous link, so a missing key
+	// must stop here and not quietly drop the entry's authentication
+	size, err := wire.PublicKeySize(cfg.Provider)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range cfg.Chain {
+		if len(node.StaticPub) != size || len(node.linkKey()) != size {
+			return nil, fmt.Errorf("%w: node %s", ErrNodeKey, node.Addr)
+		}
+	}
 
 	links := make([]uint64, len(cfg.Chain))
 	for i := range links {
@@ -121,7 +144,7 @@ func Dial(cfg Config) (*Client, error) {
 		release()
 		return nil, err
 	}
-	conn, err := link.Dial(raw, cfg.Provider, cfg.Chain[0].StaticPub)
+	conn, err := link.Dial(raw, cfg.Provider, cfg.Chain[0].linkKey())
 	if err != nil {
 		circuit.Close()
 		release()
