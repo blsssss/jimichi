@@ -175,6 +175,10 @@ func (id *Identity) sign(domain string, body []byte) ([]byte, error) {
 }
 
 func Unsigned(p jcrypto.CryptoProvider, link, onion []byte) ([]byte, error) {
+	return UnsignedEpoch(p, link, onion, 0)
+}
+
+func UnsignedEpoch(p jcrypto.CryptoProvider, link, onion []byte, epoch uint32) ([]byte, error) {
 	size, err := wire.PublicKeySize(p)
 	if err != nil {
 		return nil, err
@@ -182,6 +186,6 @@ func Unsigned(p jcrypto.CryptoProvider, link, onion []byte) ([]byte, error) {
 	if len(link) != size || len(onion) != size {
 		return nil, ErrKeySize
 	}
-	d := &Descriptor{Suite: p.Suite(), LinkPub: link, OnionPub: onion}
+	d := &Descriptor{Suite: p.Suite(), Epoch: epoch, LinkPub: link, OnionPub: onion}
 	return Bundle{V: Version, Suite: p.Suite().String(), Descriptor: d.Marshal()}.Marshal(), nil
 }

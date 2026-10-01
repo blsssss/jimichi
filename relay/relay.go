@@ -25,8 +25,13 @@ type Deliver func(circuit uint64, payload []byte) []byte
 type Config struct {
 	Provider   jcrypto.CryptoProvider
 	StaticPriv *secmem.Buffer
-	// setups remembered to refuse a copy; once full the node refuses new
-	// circuits until it restarts with a new key; zero picks the default
+	// the keys that open setup layers, closed by the caller after Close; nil
+	// keeps StaticPriv, the link key, in that role as well for the life of the
+	// node
+	Onion *OnionRing
+	// setups the ring built for a nil Onion remembers to refuse a copy; once
+	// full the node refuses new circuits until it restarts with a new key; zero
+	// picks the default
 	SetupCache int
 	Deliver    Deliver
 	Dialer     net.Dialer
@@ -67,9 +72,9 @@ type Config struct {
 }
 
 type Relay struct {
-	cfg    Config
-	lim    limits
-	setups *wire.SetupCache
+	cfg   Config
+	lim   limits
+	onion *OnionRing
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -189,11 +194,15 @@ func New(cfg Config) (*Relay, error) {
 	if err != nil {
 		return nil, err
 	}
+	onion := cfg.Onion
+	if onion == nil {
+		onion = staticRing(cfg.StaticPriv, cfg.SetupCache)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Relay{
 		cfg:       cfg,
 		lim:       lim,
-		setups:    wire.NewSetupCache(cfg.SetupCache),
+		onion:     onion,
 		ctx:       ctx,
 		cancel:    cancel,
 		circuits:  make(map[uint64]*circuit),
@@ -208,8 +217,9 @@ func New(cfg Config) (*Relay, error) {
 // neither can keep Close from reaching the keys
 const onwardTimeout = 5 * time.Second
 
-// tags sit on the heap for the life of the node key, about 36 bytes each with
-// the map overhead, so this keeps the cache near 36 MiB, inside a 128 MiB pod
+// tags sit on the heap for the life of their onion key, about 36 bytes each
+// with the map overhead, so this keeps a cache near 36 MiB and the two of a
+// node between a rotation and the release of the old key inside a 128 MiB pod
 const MaxSetupCache = 1 << 20
 
 var (
@@ -576,14 +586,8 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn, src net
 		return r.setupFailed(from, errSetupRate)
 	}
 
-	layer, err := wire.OpenSetup(r.cfg.Provider, r.cfg.StaticPriv, cell)
+	layer, err := r.onion.Open(r.cfg.Provider, cell)
 	if err != nil {
-		return r.setupFailed(from, err)
-	}
-	// burned on first sight whatever happens next: a setup that fails further on
-	// must not come back later on a fresh link either
-	if err := r.setups.Add(layer.Tag); err != nil {
-		layer.CellKey.Release()
 		return r.setupFailed(from, err)
 	}
 	index := int(hdr.Counter)

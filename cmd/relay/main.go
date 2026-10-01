@@ -32,6 +32,7 @@ type config struct {
 	auth                bool
 	name, advertise     string
 	descriptorTTL       time.Duration
+	onionRotate         time.Duration
 	peerInfoPort        string
 	peers               []string
 	// refuse to run with keys in memory that could not be locked
@@ -41,6 +42,8 @@ type config struct {
 	harden bool
 	// only the limit fields are set, straight from the flags
 	limits relay.Config
+	// time.Now when nil
+	now func() time.Time
 }
 
 func main() {
@@ -55,11 +58,12 @@ func main() {
 	flag.BoolVar(&cfg.echo, "echo", true, "as an exit, send the payload back along the circuit")
 	flag.DurationVar(&cfg.period, "period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
 	flag.IntVar(&cfg.queue, "queue", 64, "cells a circuit may queue per direction when -period is set")
-	flag.IntVar(&cfg.setupCache, "setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits until restart", relay.MaxSetupCache))
+	flag.IntVar(&cfg.setupCache, "setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered per onion key to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits under that key, until restart or, with -onion-rotate, until the next key is published", relay.MaxSetupCache))
 	flag.BoolVar(&cfg.auth, "auth", true, "serve a descriptor signed under a certificate from jimichi enroll and extend only to the roster nodes it names, over authenticated links; false serves it unsigned and extends to any address over anonymous links")
 	flag.StringVar(&cfg.name, "name", "", "node name for its certificate, required with -auth")
 	flag.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth; without -auth the address this node lists itself under in /descriptors", wire.AddrSize))
 	flag.DurationVar(&cfg.descriptorTTL, "descriptor-ttl", time.Hour, "lifetime of a signed descriptor, re-signed once half of it has passed")
+	flag.DurationVar(&cfg.onionRotate, "onion-rotate", time.Hour, fmt.Sprintf("replace the onion key this often and release the replaced one -descriptor-ttl plus %v later, once no valid descriptor names it; a setup cell recorded before that no longer opens with what the node holds; the next rotation waits for that release; not shorter than -descriptor-ttl; 0 is the baseline for measurements: the link key is the onion key for the life of the process and recorded setups never stop opening", pki.Skew))
 	flag.StringVar(&cfg.peerInfoPort, "peer-info-port", "9100", "port where the other nodes publish their descriptors")
 	peers := flag.String("peers", "", "without -auth only: comma separated host:port of the other nodes, whose unsigned descriptors this node serves in /descriptors; with -auth they come from the roster")
 	flag.DurationVar(&cfg.limits.HandshakeTimeout, "handshake-timeout", relay.DefaultHandshakeTimeout, "close a connection whose link handshake has not finished this long after it was accepted; an initiator sends its hello at once; negative turns it off")
@@ -73,7 +77,7 @@ func main() {
 	flag.IntVar(&cfg.limits.MaxLinksPerSource, "max-links-per-source", relay.DefaultMaxLinksPerSource, "open inbound links from one address, an IPv6 /64 counting as one, so one peer cannot take every slot; a preceding relay is one address for all it forwards, so forwarding nodes turn this off; negative turns it off")
 	flag.Float64Var(&cfg.limits.SourceLinkRate, "source-link-rate", relay.DefaultSourceLinkRate, "new links per second one address may open, checked before any key agreement; every connection costs one, refused or not; negative turns it off")
 	flag.IntVar(&cfg.limits.SourceLinkBurst, "source-link-burst", relay.DefaultSourceLinkBurst, "links one address may open at once before -source-link-rate applies; covers a client building several circuits; 0 for the default, a negative -source-link-rate turns the limit off")
-	flag.Float64Var(&cfg.limits.SourceSetupRate, "source-setup-rate", relay.DefaultSourceSetupRate, "circuit setups per second from one address, checked after the link handshake and before the agreement with the node key, each costing that agreement, a dial onwards and a tag held until restart; at the default one address needs about 91 hours to fill -setup-cache; negative turns it off")
+	flag.Float64Var(&cfg.limits.SourceSetupRate, "source-setup-rate", relay.DefaultSourceSetupRate, "circuit setups per second from one address, checked after the link handshake and before the agreement with the node key, each costing that agreement, twice while a replaced onion key is held, a dial onwards and a tag held as long as the onion key; at the default one address needs about 91 hours to fill -setup-cache; negative turns it off")
 	flag.IntVar(&cfg.limits.SourceSetupBurst, "source-setup-burst", relay.DefaultSourceSetupBurst, "setups one address may send at once before -source-setup-rate applies; 0 for the default, a negative -source-setup-rate turns the limit off")
 	flag.Parse()
 	cfg.peers = splitList(*peers)
@@ -88,6 +92,9 @@ func main() {
 		logger.Fatal(err)
 	}
 	if err := checkPeerFlags(cfg.auth, cfg.advertise, cfg.peerInfoPort, cfg.peers); err != nil {
+		logger.Fatal(err)
+	}
+	if err := checkRotateFlags(cfg.onionRotate, cfg.descriptorTTL); err != nil {
 		logger.Fatal(err)
 	}
 
@@ -140,11 +147,39 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		return errors.New("key memory is not locked, refusing to start")
 	}
 
+	clock := cfg.now
+	if clock == nil {
+		clock = time.Now
+	}
 	n := &node{
 		p: provider, name: cfg.name, addr: cfg.advertise,
-		ttl: cfg.descriptorTTL, now: time.Now, logger: logger,
+		ttl: cfg.descriptorTTL, now: clock, logger: logger,
 		wake:      make(chan struct{}),
 		fetchPeer: peerFetcher(fetch.NewClient(), cfg.peerInfoPort),
+	}
+	// a rotating node opens setups with a key of its own from the start: the
+	// link key lives as long as the process, so an epoch under it would not end
+	onionPub := staticPub
+	if cfg.onionRotate == 0 {
+		logger.Print("WARNING: -onion-rotate=0, the link key opens setup layers for the life of the process, so a recorded setup opens with a key taken from memory at any later time")
+	} else {
+		onionPriv, pub, err := provider.GenerateEphemeral()
+		if err != nil {
+			return fmt.Errorf("onion key: %w", err)
+		}
+		if cfg.lock && !onionPriv.Locked() {
+			onionPriv.Release()
+			return errors.New("onion key memory is not locked, refusing to start")
+		}
+		ring, err := relay.NewOnionRing(provider, onionPriv, pub, cfg.setupCache)
+		if err != nil {
+			onionPriv.Release()
+			return fmt.Errorf("onion key: %w", err)
+		}
+		onionPub = pub
+		n.link = staticPub
+		n.onion = newOnionKeys(ring, cfg.onionRotate, cfg.descriptorTTL, cfg.lock, n.now())
+		defer n.closeOnion()
 	}
 	if cfg.auth {
 		id, err := pki.NewIdentity(provider, cfg.name, cfg.advertise)
@@ -155,13 +190,13 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		if cfg.lock && !id.Locked() {
 			return errors.New("identity key memory is not locked, refusing to start")
 		}
-		id.SetKeys(staticPub, staticPub, 0)
+		id.SetKeys(staticPub, onionPub, 0)
 		n.id = id
 		// printed before any listener serves, so whoever reads the pin from this
 		// log finds it once the pod is ready; the full hash is the pin, the
 		// fingerprint is for people
 		logger.Printf("identity=%s identity_hash=%s name=%s awaiting enrollment", id.Fingerprint(), id.KeyHash(), cfg.name)
-	} else if n.unsigned, err = pki.Unsigned(provider, staticPub, staticPub); err != nil {
+	} else if n.unsigned, err = pki.Unsigned(provider, staticPub, onionPub); err != nil {
 		return fmt.Errorf("descriptor: %w", err)
 	}
 
@@ -196,13 +231,18 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 	if n.id != nil {
 		go n.keepFresh()
 	}
+	if n.onion != nil {
+		stopped := make(chan struct{})
+		defer close(stopped)
+		go n.keepOnion(stopped)
+	}
 	go n.keepPeers(nil)
 	if cfg.logEvery > 0 {
 		go logCounters(r, n, cfg.logEvery, logger)
 	}
 
-	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v",
-		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth)
+	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v, onion_rotate=%v",
+		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth, cfg.onionRotate)
 	return untilStopped(stop, served, logger)
 }
 
@@ -252,6 +292,9 @@ func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cfg
 	if cfg.auth {
 		rc.Peers = n.peerKey
 	}
+	if n.onion != nil {
+		rc.Onion = n.onion.ring
+	}
 	return rc
 }
 
@@ -266,8 +309,9 @@ func splitList(s string) []string {
 }
 
 // a setup holds a handful of key pages at once, the static and identity keys
-// one more each; below this the node would start and then fail its first
-// circuits
+// one more each, and a rotating node two onion keys, the page it keeps for the
+// next one and one more page per setup while both keys are tried; below this
+// the node would start and then fail its first circuits
 const minMemlock = 64 << 10
 
 func checkMemlock() error {
@@ -296,10 +340,10 @@ func logCounters(r *relay.Relay, n *node, every time.Duration, logger *log.Logge
 		roster, held := n.peerState()
 		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d broken=%d"+
 			" accept_retries=%d refused_links=%d refused_busy=%d refused_source=%d refused_rate=%d refused_setups=%d refused_extend=%d failed_extend=%d timed_out=%d expired=%d"+
-			" cert=%s roster=%d peers=%d descriptor_requests=%d mirror_requests=%d",
+			" cert=%s roster=%d peers=%d descriptor_requests=%d mirror_requests=%d onion_epoch=%d onion_rotate_failed=%d",
 			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, s.Broken,
 			s.AcceptRetries, s.RefusedLinks, s.RefusedBusy, s.RefusedSource, s.RefusedRate, s.RefusedSetups, s.RefusedExtend, s.FailedExtend, s.TimedOut, s.Expired,
-			n.certState(), roster, held, n.descriptorRequests.Load(), n.mirrorRequests.Load())
+			n.certState(), roster, held, n.descriptorRequests.Load(), n.mirrorRequests.Load(), n.onionEpoch(), n.onionFailures())
 	}
 }
 

@@ -99,6 +99,24 @@ and has no primitives of its own.
   public keys. The copies libraries make during generation and signing are listed under
   "Known gaps".
 
+## Node keys
+
+| Key | What it does | Lives |
+|---|---|---|
+| Node signing key | signs the certificate request and the descriptors | until the process ends |
+| Link key | mixed into the handshake by whoever opens a link to the node, which authenticates the node on that link | until the process ends |
+| Onion key | the client agrees the layer secret of a circuit setup with it | with -onion-rotate one period as the published key and the grace period after it; without rotation the link key serves in this role until the process ends |
+| Hop keys of a circuit | open and seal the cells of one circuit at one node | until the circuit is torn down |
+| Frame keys of a link | seal the frames of one link; derived from two ephemeral keys | until the link closes |
+
+- The signing, link and onion keys are generated through the CryptoProvider straight into secmem
+  buffers. An onion key is released, its buffer zeroed, at the end of its grace period
+  (ARCHITECTURE, onion key epochs) and when the process ends.
+- A setup costs the node one agreement per onion key it holds: one outside the grace period, two
+  within it, which is two VKO on the GOST suite.
+- Releasing an onion key wipes its secmem buffer only. The copies of the scalar that the
+  libraries made during agreements stay on the heap until that memory is reused ("Known gaps").
+
 ## Memory (crypto/secmem)
 
 - A buffer comes from mmap on pages of its own outside the Go heap, then mlock and
@@ -107,7 +125,9 @@ and has no primitives of its own.
 - Process: prctl(PR_SET_DUMPABLE, 0), RLIMIT_CORE=0. This closes ptrace and /proc/pid/mem for the
   same uid and does nothing against root.
 - In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start and refuses
-  to run below 64 KiB, or when locking was asked for and failed.
+  to run below 64 KiB, or when locking was asked for and failed. A rotating node holds one locked
+  page per onion key, two at most, and one more that it gives back right before it makes the
+  next key. It does not take a new onion key whose page is not locked.
 - Every measure is switched by configuration, so its contribution can be measured:
 
 | Flag | What it turns on |
@@ -128,8 +148,8 @@ and has no primitives of its own.
   RFC 9058, Streebog-256 against RFC 6986.
 - The peer's point is checked before VKO: coordinates below p, the point on the curve and not in
   the subgroup of order 2 or 4. The library does not do this itself, and an off-curve point would
-  let a peer draw the node's static key out piece by piece. For mixed points the cofactor of 4 is
-  cleared inside VKO.
+  let a peer draw the node's link or onion key out piece by piece. For mixed points the cofactor
+  of 4 is cleared inside VKO.
 - A UKM longer than 8 bytes (the public key in the link handshake) is first hashed down to 8 bytes
   with Streebog: RFC 7836 defines a 64-bit factor. The full value still seeds the KDF.
 - Signing feeds the Streebog digest in gogost's byte order. Only this system verifies the
@@ -153,17 +173,17 @@ some of them live long:
 | Where | What | How long |
 |---|---|---|
 | x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct | the whole life of the circuit or link, never wiped |
-| crypto/ecdh | the X25519 scalar, the node's long-term key included, and the shared secret | until the freed heap memory is reused |
+| crypto/ecdh | the X25519 scalar, the node's link and onion keys included, and the shared secret | until the freed heap memory is reused, which can be after the onion key itself was released |
 | x/crypto hkdf, crypto/hmac | the PRK, the HMAC pads (key XOR a constant), the last derived block | until the heap memory is reused |
 | Ed25519 generation and signing | the SHA-512 state with the seed or the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; generation and signing always wipe their own scalars and digests, -keymem none included |
 | gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them, except under -keymem none |
 | gogost, KDF | the HMAC-Streebog pads holding the VKO secret and the circuit secret | until the heap memory is reused |
-| gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points | until the heap memory is reused; the provider wipes the number, not the copies made inside the computation |
+| gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys included | until the heap memory is reused, which can be after the onion key itself was released; the provider wipes the number, not the copies made inside the computation |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 
-gogost arithmetic on math/big is not constant time. The node's static key could leak through VKO
-timing to an adversary who times the node's responses; side-channel attacks are outside the threat
-model.
+gogost arithmetic on math/big is not constant time. The node's link and onion keys could leak
+through VKO timing to an adversary who times the node's responses; side-channel attacks are
+outside the threat model.
 
 The Go heap does not move objects, but freed memory is not wiped, and goroutine stacks are copied
 when they grow. Locking and dump exclusion do not reach these copies. Measuring how many copies
