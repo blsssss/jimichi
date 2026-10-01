@@ -28,7 +28,7 @@ kind-load: images
 	kind load docker-image jimichi/client:dev --name $(CLUSTER)
 
 deploy:
-	kubectl apply -f deploy/base/relay.yaml
+	kubectl apply -f deploy/base/relay.yaml -f deploy/base/network.yaml
 	kubectl rollout status -n $(NAMESPACE) deployment/relay-1
 	kubectl rollout status -n $(NAMESPACE) deployment/relay-2
 	kubectl rollout status -n $(NAMESPACE) deployment/relay-3

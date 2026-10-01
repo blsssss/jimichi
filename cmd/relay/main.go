@@ -35,6 +35,8 @@ type config struct {
 	// for the startup line only
 	keymem string
 	harden bool
+	// only the limit fields are set, straight from the flags
+	limits relay.Config
 }
 
 func main() {
@@ -54,6 +56,19 @@ func main() {
 	flag.StringVar(&cfg.name, "name", "", "node name for its certificate, required with -auth")
 	flag.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth", wire.AddrSize))
 	flag.DurationVar(&cfg.descriptorTTL, "descriptor-ttl", time.Hour, "lifetime of a signed descriptor, re-signed once half of it has passed")
+	flag.DurationVar(&cfg.limits.HandshakeTimeout, "handshake-timeout", relay.DefaultHandshakeTimeout, "close a connection whose link handshake has not finished this long after it was accepted; an initiator sends its hello at once; negative turns it off")
+	flag.DurationVar(&cfg.limits.SetupTimeout, "setup-timeout", relay.DefaultSetupTimeout, "close a link that has opened no circuit this long after its handshake; clients and relays send the setup at once; negative turns it off")
+	flag.DurationVar(&cfg.limits.WriteTimeout, "write-timeout", 0, "longest one frame may wait to be written before its circuit is torn down, so a peer that stops reading cannot hold a sender; 0 picks 4 periods and at least 1s, or 5s without -period; negative turns it off")
+	flag.DurationVar(&cfg.limits.IdleTimeout, "idle-timeout", relay.DefaultIdleTimeout, "tear down a circuit that carried no cell either way this long, so an abandoned paced circuit stops sending padding; the stand client sends every 200ms; negative turns it off")
+	flag.DurationVar(&cfg.limits.CircuitLifetime, "circuit-lifetime", relay.DefaultCircuitLifetime, "tear down any circuit this old, which bounds how long one set of circuit keys lives; the client builds a new one; negative turns it off")
+	flag.IntVar(&cfg.limits.MaxHandshakes, "max-handshakes", relay.DefaultMaxHandshakes, "link handshakes running at once; more would only queue for the CPU while each holds a socket; negative turns it off")
+	flag.IntVar(&cfg.limits.MaxHandshakesPerSource, "max-handshakes-per-source", 0, "link handshakes one address may run at once, so it cannot hold every slot of -max-handshakes; 0 picks an eighth of -max-handshakes and at least 1, also 4 when -max-handshakes is off; negative turns it off")
+	flag.IntVar(&cfg.limits.MaxLinks, "max-links", relay.DefaultMaxLinks, "open inbound links; keeps the sockets, goroutines and locked key pages of their circuits inside a 128 MiB pod; negative turns it off")
+	flag.IntVar(&cfg.limits.MaxLinksPerSource, "max-links-per-source", relay.DefaultMaxLinksPerSource, "open inbound links from one address, an IPv6 /64 counting as one, so one peer cannot take every slot; a preceding relay is one address for all it forwards, so forwarding nodes turn this off; negative turns it off")
+	flag.Float64Var(&cfg.limits.SourceLinkRate, "source-link-rate", relay.DefaultSourceLinkRate, "new links per second one address may open, checked before any key agreement; every connection costs one, refused or not; negative turns it off")
+	flag.IntVar(&cfg.limits.SourceLinkBurst, "source-link-burst", relay.DefaultSourceLinkBurst, "links one address may open at once before -source-link-rate applies; covers a client building several circuits; 0 for the default, a negative -source-link-rate turns the limit off")
+	flag.Float64Var(&cfg.limits.SourceSetupRate, "source-setup-rate", relay.DefaultSourceSetupRate, "circuit setups per second from one address, checked after the link handshake and before the agreement with the node key, each costing that agreement, a dial onwards and a tag held until restart; at the default one address needs about 91 hours to fill -setup-cache; negative turns it off")
+	flag.IntVar(&cfg.limits.SourceSetupBurst, "source-setup-burst", relay.DefaultSourceSetupBurst, "setups one address may send at once before -source-setup-rate applies; 0 for the default, a negative -source-setup-rate turns the limit off")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
@@ -147,6 +162,20 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		Period:     cfg.period,
 		QueueCells: cfg.queue,
 		SetupCache: cfg.setupCache,
+
+		HandshakeTimeout:       cfg.limits.HandshakeTimeout,
+		SetupTimeout:           cfg.limits.SetupTimeout,
+		WriteTimeout:           cfg.limits.WriteTimeout,
+		IdleTimeout:            cfg.limits.IdleTimeout,
+		CircuitLifetime:        cfg.limits.CircuitLifetime,
+		MaxHandshakes:          cfg.limits.MaxHandshakes,
+		MaxHandshakesPerSource: cfg.limits.MaxHandshakesPerSource,
+		MaxLinks:               cfg.limits.MaxLinks,
+		MaxLinksPerSource:      cfg.limits.MaxLinksPerSource,
+		SourceLinkRate:         cfg.limits.SourceLinkRate,
+		SourceLinkBurst:        cfg.limits.SourceLinkBurst,
+		SourceSetupRate:        cfg.limits.SourceSetupRate,
+		SourceSetupBurst:       cfg.limits.SourceSetupBurst,
 	})
 	if err != nil {
 		return fmt.Errorf("relay: %w", err)
@@ -166,6 +195,9 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 	}
 	cells, infoLn, adminLn := lns[0], lns[1], lns[2]
 
+	served := make(chan error, 1)
+	go func() { served <- r.Serve(cells) }()
+	n.serving = r.Serving
 	go serve(infoLn, n.infoMux(), logger)
 	go serve(adminLn, n.adminMux(r.Stats().Snapshot), logger)
 	if n.id != nil {
@@ -177,15 +209,19 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 
 	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v",
 		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth)
-	go func() {
-		if err := r.Serve(cells); err != nil {
-			logger.Printf("serve: %v", err)
-		}
-	}()
+	return untilStopped(stop, served, logger)
+}
 
-	<-stop
-	logger.Print("shutting down")
-	return nil
+// a node that no longer accepts must not stay up looking ready: the error makes
+// the process exit, and the orchestrator starts a fresh one
+func untilStopped(stop <-chan os.Signal, served <-chan error, logger *log.Logger) error {
+	select {
+	case <-stop:
+		logger.Print("shutting down")
+		return nil
+	case err := <-served:
+		return fmt.Errorf("serve stopped: %v", err)
+	}
 }
 
 // a setup holds a handful of key pages at once, the static and identity keys
@@ -216,8 +252,10 @@ func logCounters(r *relay.Relay, n *node, every time.Duration, logger *log.Logge
 	defer t.Stop()
 	for range t.C {
 		s := r.Stats().Snapshot()
-		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d broken=%d cert=%s",
-			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, s.Broken, n.certState())
+		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d broken=%d"+
+			" accept_retries=%d refused_links=%d refused_busy=%d refused_source=%d refused_rate=%d refused_setups=%d timed_out=%d expired=%d cert=%s",
+			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, s.Broken,
+			s.AcceptRetries, s.RefusedLinks, s.RefusedBusy, s.RefusedSource, s.RefusedRate, s.RefusedSetups, s.TimedOut, s.Expired, n.certState())
 	}
 }
 

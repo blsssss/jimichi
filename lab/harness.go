@@ -81,6 +81,12 @@ type Run struct {
 	// counters above sum what each relay noticed and may count one circuit
 	// more than once
 	Closures []Closure
+	// deadlines that ran out, circuits closed for idleness or age, and
+	// connections or setups the relays refused; a run where any is non-zero
+	// lost circuits or flows to a node limit, not to the configuration
+	RelayTimedOut uint64
+	RelayExpired  uint64
+	RelayRefused  uint64
 	// where the observation window starts on the trace clock: flows begin to
 	// send only once every circuit is up, so setup falls before it
 	Origin time.Duration
@@ -200,8 +206,9 @@ func Execute(cfg Config) (*Run, error) {
 			Rate:      cfg.Rate,
 			CoverRate: cfg.CoverEvery,
 			Jitter:    cfg.Jitter,
-			Dial: func(network, addr string) (net.Conn, error) {
-				conn, err := net.Dial(network, addr)
+			Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				conn, err := d.DialContext(ctx, network, addr)
 				if err != nil {
 					return nil, err
 				}
@@ -244,9 +251,7 @@ func Execute(cfg Config) (*Run, error) {
 		}
 	}
 	for _, n := range nodes {
-		s := n.relay.Stats().Snapshot()
-		run.RelayDropped += s.Dropped
-		run.RelayBroken += s.Broken
+		run.addRelay(n.relay.Stats().Snapshot())
 	}
 	exitMu.Lock()
 	run.Exit = exitTraces
@@ -256,6 +261,14 @@ func Execute(cfg Config) (*Run, error) {
 		run.Cells += t.Len()
 	}
 	return run, nil
+}
+
+func (r *Run) addRelay(c relay.Counters) {
+	r.RelayDropped += c.Dropped
+	r.RelayBroken += c.Broken
+	r.RelayTimedOut += c.TimedOut
+	r.RelayExpired += c.Expired
+	r.RelayRefused += c.RefusedLinks + c.RefusedBusy + c.RefusedSource + c.RefusedRate + c.RefusedSetups
 }
 
 func waitFor(cond func() bool, limit time.Duration) error {
@@ -399,6 +412,12 @@ func startNode(provider jcrypto.CryptoProvider, period time.Duration, observed b
 		// the exit echoes, which is what lets a run measure delivery latency
 		Deliver: func(_ uint64, payload []byte) []byte { return payload },
 		Period:  period,
+		// every flow of a run reaches the relays from the loopback address, so a
+		// per-source limit would count the whole run as one peer
+		MaxHandshakesPerSource: -1,
+		MaxLinksPerSource:      -1,
+		SourceLinkRate:         -1,
+		SourceSetupRate:        -1,
 	}
 	if observed {
 		cfg.Dial = dial

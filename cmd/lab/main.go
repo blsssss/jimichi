@@ -84,6 +84,11 @@ type result struct {
 	// "" for a flow whose circuit stayed open
 	FlowClosed      []bool   `json:"flow_closed"`
 	FlowClosedAfter []string `json:"flow_closed_after"`
+
+	// a node limit cut a circuit or turned a connection away during the run
+	RelayTimedOut uint64 `json:"relay_timed_out"`
+	RelayExpired  uint64 `json:"relay_expired"`
+	RelayRefused  uint64 `json:"relay_refused"`
 }
 
 type variant struct {
@@ -245,14 +250,21 @@ func main() {
 
 // runs of one configuration at one window, reduced to the median and the range
 // across repeats; the rows stay in the report for anything finer. A run where a
-// circuit closed stopped a flow early and scored shorter traces, so it is
-// counted in BrokenRuns and left out of every median, range and count below
+// circuit closed stopped a flow early and scored shorter traces, and one where a
+// node limit acted lost something to that limit; they are counted in BrokenRuns
+// and LimitedRuns and left out of every median, range and count below
 type summary struct {
 	Suite      string `json:"suite"`
 	Traffic    string `json:"traffic"`
 	Bin        string `json:"bin"`
 	Runs       int    `json:"runs"`
 	BrokenRuns int    `json:"broken_runs"`
+	// runs where a relay deadline, lifetime or admission limit acted: what they
+	// lost was lost to a node limit, not to the configuration under test. A run
+	// can be both broken and limited
+	LimitedRuns int `json:"limited_runs"`
+	// neither broken nor limited: the runs every figure below rests on
+	CleanRuns int `json:"clean_runs"`
 	// null when no run of the line is clean: a zero would read as a result
 	AUC            *float64 `json:"auc_median"`
 	AUCMin         *float64 `json:"auc_min"`
@@ -269,6 +281,10 @@ type summary struct {
 // before the run was read, makes the run broken
 func broken(r result) bool {
 	return r.RelayBrokenCircuits > 0 || r.BrokenFlows > 0 || slices.Contains(r.FlowClosed, true)
+}
+
+func limited(r result) bool {
+	return r.RelayTimedOut > 0 || r.RelayExpired > 0 || r.RelayRefused > 0
 }
 
 func summarise(rows []result) []summary {
@@ -289,10 +305,17 @@ func summarise(rows []result) []summary {
 		var auc, top, mult, relay, p50 []float64
 		degenerate := 0
 		for _, r := range g {
-			if broken(r) {
+			b, l := broken(r), limited(r)
+			if b {
 				s.BrokenRuns++
+			}
+			if l {
+				s.LimitedRuns++
+			}
+			if b || l {
 				continue
 			}
+			s.CleanRuns++
 			auc = append(auc, r.AUC)
 			top = append(top, r.TopOne)
 			mult = append(mult, r.Multiplier)
@@ -323,12 +346,11 @@ func printSummary(w io.Writer, sum []summary) {
 	if len(sum) > 0 {
 		fmt.Fprintf(w, "\nsuite %s", sum[0].Suite)
 	}
-	fmt.Fprintf(w, "\n%-11s %6s %4s %4s %20s %6s %8s %8s %10s %4s\n",
-		"traffic", "bin", "runs", "brk", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
+	fmt.Fprintf(w, "\n%-11s %6s %4s %4s %4s %5s %20s %6s %8s %8s %10s %4s\n",
+		"traffic", "bin", "runs", "brk", "lim", "clean", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
 	for _, s := range sum {
-		clean := s.Runs - s.BrokenRuns
-		if clean == 0 {
-			fmt.Fprintf(w, "%-11s %6s %4d %4d  every run closed a circuit, nothing to summarise\n", s.Traffic, s.Bin, s.Runs, s.BrokenRuns)
+		if s.CleanRuns == 0 {
+			fmt.Fprintf(w, "%-11s %6s %4d %4d %4d %5d  no clean run, nothing to summarise\n", s.Traffic, s.Bin, s.Runs, s.BrokenRuns, s.LimitedRuns, s.CleanRuns)
 			continue
 		}
 		p50 := "-"
@@ -336,13 +358,14 @@ func printSummary(w io.Writer, sum []summary) {
 			p50 = fmt.Sprintf("%.2f", *s.LatencyP50Ms)
 		}
 		note := ""
-		if clean == 1 {
+		if s.CleanRuns == 1 {
 			note = "  one clean run: its values, not a median"
 		}
-		fmt.Fprintf(w, "%-11s %6s %4d %4d %6.3f [%.3f, %.3f] %6.3f %8.2f %8.2f %10s %4d%s\n",
-			s.Traffic, s.Bin, s.Runs, s.BrokenRuns, *s.AUC, *s.AUCMin, *s.AUCMax, *s.TopOne, *s.Multiplier, *s.RelayMult, p50, *s.DegenerateRuns, note)
+		fmt.Fprintf(w, "%-11s %6s %4d %4d %4d %5d %6.3f [%.3f, %.3f] %6.3f %8.2f %8.2f %10s %4d%s\n",
+			s.Traffic, s.Bin, s.Runs, s.BrokenRuns, s.LimitedRuns, s.CleanRuns, *s.AUC, *s.AUCMin, *s.AUCMax, *s.TopOne, *s.Multiplier, *s.RelayMult, p50, *s.DegenerateRuns, note)
 	}
-	fmt.Fprintln(w, "brk: runs where a circuit closed, left out of the medians, ranges and deg; medians rest on runs - brk")
+	fmt.Fprintln(w, "brk: runs where a circuit closed; lim: runs where a relay deadline, lifetime or admission limit acted")
+	fmt.Fprintln(w, "both are left out of the medians, ranges and deg, which rest on the clean runs")
 }
 
 // the first three fields of /proc/loadavg; empty where there is no such file
@@ -445,6 +468,9 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 
 		DropRate:          float64(run.Dropped) / float64(run.Sent),
 		RelayDroppedCells: run.RelayDropped,
+		RelayTimedOut:     run.RelayTimedOut,
+		RelayExpired:      run.RelayExpired,
+		RelayRefused:      run.RelayRefused,
 		LatencySamples:    len(run.Latency),
 		Unanswered:        run.Unanswered,
 		P50:               percentile(run.Latency, 0.5),

@@ -215,9 +215,62 @@ Circuit teardown:
   it cannot wrap comes back, a cell finds no room in its queue, a cell cannot be written to either
   neighbour, or the exit cannot seal a reply. The close takes the same path as a closed link and
   is counted with the closed circuits.
+- A link that has opened no circuit by the setup deadline after its handshake is closed.
+- A frame that cannot be written within the write deadline is such a failed write: the peer has
+  stopped reading, and a node sending on its own clock would otherwise wait for it. It is counted
+  with the closed circuits and with the expired deadlines.
+- A circuit that carries no cell in either direction for the idle timeout, or that reaches its
+  lifetime, is torn down by closing its inbound link and counted with the expired circuits, not
+  with the closed ones. Link padding does not count as traffic.
 - Circuit keys are released once every goroutine using them has stopped.
 - The client sees the break as its reply channel closing and exits. The orchestrator restarts it
   on a new circuit.
+
+## Node limits
+
+Every limit is a node parameter with a default. A negative value turns a limit off, so its cost
+can be measured on its own, with two exceptions: a burst cannot be negative and is refused at start
+(the rate is what turns that limit off), and the per-address handshake cap stays on, at 4, when the
+shared cap is off, unless it is set to -1 itself.
+
+| Limit | Default | Why |
+|---|---|---|
+| handshake deadline, -handshake-timeout | 2 s | an initiator sends its hello at once, so a silent peer holds a slot only briefly |
+| dial and handshake towards the next hop | 5 s, fixed | a silent next hop holds neither the setup nor the node shutdown |
+| setup deadline, -setup-timeout | 10 s | the client and the previous node send the control cell right after the handshake |
+| write deadline, -write-timeout | 4 periods and at least 1 s; 5 s without own-clock sending | a peer that stops reading does not stall the sender |
+| idle circuit, -idle-timeout | 5 min | an abandoned circuit stops sending padding; the testbed client sends every 200 ms |
+| circuit lifetime, -circuit-lifetime | 24 h | bounds how long one set of circuit keys lives |
+| concurrent handshakes, -max-handshakes | 32 | more would only queue for the CPU |
+| concurrent handshakes from one address, -max-handshakes-per-source | an eighth of -max-handshakes and at least 1, so 4; also 4 when -max-handshakes is off | one address cannot hold every handshake slot |
+| open inbound links, -max-links | 512 | the memory of their circuits stays inside a 128 MiB pod |
+| links from one address, -max-links-per-source | 32 | one peer cannot take every slot; a client needs a handful of circuits |
+| new links from one address, -source-link-rate, -source-link-burst | 10 per second, bursts of up to 50 | every link costs a key pair and an agreement |
+| setups from one address, -source-setup-rate, -source-setup-burst | 0.2 per second, bursts of up to 10 | every setup costs an agreement with the node key, a dial onwards and a tag kept until restart |
+
+- A connection is admitted or refused when it is accepted, before any key agreement. A control
+  cell is checked after the link handshake and before the agreement with the node key. A refused
+  connection is closed without an answer.
+- Every connection costs its address a token of the link rate, admitted or refused, and the limits
+  of one address are checked before the shared ones: retrying against a full node spends the
+  address's own allowance and leaves the shared slots to others.
+- On the testbed the per-address limits are on at the entry relay-1 and off on relay-2 and
+  relay-3, where every circuit arrives from the previous relay's one address (LIMITATIONS). A
+  network policy (deploy/base/network.yaml) lets only client pods reach the cell port of relay-1
+  and only the previous relay reach that of relay-2 and relay-3; the info port stays open to the
+  namespace.
+- One address is an IPv4 address or an IPv6 /64 prefix. The table of addresses lives only in
+  memory, holds at most 16384 of them and forgets an address once it has no open links and its
+  buckets have refilled. A new address past the bound is refused and counted with the per-address
+  refusals, known addresses are still served.
+- Every control cell spends a setup token before it is opened, so an address whose links have
+  closed stays in the table until its setup bucket refills: up to 50 s at the default rate and
+  burst.
+- Refusals and expired deadlines are added to the aggregated counters, without addresses or
+  identifiers.
+- A temporary accept error, such as running out of file descriptors, is retried with a pause from
+  5 ms doubling up to 1 s. If accepting stops for good, the node exits with an error and the
+  orchestrator restarts it; the health check reports ready only while the node accepts.
 
 ## Node authentication
 
@@ -435,7 +488,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 | Source | Data |
 |---|---|
 | client | send and receive timestamps per cell, losses, flow identifier; at start the fingerprint and validity of every verified node |
-| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, state of the installed certificate (cert: none, valid, expired). No flow identifiers. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after |
+| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired). No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after |
 | network | traffic captures at the entry and the exit for the correlation attack |
 | memory | dumps of the relay process in the key extraction scenario |
 
@@ -489,3 +542,6 @@ on the system, not the other way round.
 - Nodes are deployed with the Recreate strategy, so each Deployment has exactly one live pod and
   issuance finds exactly that one. The -name and -advertise flags set the name and address in the
   certificate, and the address is the one the client knows.
+- deploy/base/network.yaml: a network policy lets each cell port take connections only from the
+  hop before it; the info port stays open to the namespace, and the port-forward that issuance
+  and the counters use does not pass through it.

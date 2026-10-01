@@ -1,0 +1,61 @@
+# the testbed chain is fixed, so each cell port takes connections only from the
+# hop before it; info stays open to the namespace, where clients fetch keys
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-1
+  namespace: jimichi
+spec:
+  podSelector:
+    matchLabels: {app: relay, hop: "1"}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: client}
+      ports:
+        - {protocol: TCP, port: 9000}
+    - from:
+        - podSelector: {}
+      ports:
+        - {protocol: TCP, port: 9100}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-2
+  namespace: jimichi
+spec:
+  podSelector:
+    matchLabels: {app: relay, hop: "2"}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: relay, hop: "1"}
+      ports:
+        - {protocol: TCP, port: 9000}
+    - from:
+        - podSelector: {}
+      ports:
+        - {protocol: TCP, port: 9100}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-3
+  namespace: jimichi
+spec:
+  podSelector:
+    matchLabels: {app: relay, hop: "3"}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: relay, hop: "2"}
+      ports:
+        - {protocol: TCP, port: 9000}
+    - from:
+        - podSelector: {}
+      ports:
+        - {protocol: TCP, port: 9100}
