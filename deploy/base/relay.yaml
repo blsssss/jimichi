@@ -28,7 +28,7 @@ spec:
         - name: relay
           image: jimichi/relay:dev
           imagePullPolicy: IfNotPresent
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-onion-rotate", "1h",
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-onion-rotate", "1h", "-descriptor-ttl", "20m",
                  "-name", "relay-1", "-advertise", "relay-1.jimichi.svc.cluster.local:9000"]
           ports:
             - {name: cells, containerPort: 9000}
@@ -82,7 +82,7 @@ spec:
           imagePullPolicy: IfNotPresent
           # every circuit reaches a forwarding node from the previous relay's one
           # address, so per-source limits here would be shared by all clients
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-onion-rotate", "1h",
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-onion-rotate", "1h", "-descriptor-ttl", "20m",
                  "-name", "relay-2", "-advertise", "relay-2.jimichi.svc.cluster.local:9000",
                  "-max-handshakes-per-source", "-1", "-max-links-per-source", "-1",
                  "-source-link-rate", "-1", "-source-setup-rate", "-1"]
@@ -138,7 +138,7 @@ spec:
           imagePullPolicy: IfNotPresent
           # every circuit reaches a forwarding node from the previous relay's one
           # address, so per-source limits here would be shared by all clients
-          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-onion-rotate", "1h",
+          args: ["-listen", ":9000", "-info", ":9100", "-period", "190ms", "-onion-rotate", "1h", "-descriptor-ttl", "20m",
                  "-name", "relay-3", "-advertise", "relay-3.jimichi.svc.cluster.local:9000",
                  "-max-handshakes-per-source", "-1", "-max-links-per-source", "-1",
                  "-source-link-rate", "-1", "-source-setup-rate", "-1"]
