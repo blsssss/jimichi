@@ -3,8 +3,9 @@
 English | [Русский](../ru/CRYPTO.md)
 
 Status: both suites are implemented and pass providertest. c25519 is the default, so results are
-comparable with international work. GOST is the second suite and is compared with it on cost. The suite is chosen with -suite on the node, the client and the testbed; a
-node publishes its suite next to its key, and a client on another suite refuses to start.
+comparable with international work. GOST is the second suite and is compared with it on cost. The
+suite is chosen with -suite on the node, the client and the testbed; a node publishes its suite
+next to its key, and a client on another suite refuses to start.
 
 ## Operations
 
@@ -54,18 +55,21 @@ type AEAD interface {
 Decisions taken:
 - Secrets cross the interface only as *secmem.Buffer. Public keys and signatures are []byte: they
   are not secret, and a type per suite would complicate wire.
-- ukm is mandatory in both suites: it binds the shared secret to one session. In GOST it is the
-  standard VKO parameter, in c25519 it goes in as the HKDF salt.
+- ukm is a parameter of Agree in both suites and every caller passes one: it binds the shared
+  secret to one session. In GOST it is the standard VKO parameter, in c25519 it goes in as the
+  HKDF salt. The provider does not refuse an empty ukm.
 - KeySize reports the AEAD key length so that wire never hardcodes 32 bytes.
 - DeriveKey accepts any size from 1 to KeySize: wire takes 16 bytes for the control cell replay
   tag.
 - An AEAD is safe for concurrent use: a node peels and wraps layers under one key from different
   goroutines. gogost's MGM keeps per-call state, so the GOST suite serialises calls with a lock.
   providertest checks this with concurrent Seal and Open.
-- Nonces are assigned by wire: the provider neither stores nor counts them. The cell format rules
-  out a nonce repeating under one key.
-  In a 16-byte nonce the top bit is always zero, as MGM requires: the counter with the direction
-  comes first and the random circuit id last.
+- Nonces are assigned by the caller: the provider neither stores nor counts them. link numbers the
+  frames of one direction of a link from zero and puts the number in the last 8 bytes of the
+  nonce, the rest zero. wire builds the nonce of a cell layer from the direction, the circuit id
+  and the counter. The cell format rules out a nonce repeating under one key. In a 16-byte nonce
+  the top bit is always zero, as MGM requires: wire puts the counter with the direction first and
+  the random circuit id last, and link leaves the leading bytes zero.
 - GenerateSigning issues the long-term pair for node authentication, separate from the ephemeral
   one.
 - crypto/rand is the only standard-library crypto package used outside crypto/: randomness for
@@ -124,6 +128,11 @@ and has no primitives of its own.
 - Release: zeroing, munlock, munmap. A second Release does not panic.
 - Process: prctl(PR_SET_DUMPABLE, 0), RLIMIT_CORE=0. This closes ptrace and /proc/pid/mem for the
   same uid and does nothing against root.
+- Off-heap pages, locking, dump exclusion and process hardening work in the Linux build only. On
+  other systems a buffer is a slice on the Go heap that reports itself as not locked, and release
+  does nothing but zero it, and that only with zeroing on. Process hardening returns an error
+  there: with the default flags a node, a client and jimichi enroll refuse to start and run only
+  with -harden=false and a -keymem without lock.
 - In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start and refuses
   to run below 64 KiB, or when locking was asked for and failed. A rotating node holds one locked
   page per onion key, two at most, and one more that it gives back right before it makes the
@@ -142,10 +151,13 @@ and has no primitives of its own.
 
 - GOST: gogost 5.14.1 by Sergey Matveev (GPLv3), module github.com/pedroalbanese/gogost. The
   author's domain go.cypherpunks.su did not answer and the Go proxy has no copy, so a mirror with
-  the same code is used, pinned in go.sum. The mirror was checked: no network or file I/O, and
-  unsafe only in the fast XOR, as in the original. Known-answer tests in crypto/gost check the
-  standards: VKO against RFC 7836, the KDF against R 50.1.113-2016, Kuznyechik-MGM against
-  RFC 9058, Streebog-256 against RFC 6986.
+  the same version number in its code is used, pinned in go.mod and go.sum (pseudo-version of
+  commit 44a1f1ec2524). Whether its code equals the author's release has not been checked against
+  an independent source, the check is planned
+  ([#50](https://github.com/jimichi-org/jimichi/issues/50)). The library packages of the mirror
+  were checked: no network or file I/O, and unsafe only in the fast XOR. Known-answer tests in
+  crypto/gost check the standards: VKO against RFC 7836, the KDF against R 50.1.113-2016,
+  Kuznyechik-MGM against RFC 9058, Streebog-256 against RFC 6986.
 - The peer's point is checked before VKO: coordinates below p, the point on the curve and not in
   the subgroup of order 2 or 4. The library does not do this itself, and an off-curve point would
   let a peer draw the node's link or onion key out piece by piece. For mixed points the cofactor
@@ -172,13 +184,13 @@ some of them live long:
 
 | Where | What | How long |
 |---|---|---|
-| x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct | the whole life of the circuit or link, never wiped |
+| x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct | the whole life of the circuit or link, never wiped; building the AEAD state per call from the secmem key is planned ([#39](https://github.com/jimichi-org/jimichi/issues/39)) |
 | crypto/ecdh | the X25519 scalar, the node's link and onion keys included, and the shared secret | until the freed heap memory is reused, which can be after the onion key itself was released |
 | x/crypto hkdf, crypto/hmac | the PRK, the HMAC pads (key XOR a constant), the last derived block | until the heap memory is reused |
 | Ed25519 generation and signing | the SHA-512 state with the seed or the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; generation and signing always wipe their own scalars and digests, -keymem none included |
-| gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them, except under -keymem none |
+| gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them unless zeroing is off (-keymem none or a list without zero) |
 | gogost, KDF | the HMAC-Streebog pads holding the VKO secret and the circuit secret | until the heap memory is reused |
-| gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys included | until the heap memory is reused, which can be after the onion key itself was released; the provider wipes the number, not the copies made inside the computation |
+| gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys included | until the heap memory is reused, which can be after the onion key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 
 gogost arithmetic on math/big is not constant time. The node's link and onion keys could leak
@@ -186,5 +198,9 @@ through VKO timing to an adversary who times the node's responses; side-channel 
 outside the threat model.
 
 The Go heap does not move objects, but freed memory is not wiped, and goroutine stacks are copied
-when they grow. Locking and dump exclusion do not reach these copies. Measuring how many copies
-remain and how long they live is part of block 4 of the research programme.
+when they grow. Locking and MADV_DONTDUMP do not reach these copies: only secmem pages are locked,
+so key copies on the heap and on stacks can be written to swap, and with -harden=false they can
+end up in a core dump. Locking all process memory is planned
+([#36](https://github.com/jimichi-org/jimichi/issues/36)). Measuring how many copies remain and
+how long they live is planned as block 4 of the research programme
+([#24](https://github.com/jimichi-org/jimichi/issues/24)) and has not been done yet.
