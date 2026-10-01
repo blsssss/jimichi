@@ -207,6 +207,43 @@ func TestReplacedKeyIsReleasedAfterGrace(t *testing.T) {
 	}
 }
 
+// with a period longer than the grace the release is a step of its own, long
+// before the next rotation
+func TestReplacedKeyIsReleasedBetweenRotations(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	ring := f.rotating(t, 3*time.Hour)
+	f.enroll(t, t0.Add(72*time.Hour))
+	_, k0 := ring.Current()
+	f.clock.advance(3 * time.Hour)
+	f.n.rotateIfDue()
+	_, k1 := ring.Current()
+
+	f.clock.advance(time.Hour + pki.Skew - time.Second)
+	f.n.rotateIfDue()
+	if !opensFor(t, f.p, ring, k0) {
+		t.Fatal("the replaced key was released a second before the end of its grace")
+	}
+	f.clock.advance(time.Second)
+	f.n.rotateIfDue()
+	if opensFor(t, f.p, ring, k0) {
+		t.Fatal("the replaced key still opens setups at the end of its grace")
+	}
+	if epoch, pub := ring.Current(); epoch != 1 || !bytes.Equal(pub, k1) || !opensFor(t, f.p, ring, k1) {
+		t.Fatalf("epoch %d after the release, want the current key untouched", epoch)
+	}
+
+	f.clock.advance(2*time.Hour - pki.Skew - time.Second)
+	f.n.rotateIfDue()
+	if epoch, _ := ring.Current(); epoch != 1 {
+		t.Fatalf("epoch %d a second before the period is over", epoch)
+	}
+	f.clock.advance(time.Second)
+	f.n.rotateIfDue()
+	if epoch, _ := ring.Current(); epoch != 2 || !opensFor(t, f.p, ring, k1) {
+		t.Fatalf("epoch %d a period after the last rotation, want 2 with the replaced key held", epoch)
+	}
+}
+
 // the timer stands still while the host sleeps; the first look at the wall
 // clock afterwards releases what is overdue and rotates once
 func TestRotationAfterTheHostSlept(t *testing.T) {

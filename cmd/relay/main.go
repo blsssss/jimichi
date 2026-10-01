@@ -56,7 +56,7 @@ func main() {
 	flag.BoolVar(&cfg.echo, "echo", true, "as an exit, send the payload back along the circuit")
 	flag.DurationVar(&cfg.period, "period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
 	flag.IntVar(&cfg.queue, "queue", 64, "cells a circuit may queue per direction when -period is set")
-	flag.IntVar(&cfg.setupCache, "setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits until restart", relay.MaxSetupCache))
+	flag.IntVar(&cfg.setupCache, "setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered per onion key to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits under that key, until restart or, with -onion-rotate, until the next key is published", relay.MaxSetupCache))
 	flag.BoolVar(&cfg.auth, "auth", true, "serve a descriptor signed under a certificate from jimichi enroll and extend only to the roster nodes it names, over authenticated links; false serves it unsigned and extends to any address over anonymous links")
 	flag.StringVar(&cfg.name, "name", "", "node name for its certificate, required with -auth")
 	flag.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth; without -auth the address this node lists itself under in /descriptors", wire.AddrSize))
@@ -75,7 +75,7 @@ func main() {
 	flag.IntVar(&cfg.limits.MaxLinksPerSource, "max-links-per-source", relay.DefaultMaxLinksPerSource, "open inbound links from one address, an IPv6 /64 counting as one, so one peer cannot take every slot; a preceding relay is one address for all it forwards, so forwarding nodes turn this off; negative turns it off")
 	flag.Float64Var(&cfg.limits.SourceLinkRate, "source-link-rate", relay.DefaultSourceLinkRate, "new links per second one address may open, checked before any key agreement; every connection costs one, refused or not; negative turns it off")
 	flag.IntVar(&cfg.limits.SourceLinkBurst, "source-link-burst", relay.DefaultSourceLinkBurst, "links one address may open at once before -source-link-rate applies; covers a client building several circuits; 0 for the default, a negative -source-link-rate turns the limit off")
-	flag.Float64Var(&cfg.limits.SourceSetupRate, "source-setup-rate", relay.DefaultSourceSetupRate, "circuit setups per second from one address, checked after the link handshake and before the agreement with the node key, each costing that agreement, a dial onwards and a tag held until restart; at the default one address needs about 91 hours to fill -setup-cache; negative turns it off")
+	flag.Float64Var(&cfg.limits.SourceSetupRate, "source-setup-rate", relay.DefaultSourceSetupRate, "circuit setups per second from one address, checked after the link handshake and before the agreement with the node key, each costing that agreement, twice while a replaced onion key is held, a dial onwards and a tag held as long as the onion key; at the default one address needs about 91 hours to fill -setup-cache; negative turns it off")
 	flag.IntVar(&cfg.limits.SourceSetupBurst, "source-setup-burst", relay.DefaultSourceSetupBurst, "setups one address may send at once before -source-setup-rate applies; 0 for the default, a negative -source-setup-rate turns the limit off")
 	flag.Parse()
 	cfg.peers = splitList(*peers)
@@ -301,8 +301,9 @@ func splitList(s string) []string {
 }
 
 // a setup holds a handful of key pages at once, the static and identity keys
-// one more each, the onion keys of a rotating node up to three while one is
-// replaced; below this the node would start and then fail its first circuits
+// one more each, and a rotating node two onion keys with one more page per
+// setup while both are tried; below this the node would start and then fail
+// its first circuits
 const minMemlock = 64 << 10
 
 func checkMemlock() error {
