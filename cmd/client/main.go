@@ -29,7 +29,10 @@ const (
 	fetchPause    = time.Second
 )
 
-var errNoBundle = errors.New("the entry holds no bundle for it")
+var (
+	errNoBundle = errors.New("the entry holds no bundle for it")
+	errTooFew   = errors.New("the entry leaves out too many nodes")
+)
 
 func main() {
 	nodes := flag.String("nodes", "", "comma separated host:port of the nodes the chain is drawn from, at least -hops of them")
@@ -49,6 +52,7 @@ func main() {
 	auth := flag.Bool("auth", true, "verify the descriptor of every listed node against -ca before building the circuit; false takes the keys unverified")
 	ca := flag.String("ca", "", "trust anchor <suite>:<base64>, the CA public key printed by jimichi enroll")
 	skew := flag.Duration("skew", pki.Skew, "tolerated lag of this clock behind the nodes' clocks")
+	missing := flag.Int("missing", 1, "listed nodes the entry may leave out of its descriptors, at most the nodes beyond -hops; the chain is drawn among the rest")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
@@ -98,9 +102,15 @@ func main() {
 	if !*auth {
 		logger.Print("WARNING: -auth=false, node keys are taken unverified from whoever answers the descriptor request")
 	}
+	if *missing < 0 {
+		logger.Fatalf("-missing %d: must not be negative", *missing)
+	}
+	if *hops == 1 {
+		logger.Print("WARNING: -hops 1, a single node sees both the sender and what it sends on")
+	}
 
 	sel := selection{
-		addrs: addrs, hops: *hops, fixed: *fixed, infoPort: *infoPort,
+		addrs: addrs, hops: *hops, fixed: *fixed, missing: *missing, infoPort: *infoPort,
 		auth: *auth, trust: trust,
 		web: fetch.NewClient(), attempts: fetchAttempts, pause: fetchPause,
 		rnd: rand.Reader,
@@ -225,9 +235,11 @@ func trustPolicy(auth bool, ca string, s jcrypto.Suite, skew time.Duration) (pki
 
 // how the chain is taken from the listed nodes
 type selection struct {
-	addrs    []string
-	hops     int
-	fixed    bool
+	addrs []string
+	hops  int
+	fixed bool
+	// listed nodes the entry may leave out of its descriptors
+	missing  int
 	infoPort string
 	auth     bool
 	trust    pki.Policy
@@ -253,27 +265,82 @@ func (s selection) chain(p jcrypto.CryptoProvider, logger *log.Logger, now time.
 	if err != nil {
 		return nil, s.named(err)
 	}
-	nodes, err := resolve(p, s.auth, s.trust, s.addrs, bundles, now)
+	// position in the list of present nodes for every listed node, or -1
+	at := make([]int, len(s.addrs))
+	var addrs []string
+	var held [][]byte
+	for i, b := range bundles {
+		at[i] = -1
+		if b != nil {
+			at[i] = len(addrs)
+			addrs = append(addrs, s.addrs[i])
+			held = append(held, b)
+		}
+	}
+	if err := s.enough(at, entry); err != nil {
+		return nil, err
+	}
+	// every bundle the entry does serve has to pass: one that fails is a refusal,
+	// never a node left out
+	nodes, err := resolve(p, s.auth, s.trust, addrs, held, now)
 	if err != nil {
 		return nil, err
 	}
 	if s.auth {
 		for _, v := range nodes {
-			logger.Printf("node %s identity=%s certificate until %s, descriptor until %s",
-				v.Name, pki.Fingerprint(p, v.Identity),
-				v.CertUntil.UTC().Format(time.RFC3339), v.DescUntil.UTC().Format(time.RFC3339))
+			// the entry's own descriptor is the freshest in its mirror, so its time
+			// stays out of the log unless the chain is fixed anyway
+			if s.fixed {
+				logger.Printf("node %s identity=%s certificate until %s, descriptor until %s",
+					v.Name, pki.Fingerprint(p, v.Identity),
+					v.CertUntil.UTC().Format(time.RFC3339), v.DescUntil.UTC().Format(time.RFC3339))
+				continue
+			}
+			logger.Printf("node %s identity=%s certificate until %s",
+				v.Name, pki.Fingerprint(p, v.Identity), v.CertUntil.UTC().Format(time.RFC3339))
 		}
+	}
+	if s.auth {
+		logger.Printf("%d of %d listed nodes verified", len(nodes), len(s.addrs))
 	}
 	path := make([]int, s.hops)
 	for i := range path {
-		path[i] = i
+		path[i] = at[i]
 	}
 	if !s.fixed {
-		if path, err = client.ChooseRest(entry, len(s.addrs), s.hops, s.rnd); err != nil {
+		if path, err = client.ChooseRest(at[entry], len(nodes), s.hops, s.rnd); err != nil {
 			return nil, err
 		}
 	}
 	return chainOf(nodes, path), nil
+}
+
+// a mirror that waits for every node would let one node that withholds its
+// descriptor empty the mirrors of all the others, so the entry may leave out a
+// bounded number of nodes; a fixed chain needs exactly its own
+func (s selection) enough(at []int, entry int) error {
+	if s.fixed {
+		for i := 0; i < s.hops; i++ {
+			if at[i] < 0 {
+				return fmt.Errorf("node %s: %w", s.addrs[i], errNoBundle)
+			}
+		}
+		return nil
+	}
+	if at[entry] < 0 {
+		return &entryError{errNoBundle}
+	}
+	absent := 0
+	for _, i := range at {
+		if i < 0 {
+			absent++
+		}
+	}
+	allowed := min(s.missing, len(s.addrs)-s.hops)
+	if absent > allowed {
+		return fmt.Errorf("%w: %d of %d listed nodes, at most %d may be left out", errTooFew, absent, len(s.addrs), allowed)
+	}
+	return nil
 }
 
 // with a fixed chain the entry is the first listed node, which the
@@ -305,7 +372,7 @@ func (e *entryError) Error() string { return "the entry: " + failureClass(e.err)
 func (e *entryError) Unwrap() error { return e.err }
 
 var knownFailures = []error{
-	fetch.ErrTooLarge, pki.ErrFormat, pki.ErrVersion, pki.ErrDuplicate,
+	errNoBundle, fetch.ErrTooLarge, pki.ErrFormat, pki.ErrVersion, pki.ErrDuplicate,
 	link.ErrHandshake, client.ErrNodeKey,
 }
 
@@ -343,13 +410,10 @@ func nodeBundles(web *http.Client, addrs []string, entry int, infoPort string, a
 	for _, e := range entries {
 		held[e.Addr] = e.Bundle
 	}
+	// a listed node the entry does not serve stays nil
 	bundles := make([][]byte, len(addrs))
 	for i, addr := range addrs {
-		b, ok := held[addr]
-		if !ok {
-			return nil, fmt.Errorf("node %s: %w", addr, errNoBundle)
-		}
-		bundles[i] = b
+		bundles[i] = held[addr]
 	}
 	return bundles, nil
 }

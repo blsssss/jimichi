@@ -228,3 +228,18 @@ func TestChiSquareBoundCatchesModuloBias(t *testing.T) {
 		t.Fatalf("bound for 59 degrees of freedom is %.2f, want 98.4", bound)
 	}
 }
+
+// a source stuck on a rejected value must not hold the choice forever: among
+// three nodes the value 0 is the one thrown away
+func TestChoiceGivesUpOnAStuckSource(t *testing.T) {
+	if _, err := client.ChooseEntry(3, zeros{}); !errors.Is(err, client.ErrChoice) {
+		t.Fatalf("ChooseEntry on a stuck source = %v, want %v", err, client.ErrChoice)
+	}
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}

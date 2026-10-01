@@ -414,17 +414,24 @@ func TestBundlesComeFromTheEntryOnly(t *testing.T) {
 	}
 }
 
-func TestMissingNodeRefusesTheChain(t *testing.T) {
+func TestMissingNodeIsNotAskedItself(t *testing.T) {
 	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
 	m := mirrorOf(t, tb.addrs[:2], tb.bundles[:2])
 	tb.info[0].mirror.Store(&m)
 
-	_, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 3, time.Millisecond)
-	if !errors.Is(err, errNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[2]+": ") {
-		t.Fatalf("nodeBundles = %v, want node %s: %v", err, tb.addrs[2], errNoBundle)
+	bundles, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 3, time.Millisecond)
+	if err != nil || len(bundles) != 3 || bundles[0] == nil || bundles[1] == nil || bundles[2] != nil {
+		t.Fatalf("nodeBundles = %d bundles, %v, want the two the entry serves and none for the third", len(bundles), err)
 	}
 	if got := tb.requests(); !slices.Equal(got, []int32{1, 0, 0}) {
 		t.Fatalf("requests per node %v, want one at the entry: a missing node is not asked itself", got)
+	}
+	// three nodes for three hops leave no node to spare, whatever -missing says
+	// 3 mod 3 = 0 draws the first node, whose mirror is the one set above
+	s := tb.selection(3, words(3))
+	s.missing = 1
+	if _, _, err := build(s, tb.p); !errors.Is(err, errTooFew) {
+		t.Fatalf("chain of three among two served nodes = %v, want %v", err, errTooFew)
 	}
 }
 
@@ -552,10 +559,13 @@ func TestDrawnChainAsksItsEntryAndVerifiesEveryListedNode(t *testing.T) {
 				t.Fatalf("requests per node %v, want one at the entry, node %d, and none elsewhere", got, c.want[0])
 			}
 			lines := strings.Split(strings.TrimSuffix(logged, "\n"), "\n")
-			if len(lines) != 5 {
-				t.Fatalf("%d lines logged, want one per listed node:\n%s", len(lines), logged)
+			if len(lines) != 6 || lines[5] != "5 of 5 listed nodes verified" {
+				t.Fatalf("%d lines logged, want one per listed node and their count:\n%s", len(lines), logged)
 			}
-			for i, line := range lines {
+			if strings.Contains(logged, "descriptor until") {
+				t.Fatalf("a drawn chain logs descriptor times, and the entry's own is the freshest:\n%s", logged)
+			}
+			for i, line := range lines[:5] {
 				if !strings.HasPrefix(line, fmt.Sprintf("node relay-%d identity=", i+1)) {
 					t.Fatalf("line %d is %q, want the listed order", i, line)
 				}
@@ -611,11 +621,110 @@ func TestNodeOffThePathStillRefusesTheChain(t *testing.T) {
 		t.Fatalf("fixed chain = %v, %v, want node %s: %v though the chain ends at the third node", chain, err, tb.addrs[4], pki.ErrDescSignature)
 	}
 
+	// a node the entry leaves out is another matter than one it serves wrongly:
+	// without -missing it refuses as well, and the text names no node
 	m := mirrorOf(t, tb.addrs[1:], tb.bundles[1:])
 	tb.info[2].mirror.Store(&m)
 	chain, _, err = build(tb.selection(3, words(7, 6, 5)), tb.p)
-	if !errors.Is(err, errNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[0]+": ") || chain != nil {
-		t.Fatalf("chain = %v, %v, want node %s: %v", chain, err, tb.addrs[0], errNoBundle)
+	if !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) || chain != nil {
+		t.Fatalf("chain = %v, %v, want %v naming no node", chain, err, errTooFew)
+	}
+}
+
+// the entry may leave out as many nodes as -missing allows; the chain is then
+// drawn among the nodes it serves, so a node left out is on no chain
+func TestEntryMayLeaveOutABoundedNumberOfNodes(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	one := mirrorOf(t, tb.addrs[1:], tb.bundles[1:])
+	for i := range tb.info {
+		tb.info[i].mirror.Store(&one)
+	}
+
+	// 7 mod 5 = 2 is the entry, second of the served nodes 1 2 3 4; among the
+	// others 1 3 4, 6 mod 3 = 0 takes node 1 and 5 mod 2 = 1 takes node 4
+	s := tb.selection(3, words(7, 6, 5))
+	s.missing = 1
+	chain, logged, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 || chain[0].Addr != tb.addrs[2] || chain[1].Addr != tb.addrs[1] || chain[2].Addr != tb.addrs[4] {
+		t.Fatalf("chain with one node left out = %v, %v, want nodes 2, 1, 4", chain, err)
+	}
+	if !strings.HasSuffix(logged, "4 of 5 listed nodes verified\n") {
+		t.Fatalf("log: %s", logged)
+	}
+	for i := 0; i < 200; i++ {
+		s := tb.selection(3, rand.Reader)
+		s.missing = 1
+		chain, _, err := build(s, tb.p)
+		if err != nil {
+			// node 0 was drawn as the entry and its mirror does not hold itself
+			if !errors.Is(err, errNoBundle) || namesAny(err.Error(), tb.addrs) {
+				t.Fatalf("draw %d: %v", i, err)
+			}
+			continue
+		}
+		for _, hop := range chain {
+			if hop.Addr == tb.addrs[0] {
+				t.Fatalf("draw %d: the node left out is on the chain %v", i, chain)
+			}
+		}
+	}
+
+	two := mirrorOf(t, tb.addrs[2:], tb.bundles[2:])
+	for i := range tb.info {
+		tb.info[i].mirror.Store(&two)
+	}
+	s = tb.selection(3, words(7, 6, 5))
+	s.missing = 1
+	if _, _, err := build(s, tb.p); !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) {
+		t.Fatalf("two nodes left out with -missing 1 = %v, want %v naming no node", err, errTooFew)
+	}
+	s = tb.selection(3, words(7, 6, 5))
+	s.missing = 2
+	chain, _, err = build(s, tb.p)
+	if err != nil || len(chain) != 3 {
+		t.Fatalf("two nodes left out with -missing 2 = %v, %v", chain, err)
+	}
+	// five nodes for three hops spare two, so a larger -missing allows no more
+	three := mirrorOf(t, tb.addrs[3:], tb.bundles[3:])
+	tb.info[3].mirror.Store(&three)
+	s = tb.selection(3, words(3, 0, 0))
+	s.missing = 4
+	if _, _, err := build(s, tb.p); !errors.Is(err, errTooFew) {
+		t.Fatalf("three nodes left out = %v, want %v", err, errTooFew)
+	}
+}
+
+func TestBundleServedWronglyIsNotANodeLeftOut(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	bad := slices.Clone(tb.bundles)
+	bad[0] = altered(t, tb.bundles[0])
+	tb.publish(t, bad)
+	s := tb.selection(3, words(7, 6, 5))
+	s.missing = 2
+	chain, _, err := build(s, tb.p)
+	if !errors.Is(err, pki.ErrDescSignature) || chain != nil {
+		t.Fatalf("chain = %v, %v, want %v: -missing covers absent nodes only", chain, err, pki.ErrDescSignature)
+	}
+}
+
+func TestFixedChainNeedsItsOwnNodesOnly(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	m := mirrorOf(t, tb.addrs[:4], tb.bundles[:4])
+	tb.info[0].mirror.Store(&m)
+	s := tb.selection(3, nil)
+	s.fixed = true
+	chain, _, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 || chain[2].Addr != tb.addrs[2] {
+		t.Fatalf("fixed chain with a node off it left out = %v, %v", chain, err)
+	}
+
+	m = mirrorOf(t, []string{tb.addrs[0], tb.addrs[2], tb.addrs[3], tb.addrs[4]}, [][]byte{tb.bundles[0], tb.bundles[2], tb.bundles[3], tb.bundles[4]})
+	tb.info[0].mirror.Store(&m)
+	s = tb.selection(3, nil)
+	s.fixed, s.missing = true, 2
+	chain, _, err = build(s, tb.p)
+	if !errors.Is(err, errNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") || chain != nil {
+		t.Fatalf("fixed chain with its second node left out = %v, %v, want node %s: %v", chain, err, tb.addrs[1], errNoBundle)
 	}
 }
 
@@ -636,7 +745,7 @@ func TestFixedChainKeepsTheListedOrder(t *testing.T) {
 	if got := tb.requests(); !slices.Equal(got, []int32{1, 0, 0, 0, 0}) {
 		t.Fatalf("requests per node %v, want one at the first listed node", got)
 	}
-	if strings.Count(logged, "\n") != 5 {
+	if strings.Count(logged, "\n") != 6 || strings.Count(logged, "descriptor until") != 5 {
 		t.Fatalf("a fixed chain verifies every listed node as well, logged:\n%s", logged)
 	}
 }

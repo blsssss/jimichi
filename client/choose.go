@@ -34,7 +34,7 @@ func ChooseEntry(n int, rnd io.Reader) (int, error) {
 // nodes without replacement, by the first steps of a Fisher-Yates shuffle
 func ChooseRest(entry, n, hops int, rnd io.Reader) ([]int, error) {
 	if hops < 1 || hops > n || entry < 0 || entry >= n {
-		return nil, fmt.Errorf("%w: %d hops among %d nodes from entry %d", ErrChoice, hops, n, entry)
+		return nil, fmt.Errorf("%w: %d hops among %d nodes", ErrChoice, hops, n)
 	}
 	others := make([]int, 0, n-1)
 	for i := 0; i < n; i++ {
@@ -61,7 +61,9 @@ func below(rnd io.Reader, m int) (int, error) {
 	bound := uint64(m)
 	reject := -bound % bound
 	var b [8]byte
-	for {
+	// a draw is rejected with probability below m/2^64, so a uniform source
+	// never comes near this many; a stuck one must not hold the client forever
+	for range maxDraws {
 		if _, err := io.ReadFull(rnd, b[:]); err != nil {
 			return 0, fmt.Errorf("client: random choice: %w", err)
 		}
@@ -69,4 +71,7 @@ func below(rnd io.Reader, m int) (int, error) {
 			return int(v % bound), nil
 		}
 	}
+	return 0, fmt.Errorf("%w: the random source gave no usable value in %d draws", ErrChoice, maxDraws)
 }
+
+const maxDraws = 128
