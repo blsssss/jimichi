@@ -2,7 +2,9 @@ package fetch
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -297,5 +299,110 @@ func TestURLOfAHostNearTheAddressLimit(t *testing.T) {
 	}
 	if want := "http://" + host + ":9100/descriptor"; got != want {
 		t.Fatalf("URL = %q, want %q", got, want)
+	}
+}
+
+// the signed bundle of a node enrolled under ca, for a day
+func signedBundle(t *testing.T, p jcrypto.CryptoProvider, ca *pki.CA, name, addr string) []byte {
+	t.Helper()
+	id, err := pki.NewIdentity(p, name, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(id.Close)
+	var nonce [pki.NonceSize]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := id.Request(nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := pki.ParseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	cert, err := ca.Issue(req, now, now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := id.Install(cert.Marshal(), now); err != nil {
+		t.Fatal(err)
+	}
+	priv, pub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv.Release()
+	id.SetKeys(pub, pub, 0)
+	if err := id.Refresh(now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	b, ok := id.Bundle()
+	if !ok {
+		t.Fatal("no bundle")
+	}
+	return b
+}
+
+// the roster a node accepts bounds how many bundles a mirror carries: 58 nodes
+// of the testbed form on c25519 and 57 on GOST (pki.TestRosterOfTheTestbedForm).
+// A mirror of that many signed bundles has to pass the client's limit with room
+// to spare, and one of five takes a few KiB of it
+func TestMirrorOfTheLargestRosterFitsTheLimit(t *testing.T) {
+	for _, c := range []struct {
+		suite jcrypto.Suite
+		nodes int
+	}{{jcrypto.SuiteC25519, 58}, {jcrypto.SuiteGOST, 57}} {
+		t.Run(c.suite.String(), func(t *testing.T) {
+			p, err := suite.New(c.suite)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ca, err := pki.NewCA(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ca.Close()
+			roster := pki.Roster{Anchor: ca.Anchor()}
+			entries := make([]pki.MirrorEntry, c.nodes)
+			for i := range entries {
+				name := fmt.Sprintf("relay-%d", i+1)
+				addr := name + ".jimichi.svc.cluster.local:9000"
+				roster.Nodes = append(roster.Nodes, pki.RosterNode{Name: name, Addr: addr})
+				entries[i] = pki.MirrorEntry{Addr: addr, Bundle: signedBundle(t, p, ca, name, addr)}
+				if len(entries[i].Bundle) > MaxBundle/8 {
+					t.Fatalf("bundle of %s takes %d bytes of the %d a node accepts from a peer", name, len(entries[i].Bundle), MaxBundle)
+				}
+			}
+			if size := len(roster.Marshal()); size > pki.MaxRoster {
+				t.Fatalf("the roster of %d nodes takes %d bytes, no node accepts it", c.nodes, size)
+			}
+			five, err := pki.MarshalMirror(entries[:5])
+			if err != nil {
+				t.Fatal(err)
+			}
+			full, err := pki.MarshalMirror(entries)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("mirror of 5 nodes %d bytes, of %d nodes %d bytes, limit %d", len(five), c.nodes, len(full), MaxMirror)
+			if len(five) > MaxMirror/32 || len(full) > MaxMirror/4 {
+				t.Fatalf("mirror of 5 nodes takes %d bytes and of %d nodes %d, want under %d and %d", len(five), c.nodes, len(full), MaxMirror/32, MaxMirror/4)
+			}
+
+			url, _ := serve(t, "/descriptors", func(_ int32, w http.ResponseWriter) { _, _ = w.Write(full) })
+			got, err := Mirror(NewClient(), url, 1, 0)
+			if err != nil || len(got) != c.nodes {
+				t.Fatalf("Mirror = %d entries, %v, want all %d", len(got), err, c.nodes)
+			}
+			policy := pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}
+			for _, e := range got {
+				if _, err := pki.Verify(p, policy, e.Addr, e.Bundle, time.Now()); err != nil {
+					t.Fatalf("bundle of %s does not verify after the fetch: %v", e.Addr, err)
+				}
+			}
+		})
 	}
 }

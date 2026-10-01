@@ -30,9 +30,33 @@ English | [Русский](../ru/LIMITATIONS.md)
   observer only. Its client takes the unverified keys of every hop from the entry alone, and a
   node serves them only when started with -advertise and -peers. It serves measurements on the
   testbed.
-- The entry serves the bundles of the whole chain. It cannot alter them, but it can withhold
-  them, which is a denial of service, and it sees when a client prepares a circuit: the request
-  for the descriptors precedes the setup.
+- The entry serves the bundles of the listed nodes it holds. It cannot alter them, but it can
+  withhold the mirror: the client then exits and draws another entry at its next start. It can
+  also leave out up to -missing listed nodes (one by default), and the chain is then drawn among
+  the rest. On the testbed (five nodes, chains of three, two rogue nodes) both ends of a chain
+  are rogue with probability 2/5 x 1/4 = 0.1 when no node is left out, and 2/5 x 1/3 = 2/15 when
+  a rogue entry leaves out one honest node: the exit is then drawn among three nodes, one of them
+  rogue. The entry also sees when a client prepares a circuit: the request for the descriptors
+  precedes the setup.
+- A node that withholds its descriptor from the others removes itself from their mirrors. When
+  more nodes do so than -missing allows, the mirrors of honest nodes no longer satisfy a client
+  and only the mirrors of the withholding nodes do, so -missing has to be at least the number of
+  nodes assumed to misbehave, and a larger value gives a rogue entry more room to steer. There is
+  no directory signed by several parties that would settle which nodes exist.
+- A node can serve a different validly signed onion key to each of the other nodes. The key that
+  opens a setup cell then tells it whose mirror the client used, so a rogue exit can learn the
+  entry of a circuit and with it the whole chain of three.
+- The node list of a client is static: there is no node discovery and no directory. The setup
+  cell bounds a chain at four hops on c25519 and three on GOST. The roster a node accepts bounds
+  the network: 4 KiB hold 58 nodes of the testbed address form on c25519 and 57 on GOST.
+- A node that refuses or breaks the circuits it does not like decides which chains survive: the
+  client draws a new chain after every failure and keeps no account of failures, so rogue nodes
+  can raise the share of surviving chains that run through them. This selective denial of
+  service is neither prevented nor measured.
+- There are no guard nodes: every circuit draws a fresh entry. One chain has a rogue entry and a
+  rogue exit with probability p = k(k-1)/(N(N-1)), 0.1 for two rogue nodes of five (EXPERIMENT,
+  block 3). Over c circuits with chains drawn independently the chance that at least one had
+  both is 1 - (1 - p)^c, which grows towards one with every restart of the client.
 - A node keeps a peer's descriptor until it expires. After a peer restarts, the mirror serves its
   previous bundle for up to the descriptor lifetime (20 min), and circuits through that peer fail
   at setup: the new process holds another link key and does not pass the link handshake. A
@@ -102,11 +126,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   builds circuits can fill the cache, each tag costing a TCP connection and a link handshake.
   This is a denial of service. At the default setup rate of 0.2 per second one address needs
   about 91 hours to fill the default 65536 tags, n addresses 91/n hours; within one rotation
-  period of the testbed that takes about 90 addresses. This estimate is for the entry. On the
-  testbed a forwarding node takes cells only from the previous relay where the cluster's network
-  plugin enforces network policies (in CI the e2e fails without it), so every setup that reaches
-  it has first spent a token at the entry; a node without per-address limits that anyone can
-  reach would be bounded only by how fast it completes handshakes.
+  period of the testbed that takes about 90 addresses. The estimate holds for every node, since
+  each keeps the per-address limits. On the testbed a cell port takes connections from client
+  and relay pods only, where the cluster's network plugin enforces network policies (in CI the
+  e2e fails without it).
 - A tag takes 16 bytes (about 36 bytes of heap) of ordinary node memory per opened control cell
   until its onion key is released, or until restart without rotation. It holds no key, but a
   memory dump gives an upper bound on the number of circuits set up under the keys the node
@@ -139,8 +162,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   counters line and in the client log.
 - Whoever holds the CA key, that is the operator or someone who stole it during issuance, can
   certify an identity of their own for any name and address and, with a position in the network,
-  substitute nodes. What that costs the properties of the system is yet to be
-  measured in the lab (experiment block 3). Past circuits stay closed to such a substitution.
+  substitute nodes. How often a uniformly drawn chain meets such nodes is computed and sampled
+  (EXPERIMENT, block 3); what they then learn from the traffic is yet to be measured in the lab.
+  Past circuits stay closed to such a substitution.
 - Nodes publish their descriptors themselves and there is no directory: a node can show
   different keys to different roster nodes, and so to the clients of different entries.
 - The clocks of nodes and clients must agree within 2 minutes (the Skew allowance). kind nodes run
@@ -157,15 +181,12 @@ English | [Русский](../ru/LIMITATIONS.md)
   is held at most until its deadline (2 s for a handshake), the idle timeout or the circuit
   lifetime runs out.
 - A node cannot tell a relay from a client, since the responder of a link does not authenticate
-  the initiator, and on a middle or exit node every circuit arrives from the previous relay's one
-  address. Per-address limits there would let one client use up the allowance of every circuit
-  through that pair of relays, so a node used as middle or exit runs without them and relies on
-  the global caps only;
-  a client that entered the chain at such a node would meet only the global caps as well. The
-  testbed keeps the per-address limits on the entry relay-1, turns them off on relay-2 and
-  relay-3, and lets only the previous relay reach their cell ports (network policy). This is a
-  property of the fixed testbed chain: with a random chain (planned) any relay can be an entry,
-  and a policy by position no longer applies.
+  the initiator, and any node can be an entry, so every node keeps the per-address limits. At a
+  middle or exit node every circuit that came through one relay arrives from that relay's one
+  address, and those circuits share one address's allowance: 32 links and 0.2 setups per second
+  with bursts of 10. One client can use it up for every other client whose chain crosses the
+  same two nodes in the same order. The testbed runs one client, so the allowance does not bind
+  there.
 - A circuit is torn down after the idle timeout and after its lifetime, and the client then builds
   a new one. The moment depends only on the node parameters and the last cell: with constant-rate
   sending a circuit is never idle, and the lifetime shows only the age of a circuit, which the
@@ -177,6 +198,8 @@ English | [Русский](../ru/LIMITATIONS.md)
   observer. The correlation attack in this work uses cells only, this signal is not measured.
 - The correlation attack runs in laboratory conditions where the true flow labels are known.
   Transferring the estimates to a real network requires care.
+- The correlation series run with as many nodes as hops, in a fixed order. The choice of the
+  chain is measured separately and without traffic (EXPERIMENT, block 3).
 - The dataset is synthetic: cover traffic is generated, not captured from real users.
 - Plausible deniability of the container breaks through the environment rather than the
   cryptography: filesystem journals, shadow copies, timestamps, and wear-leveling and TRIM on SSDs

@@ -1,59 +1,23 @@
-# the testbed chain is fixed, so each cell port takes connections only from the
-# hop before it; info stays open to the namespace: a client asks its entry
-# there for the descriptors, and every node asks the other nodes for theirs
+# a client draws its chain among all relays, so any relay may be an entry and
+# any relay may be the hop before another: a cell port takes connections from
+# client pods and from relay pods and from nothing else. info stays open to the
+# namespace: a client asks its entry there for the descriptors, and every node
+# asks the other nodes for theirs
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: relay-1
+  name: relay
   namespace: jimichi
 spec:
   podSelector:
-    matchLabels: {app: relay, hop: "1"}
+    matchLabels: {app: relay}
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector:
             matchLabels: {app: client}
-      ports:
-        - {protocol: TCP, port: 9000}
-    - from:
-        - podSelector: {}
-      ports:
-        - {protocol: TCP, port: 9100}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: relay-2
-  namespace: jimichi
-spec:
-  podSelector:
-    matchLabels: {app: relay, hop: "2"}
-  policyTypes: [Ingress]
-  ingress:
-    - from:
         - podSelector:
-            matchLabels: {app: relay, hop: "1"}
-      ports:
-        - {protocol: TCP, port: 9000}
-    - from:
-        - podSelector: {}
-      ports:
-        - {protocol: TCP, port: 9100}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: relay-3
-  namespace: jimichi
-spec:
-  podSelector:
-    matchLabels: {app: relay, hop: "3"}
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels: {app: relay, hop: "2"}
+            matchLabels: {app: relay}
       ports:
         - {protocol: TCP, port: 9000}
     - from:

@@ -7,15 +7,18 @@ set -euo pipefail
 
 STATS_PORT_BASE="${STATS_PORT_BASE:-19100}"
 
-for h in 1 2 3; do
-  port=$((STATS_PORT_BASE + h))
-  pod=$(current_pod "relay-$h")
+relay_list=$(relays)
+place=0
+for relay in $relay_list; do
+  place=$((place + 1))
+  port=$((STATS_PORT_BASE + place))
+  pod=$(current_pod "$relay")
   kubectl -n "$NAMESPACE" port-forward "pod/$pod" "$port:9101" >/dev/null 2>&1 &
   pid=$!
   for _ in $(seq 1 50); do
     curl -s "localhost:$port/stats" >/dev/null 2>&1 && break
     sleep 0.1
   done
-  printf 'relay-%s %s\n' "$h" "$(curl -s "localhost:$port/stats")"
+  printf '%s %s\n' "$relay" "$(curl -s "localhost:$port/stats")"
   kill "$pid" 2>/dev/null || true
 done

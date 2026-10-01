@@ -224,7 +224,7 @@ func (n *node) infoMux() http.Handler {
 		}
 		b, ok := c.descriptors()
 		if !ok {
-			http.Error(w, "no valid descriptor of every roster node", http.StatusServiceUnavailable)
+			http.Error(w, "no descriptors: the node has no descriptor of its own in service", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

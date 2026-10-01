@@ -839,6 +839,70 @@ func TestChainOnEverySuite(t *testing.T) {
 	}
 }
 
+// the longest chain one setup cell carries, four hops on c25519 and three on
+// GOST, makes a round trip, and one hop more is refused before anything is
+// dialled. Every hop takes a 16-byte tag from the 494-byte body and the
+// length takes two more: 428 bytes of payload on four hops, 444 on three
+func TestLongestChainOfEverySuite(t *testing.T) {
+	for _, c := range []struct {
+		suite   jcrypto.Suite
+		payload int
+	}{{jcrypto.SuiteC25519, 428}, {jcrypto.SuiteGOST, 444}} {
+		t.Run(c.suite.String(), func(t *testing.T) {
+			p, err := suite.New(c.suite)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hops, err := wire.MaxLayers(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nodes := make([]*node, hops+1)
+			for i := range nodes {
+				nodes[i] = startNode(t, p, func(_ uint64, payload []byte) []byte {
+					return append([]byte("echo:"), payload...)
+				})
+			}
+
+			cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(nodes[:hops]...)})
+			if err != nil {
+				t.Fatalf("Dial through %d hops: %v", hops, err)
+			}
+			defer cl.Close()
+			if err := cl.Send([]byte("ping")); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			select {
+			case reply := <-cl.Replies():
+				if string(reply) != "echo:ping" {
+					t.Fatalf("reply %q", reply)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("no reply came back through %d hops", hops)
+			}
+			if cl.MaxPayload() != c.payload {
+				t.Fatalf("payload limit %d on %d hops, want %d", cl.MaxPayload(), hops, c.payload)
+			}
+			// the setup cell and the message reached every hop, the exit alone delivered
+			for i, n := range nodes[:hops] {
+				s := n.r.Stats().Snapshot()
+				if exit := i == hops-1; s.Accepted != 2 || (s.Delivered == 1) != exit {
+					t.Fatalf("hop %d of %d: accepted %d cells, delivered %d", i, hops, s.Accepted, s.Delivered)
+				}
+			}
+
+			if _, err := client.Dial(client.Config{Provider: p, Chain: chainOf(nodes...)}); !errors.Is(err, wire.ErrSetupSize) {
+				t.Fatalf("Dial through %d hops: %v, want ErrSetupSize", hops+1, err)
+			}
+			for i, n := range nodes {
+				if s := n.r.Stats().Snapshot(); s.Accepted > 2 {
+					t.Fatalf("hop %d took %d cells, the refused chain reached it", i, s.Accepted)
+				}
+			}
+		})
+	}
+}
+
 // reports when the relay lets go of the link, which it does only after the
 // circuit has left its tables
 type closeSignal struct {

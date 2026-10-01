@@ -4,19 +4,26 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
+	"github.com/jimichi-org/jimichi/client"
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/suite"
 	"github.com/jimichi-org/jimichi/internal/fetch"
+	"github.com/jimichi-org/jimichi/link"
 	"github.com/jimichi-org/jimichi/pki"
 )
 
@@ -143,7 +150,7 @@ func TestResolveRefusesWhatDoesNotVerify(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolve: %v", err)
 			}
-			chain := chainOf(nodes)
+			chain := chainOf(nodes, []int{0, 1, 2})
 			for i, k := range []relayKeys{k1, k2, k3} {
 				if chain[i].Addr != k.addr || !bytes.Equal(chain[i].StaticPub, k.onion) || !bytes.Equal(chain[i].LinkPub, k.link) {
 					t.Fatalf("hop %d: %+v, want the onion key as StaticPub and the link key as LinkPub", i, chain[i])
@@ -244,33 +251,32 @@ type testbed struct {
 	addrs   []string
 	bundles [][]byte
 	info    []*infoServer
+	routes  map[string]string
 	web     *http.Client
 }
 
-// three enrolled nodes whose info ports the client reaches by the names in
-// their certificates
-func newTestbed(t *testing.T, s jcrypto.Suite) *testbed {
+// n enrolled nodes whose info ports the client reaches by the names in their
+// certificates
+func newTestbed(t *testing.T, s jcrypto.Suite, n int) *testbed {
 	t.Helper()
 	p := provider(t, s)
 	ca := newCA(t, p)
-	tb := &testbed{p: p, trust: pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}}
-	routes := make(map[string]string)
-	for _, name := range []string{"relay-1", "relay-2", "relay-3"} {
-		k, b := enrolled(t, p, ca, name, t0.Add(72*time.Hour))
+	tb := &testbed{p: p, trust: pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}, routes: make(map[string]string)}
+	for i := 1; i <= n; i++ {
+		k, b := enrolled(t, p, ca, fmt.Sprintf("relay-%d", i), t0.Add(72*time.Hour))
 		srv, at := serveInfo(t, b)
-		host, _, err := net.SplitHostPort(k.addr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		routes[net.JoinHostPort(host, "9100")] = at
+		tb.routes[infoAddr(t, k.addr)] = at
 		tb.keys = append(tb.keys, k)
 		tb.addrs = append(tb.addrs, k.addr)
 		tb.bundles = append(tb.bundles, b)
 		tb.info = append(tb.info, srv)
 	}
 	tb.web = fetch.NewClient()
+	// a kept connection would outlive the removal of its route, and whether it
+	// has gone idle by then is a race
+	tb.web.Transport.(*http.Transport).DisableKeepAlives = true
 	tb.web.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		to, ok := routes[addr]
+		to, ok := tb.routes[addr]
 		if !ok {
 			return nil, fmt.Errorf("no node at %s", addr)
 		}
@@ -278,6 +284,15 @@ func newTestbed(t *testing.T, s jcrypto.Suite) *testbed {
 		return d.DialContext(ctx, network, to)
 	}
 	return tb
+}
+
+func infoAddr(t *testing.T, addr string) string {
+	t.Helper()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return net.JoinHostPort(host, "9100")
 }
 
 func (tb *testbed) publish(t *testing.T, bundles [][]byte) {
@@ -288,20 +303,96 @@ func (tb *testbed) publish(t *testing.T, bundles [][]byte) {
 	}
 }
 
-func (tb *testbed) requests() [3]int32 {
-	return [3]int32{tb.info[0].requests.Load(), tb.info[1].requests.Load(), tb.info[2].requests.Load()}
+func (tb *testbed) requests() []int32 {
+	out := make([]int32, len(tb.info))
+	for i, srv := range tb.info {
+		out[i] = srv.requests.Load()
+	}
+	return out
+}
+
+func (tb *testbed) selection(hops int, rnd io.Reader) selection {
+	return selection{
+		addrs: tb.addrs, hops: hops, infoPort: "9100", auth: true, trust: tb.trust,
+		web: tb.web, attempts: 1, rnd: rnd,
+	}
+}
+
+// a stream of the given 64-bit values, one per draw
+func words(values ...uint64) *bytes.Reader {
+	b := make([]byte, 0, 8*len(values))
+	for _, v := range values {
+		b = binary.BigEndian.AppendUint64(b, v)
+	}
+	return bytes.NewReader(b)
+}
+
+// the chain a selection builds and the lines it logs on the way
+func build(s selection, p jcrypto.CryptoProvider) ([]client.Node, string, error) {
+	var out bytes.Buffer
+	chain, err := s.chain(p, log.New(&out, "", 0), t0)
+	return chain, out.String(), err
+}
+
+func namesAny(text string, addrs []string) bool {
+	for _, addr := range addrs {
+		host, _, _ := net.SplitHostPort(addr)
+		if strings.Contains(text, host) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestNodeListIsCheckedBeforeAnythingIsDrawn(t *testing.T) {
+	list := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = addrOf(fmt.Sprintf("relay-%d", i+1))
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name  string
+		suite jcrypto.Suite
+		addrs []string
+		hops  int
+		port  string
+		ok    bool
+	}{
+		{"three of five", jcrypto.SuiteC25519, list(5), 3, "9100", true},
+		{"as many hops as nodes", jcrypto.SuiteC25519, list(3), 3, "9100", true},
+		{"four hops fit a c25519 setup cell", jcrypto.SuiteC25519, list(5), 4, "9100", true},
+		{"five do not", jcrypto.SuiteC25519, list(5), 5, "9100", false},
+		{"three hops fit a gost setup cell", jcrypto.SuiteGOST, list(5), 3, "9100", true},
+		{"four do not", jcrypto.SuiteGOST, list(5), 4, "9100", false},
+		{"one hop", jcrypto.SuiteC25519, list(5), 1, "9100", true},
+		{"no hops", jcrypto.SuiteC25519, list(5), 0, "9100", false},
+		{"negative hops", jcrypto.SuiteC25519, list(5), -1, "9100", false},
+		{"fewer nodes than hops", jcrypto.SuiteC25519, list(2), 3, "9100", false},
+		{"no nodes", jcrypto.SuiteC25519, nil, 3, "9100", false},
+		{"a node listed twice", jcrypto.SuiteC25519, append(list(4), addrOf("relay-2")), 3, "9100", false},
+		{"a node without a port", jcrypto.SuiteC25519, append(list(4), "relay-9"), 3, "9100", false},
+		{"a node in upper case", jcrypto.SuiteC25519, append(list(4), "Relay-9:9000"), 3, "9100", false},
+		{"an info port that is a path", jcrypto.SuiteC25519, list(5), 3, "9100/x", false},
+	} {
+		err := checkNodes(provider(t, c.suite), c.addrs, c.hops, c.port)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: checkNodes = %v, want ok %v", c.name, err, c.ok)
+		}
+	}
 }
 
 func TestBundlesComeFromTheEntryOnly(t *testing.T) {
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(s.String(), func(t *testing.T) {
-			tb := newTestbed(t, s)
+			tb := newTestbed(t, s, 3)
 			tb.publish(t, tb.bundles)
 			tb.info[0].unready.Store(2)
 
-			bundles, err := chainBundles(tb.web, tb.addrs, "9100", 5, time.Millisecond)
+			bundles, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 5, time.Millisecond)
 			if err != nil {
-				t.Fatalf("chainBundles: %v", err)
+				t.Fatalf("nodeBundles: %v", err)
 			}
 			nodes, err := resolve(tb.p, true, tb.trust, tb.addrs, bundles, t0)
 			if err != nil {
@@ -309,82 +400,67 @@ func TestBundlesComeFromTheEntryOnly(t *testing.T) {
 			}
 			for i, k := range tb.keys {
 				if nodes[i].Addr != k.addr || !bytes.Equal(nodes[i].OnionPub, k.onion) || !bytes.Equal(nodes[i].LinkPub, k.link) {
-					t.Fatalf("hop %d: %+v, want the keys of %s", i, nodes[i], k.addr)
+					t.Fatalf("node %d: %+v, want the keys of %s", i, nodes[i], k.addr)
 				}
 			}
-			if got := tb.requests(); got != [3]int32{3, 0, 0} {
+			if got := tb.requests(); !slices.Equal(got, []int32{3, 0, 0}) {
 				t.Fatalf("requests per node %v, want two retries and the answer at the entry and none elsewhere", got)
 			}
 
-			// a shorter chain through the same entry takes its nodes from the same mirror
-			two := []string{tb.addrs[0], tb.addrs[2]}
-			bundles, err = chainBundles(tb.web, two, "9100", 1, 0)
-			if err != nil {
-				t.Fatalf("chainBundles: %v", err)
+			if _, err := nodeBundles(tb.web, tb.addrs, 2, "9100", 1, 0); err != nil {
+				t.Fatalf("nodeBundles: %v", err)
 			}
-			if !bytes.Equal(bundles[1], tb.bundles[2]) {
-				t.Fatal("the second hop got another node's bundle")
-			}
-			if _, err := resolve(tb.p, true, tb.trust, two, bundles, t0); err != nil {
-				t.Fatalf("resolve: %v", err)
+			if got := tb.requests(); !slices.Equal(got, []int32{3, 0, 1}) {
+				t.Fatalf("requests per node %v, want one more at the third node as the entry", got)
 			}
 		})
 	}
 }
 
-func TestEntryIsTheFirstNodeOfTheChain(t *testing.T) {
-	tb := newTestbed(t, jcrypto.SuiteC25519)
-	tb.publish(t, tb.bundles)
-	reversed := []string{tb.addrs[2], tb.addrs[1], tb.addrs[0]}
-	if _, err := chainBundles(tb.web, reversed, "9100", 1, 0); err != nil {
-		t.Fatalf("chainBundles: %v", err)
-	}
-	if got := tb.requests(); got != [3]int32{0, 0, 1} {
-		t.Fatalf("requests per node %v, want one at the first node of the chain", got)
-	}
-}
-
-func TestMissingNodeRefusesTheChain(t *testing.T) {
-	tb := newTestbed(t, jcrypto.SuiteC25519)
+func TestMissingNodeIsNotAskedItself(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
 	m := mirrorOf(t, tb.addrs[:2], tb.bundles[:2])
 	tb.info[0].mirror.Store(&m)
 
-	_, err := chainBundles(tb.web, tb.addrs, "9100", 3, time.Millisecond)
-	if !errors.Is(err, errNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[2]+": ") {
-		t.Fatalf("chainBundles = %v, want node %s: %v", err, tb.addrs[2], errNoBundle)
+	bundles, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 3, time.Millisecond)
+	if err != nil || len(bundles) != 3 || bundles[0] == nil || bundles[1] == nil || bundles[2] != nil {
+		t.Fatalf("nodeBundles = %d bundles, %v, want the two the entry serves and none for the third", len(bundles), err)
 	}
-	if got := tb.requests(); got != [3]int32{1, 0, 0} {
+	if got := tb.requests(); !slices.Equal(got, []int32{1, 0, 0}) {
 		t.Fatalf("requests per node %v, want one at the entry: a missing node is not asked itself", got)
+	}
+	// three nodes for three hops leave no node to spare, whatever -missing says
+	// 3 mod 3 = 0 draws the first node, whose mirror is the one set above
+	s := tb.selection(3, words(3))
+	s.missing = 1
+	if _, _, err := build(s, tb.p); !errors.Is(err, errTooFew) {
+		t.Fatalf("chain of three among two served nodes = %v, want %v", err, errTooFew)
 	}
 }
 
 func TestEntryWithoutDescriptorsRefusesTheChain(t *testing.T) {
-	tb := newTestbed(t, jcrypto.SuiteC25519)
-	_, err := chainBundles(tb.web, tb.addrs, "9100", 3, time.Millisecond)
-	if err == nil || !strings.HasPrefix(err.Error(), "node "+tb.addrs[0]+": ") {
-		t.Fatalf("chainBundles = %v, want an error naming the entry", err)
+	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
+	_, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 3, time.Millisecond)
+	var failed *entryError
+	var status *fetch.StatusError
+	if !errors.As(err, &failed) || !errors.As(err, &status) || status.Code != http.StatusServiceUnavailable {
+		t.Fatalf("nodeBundles = %v, want the entry's 503", err)
 	}
-	if got := tb.requests(); got != [3]int32{3, 0, 0} {
+	if got := tb.requests(); !slices.Equal(got, []int32{3, 0, 0}) {
 		t.Fatalf("requests per node %v, want three tries at the entry", got)
 	}
-	if _, err := chainBundles(tb.web, []string{"relay-1"}, "9100", 1, 0); err == nil {
-		t.Fatal("chainBundles accepted an entry address without a port")
+	if _, err := nodeBundles(tb.web, []string{"relay-1"}, 0, "9100", 1, 0); !errors.As(err, &failed) {
+		t.Fatalf("nodeBundles with an entry address without a port = %v, want a failure of the entry", err)
 	}
 }
 
 func TestTamperedMirrorRefusesTheChain(t *testing.T) {
-	tb := newTestbed(t, jcrypto.SuiteC25519)
+	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
 	_, foreign := enrolled(t, tb.p, newCA(t, tb.p), "relay-2", t0.Add(72*time.Hour))
 	unsigned, err := pki.Unsigned(tb.p, tb.keys[1].link, tb.keys[1].onion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := pki.ParseBundle(tb.bundles[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.Descriptor[len(b.Descriptor)-1] ^= 1
-	altered := b.Marshal()
 
 	for _, c := range []struct {
 		name   string
@@ -394,12 +470,12 @@ func TestTamperedMirrorRefusesTheChain(t *testing.T) {
 		{"node certified by another CA", foreign, pki.ErrUnknownCA},
 		{"bundle of another node", tb.bundles[2], pki.ErrWrongAddr},
 		{"unsigned bundle", unsigned, pki.ErrFormat},
-		{"descriptor signature altered", altered, pki.ErrDescSignature},
+		{"descriptor signature altered", altered(t, tb.bundles[1]), pki.ErrDescSignature},
 	} {
 		tb.publish(t, [][]byte{tb.bundles[0], c.second, tb.bundles[2]})
-		bundles, err := chainBundles(tb.web, tb.addrs, "9100", 1, 0)
+		bundles, err := nodeBundles(tb.web, tb.addrs, 0, "9100", 1, 0)
 		if err != nil {
-			t.Fatalf("%s: chainBundles: %v", c.name, err)
+			t.Fatalf("%s: nodeBundles: %v", c.name, err)
 		}
 		_, err = resolve(tb.p, true, tb.trust, tb.addrs, bundles, t0)
 		if !errors.Is(err, c.want) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") {
@@ -411,8 +487,19 @@ func TestTamperedMirrorRefusesTheChain(t *testing.T) {
 	}
 }
 
+// the bundle with one bit of its descriptor signature flipped
+func altered(t *testing.T, bundle []byte) []byte {
+	t.Helper()
+	b, err := pki.ParseBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Descriptor[len(b.Descriptor)-1] ^= 1
+	return b.Marshal()
+}
+
 func TestUnverifiedChainUsesTheSameMirror(t *testing.T) {
-	tb := newTestbed(t, jcrypto.SuiteC25519)
+	tb := newTestbed(t, jcrypto.SuiteC25519, 3)
 	unsigned := make([][]byte, 3)
 	for i, k := range tb.keys {
 		b, err := pki.Unsigned(tb.p, k.link, k.onion)
@@ -422,15 +509,329 @@ func TestUnverifiedChainUsesTheSameMirror(t *testing.T) {
 		unsigned[i] = b
 	}
 	tb.publish(t, unsigned)
-	bundles, err := chainBundles(tb.web, tb.addrs, "9100", 1, 0)
-	if err != nil {
-		t.Fatalf("chainBundles: %v", err)
+	s := tb.selection(3, words(7, 6, 5))
+	s.auth, s.trust = false, pki.Policy{}
+	// 7 mod 3 = 1 is the entry; 6 mod 2 = 0 takes node 0 of the others 0 2,
+	// and the last draw has one node left
+	chain, logged, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 || chain[0].Addr != tb.addrs[1] || chain[1].Addr != tb.addrs[0] || chain[2].Addr != tb.addrs[2] {
+		t.Fatalf("chain without auth = %v, %v, want nodes 1, 0, 2", chain, err)
 	}
-	nodes, err := resolve(tb.p, false, pki.Policy{}, tb.addrs, bundles, t0)
-	if err != nil || !bytes.Equal(nodes[2].OnionPub, tb.keys[2].onion) {
-		t.Fatalf("resolve without auth = %v, %v", nodes, err)
+	if !bytes.Equal(chain[2].StaticPub, tb.keys[2].onion) || logged != "" {
+		t.Fatalf("chain without auth lost the unsigned onion key or logged %q", logged)
 	}
-	if got := tb.requests(); got != [3]int32{1, 0, 0} {
+	if got := tb.requests(); !slices.Equal(got, []int32{0, 1, 0}) {
 		t.Fatalf("requests per node %v, want one at the entry", got)
+	}
+}
+
+// the draws are worked by hand in client.TestChooseKnownAnswer: among five
+// nodes the values 7, 6, 5 give the path 2, 3, 4, and a fourth hop on the value
+// 9 takes 9 mod 2 = 1, the second of the remaining nodes 0 1
+func TestDrawnChainAsksItsEntryAndVerifiesEveryListedNode(t *testing.T) {
+	for _, c := range []struct {
+		suite  jcrypto.Suite
+		stream []uint64
+		want   []int
+	}{
+		{jcrypto.SuiteC25519, []uint64{7, 6, 5}, []int{2, 3, 4}},
+		{jcrypto.SuiteGOST, []uint64{7, 6, 5}, []int{2, 3, 4}},
+		{jcrypto.SuiteC25519, []uint64{7, 6, 5, 9}, []int{2, 3, 4, 1}},
+		{jcrypto.SuiteC25519, []uint64{6}, []int{1}},
+	} {
+		t.Run(fmt.Sprintf("%s-%d", c.suite, len(c.want)), func(t *testing.T) {
+			tb := newTestbed(t, c.suite, 5)
+			tb.publish(t, tb.bundles)
+			stream := words(c.stream...)
+			chain, logged, err := build(tb.selection(len(c.want), stream), tb.p)
+			if err != nil {
+				t.Fatalf("chain: %v", err)
+			}
+			if len(chain) != len(c.want) || stream.Len() != 0 {
+				t.Fatalf("chain of %d hops with %d bytes of the stream left, want %d and 0", len(chain), stream.Len(), len(c.want))
+			}
+			for i, node := range c.want {
+				k := tb.keys[node]
+				if chain[i].Addr != k.addr || !bytes.Equal(chain[i].StaticPub, k.onion) || !bytes.Equal(chain[i].LinkPub, k.link) {
+					t.Fatalf("hop %d: %+v, want the keys of node %d, %s", i, chain[i], node, k.addr)
+				}
+			}
+			asked := make([]int32, 5)
+			asked[c.want[0]] = 1
+			if got := tb.requests(); !slices.Equal(got, asked) {
+				t.Fatalf("requests per node %v, want one at the entry, node %d, and none elsewhere", got, c.want[0])
+			}
+			lines := strings.Split(strings.TrimSuffix(logged, "\n"), "\n")
+			if len(lines) != 6 || lines[5] != "5 of 5 listed nodes verified" {
+				t.Fatalf("%d lines logged, want one per listed node and their count:\n%s", len(lines), logged)
+			}
+			if strings.Contains(logged, "descriptor until") {
+				t.Fatalf("a drawn chain logs descriptor times, and the entry's own is the freshest:\n%s", logged)
+			}
+			for i, line := range lines[:5] {
+				if !strings.HasPrefix(line, fmt.Sprintf("node relay-%d identity=", i+1)) {
+					t.Fatalf("line %d is %q, want the listed order", i, line)
+				}
+			}
+		})
+	}
+}
+
+// 6, 4, 3: the entry is 6 mod 5 = 1 of the others 0 2 3 4, then 4 mod 4 = 0
+// takes node 0 and 3 mod 3 = 0 takes node 2
+func TestLogIsTheSameWhateverThePath(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	tb.publish(t, tb.bundles)
+	first, logFirst, err := build(tb.selection(3, words(7, 6, 5)), tb.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, logSecond, err := build(tb.selection(3, words(6, 4, 3)), tb.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, node := range []int{1, 0, 2} {
+		if second[i].Addr != tb.addrs[node] {
+			t.Fatalf("hop %d of the second chain is %s, want node %d", i, second[i].Addr, node)
+		}
+	}
+	if first[0].Addr == second[0].Addr {
+		t.Fatal("both chains start at one entry, the comparison shows nothing")
+	}
+	if logFirst != logSecond {
+		t.Fatalf("the log depends on the path:\n%s\n%s", logFirst, logSecond)
+	}
+}
+
+func TestNodeOffThePathStillRefusesTheChain(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+
+	bad := slices.Clone(tb.bundles)
+	bad[0] = altered(t, tb.bundles[0])
+	tb.publish(t, bad)
+	chain, _, err := build(tb.selection(3, words(7, 6, 5)), tb.p)
+	if !errors.Is(err, pki.ErrDescSignature) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[0]+": ") || chain != nil {
+		t.Fatalf("chain = %v, %v, want node %s: %v though the path 2, 3, 4 does not hold it", chain, err, tb.addrs[0], pki.ErrDescSignature)
+	}
+
+	bad = slices.Clone(tb.bundles)
+	bad[4] = altered(t, tb.bundles[4])
+	tb.publish(t, bad)
+	s := tb.selection(3, nil)
+	s.fixed = true
+	chain, _, err = build(s, tb.p)
+	if !errors.Is(err, pki.ErrDescSignature) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[4]+": ") || chain != nil {
+		t.Fatalf("fixed chain = %v, %v, want node %s: %v though the chain ends at the third node", chain, err, tb.addrs[4], pki.ErrDescSignature)
+	}
+
+	// a node the entry leaves out is another matter than one it serves wrongly:
+	// without -missing it refuses as well, and the text names no node
+	m := mirrorOf(t, tb.addrs[1:], tb.bundles[1:])
+	tb.info[2].mirror.Store(&m)
+	chain, _, err = build(tb.selection(3, words(7, 6, 5)), tb.p)
+	if !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) || chain != nil {
+		t.Fatalf("chain = %v, %v, want %v naming no node", chain, err, errTooFew)
+	}
+}
+
+// the entry may leave out as many nodes as -missing allows; the chain is then
+// drawn among the nodes it serves, so a node left out is on no chain
+func TestEntryMayLeaveOutABoundedNumberOfNodes(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	one := mirrorOf(t, tb.addrs[1:], tb.bundles[1:])
+	for i := range tb.info {
+		tb.info[i].mirror.Store(&one)
+	}
+
+	// 7 mod 5 = 2 is the entry, second of the served nodes 1 2 3 4; among the
+	// others 1 3 4, 6 mod 3 = 0 takes node 1 and 5 mod 2 = 1 takes node 4
+	s := tb.selection(3, words(7, 6, 5))
+	s.missing = 1
+	chain, logged, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 || chain[0].Addr != tb.addrs[2] || chain[1].Addr != tb.addrs[1] || chain[2].Addr != tb.addrs[4] {
+		t.Fatalf("chain with one node left out = %v, %v, want nodes 2, 1, 4", chain, err)
+	}
+	if !strings.HasSuffix(logged, "4 of 5 listed nodes verified\n") {
+		t.Fatalf("log: %s", logged)
+	}
+	for i := 0; i < 200; i++ {
+		s := tb.selection(3, rand.Reader)
+		s.missing = 1
+		chain, _, err := build(s, tb.p)
+		if err != nil {
+			// node 0 was drawn as the entry and its mirror does not hold itself
+			if !errors.Is(err, errNoBundle) || namesAny(err.Error(), tb.addrs) {
+				t.Fatalf("draw %d: %v", i, err)
+			}
+			continue
+		}
+		for _, hop := range chain {
+			if hop.Addr == tb.addrs[0] {
+				t.Fatalf("draw %d: the node left out is on the chain %v", i, chain)
+			}
+		}
+	}
+
+	two := mirrorOf(t, tb.addrs[2:], tb.bundles[2:])
+	for i := range tb.info {
+		tb.info[i].mirror.Store(&two)
+	}
+	s = tb.selection(3, words(7, 6, 5))
+	s.missing = 1
+	if _, _, err := build(s, tb.p); !errors.Is(err, errTooFew) || namesAny(err.Error(), tb.addrs) {
+		t.Fatalf("two nodes left out with -missing 1 = %v, want %v naming no node", err, errTooFew)
+	}
+	s = tb.selection(3, words(7, 6, 5))
+	s.missing = 2
+	chain, _, err = build(s, tb.p)
+	if err != nil || len(chain) != 3 {
+		t.Fatalf("two nodes left out with -missing 2 = %v, %v", chain, err)
+	}
+	// five nodes for three hops spare two, so a larger -missing allows no more
+	three := mirrorOf(t, tb.addrs[3:], tb.bundles[3:])
+	tb.info[3].mirror.Store(&three)
+	s = tb.selection(3, words(3, 0, 0))
+	s.missing = 4
+	if _, _, err := build(s, tb.p); !errors.Is(err, errTooFew) {
+		t.Fatalf("three nodes left out = %v, want %v", err, errTooFew)
+	}
+}
+
+func TestBundleServedWronglyIsNotANodeLeftOut(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	bad := slices.Clone(tb.bundles)
+	bad[0] = altered(t, tb.bundles[0])
+	tb.publish(t, bad)
+	s := tb.selection(3, words(7, 6, 5))
+	s.missing = 2
+	chain, _, err := build(s, tb.p)
+	if !errors.Is(err, pki.ErrDescSignature) || chain != nil {
+		t.Fatalf("chain = %v, %v, want %v: -missing covers absent nodes only", chain, err, pki.ErrDescSignature)
+	}
+}
+
+func TestFixedChainNeedsItsOwnNodesOnly(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	m := mirrorOf(t, tb.addrs[:4], tb.bundles[:4])
+	tb.info[0].mirror.Store(&m)
+	s := tb.selection(3, nil)
+	s.fixed = true
+	chain, _, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 || chain[2].Addr != tb.addrs[2] {
+		t.Fatalf("fixed chain with a node off it left out = %v, %v", chain, err)
+	}
+
+	m = mirrorOf(t, []string{tb.addrs[0], tb.addrs[2], tb.addrs[3], tb.addrs[4]}, [][]byte{tb.bundles[0], tb.bundles[2], tb.bundles[3], tb.bundles[4]})
+	tb.info[0].mirror.Store(&m)
+	s = tb.selection(3, nil)
+	s.fixed, s.missing = true, 2
+	chain, _, err = build(s, tb.p)
+	if !errors.Is(err, errNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") || chain != nil {
+		t.Fatalf("fixed chain with its second node left out = %v, %v, want node %s: %v", chain, err, tb.addrs[1], errNoBundle)
+	}
+}
+
+func TestFixedChainKeepsTheListedOrder(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	tb.publish(t, tb.bundles)
+	s := tb.selection(3, iotest.ErrReader(errors.New("a fixed chain draws nothing")))
+	s.fixed = true
+	chain, logged, err := build(s, tb.p)
+	if err != nil || len(chain) != 3 {
+		t.Fatalf("fixed chain = %v, %v", chain, err)
+	}
+	for i := range chain {
+		if chain[i].Addr != tb.addrs[i] || !bytes.Equal(chain[i].StaticPub, tb.keys[i].onion) {
+			t.Fatalf("hop %d is %s, want the listed node %s", i, chain[i].Addr, tb.addrs[i])
+		}
+	}
+	if got := tb.requests(); !slices.Equal(got, []int32{1, 0, 0, 0, 0}) {
+		t.Fatalf("requests per node %v, want one at the first listed node", got)
+	}
+	if strings.Count(logged, "\n") != 6 || strings.Count(logged, "descriptor until") != 5 {
+		t.Fatalf("a fixed chain verifies every listed node as well, logged:\n%s", logged)
+	}
+}
+
+func TestStreamThatEndsGivesNoChain(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+	tb.publish(t, tb.bundles)
+	chain, _, err := build(tb.selection(3, words()), tb.p)
+	if err == nil || chain != nil {
+		t.Fatalf("chain without an entry draw = %v, %v", chain, err)
+	}
+	if got := tb.requests(); !slices.Equal(got, make([]int32, 5)) {
+		t.Fatalf("requests per node %v, want none before the entry is drawn", got)
+	}
+	chain, _, err = build(tb.selection(3, words(7, 6)), tb.p)
+	if !errors.Is(err, io.EOF) || chain != nil {
+		t.Fatalf("chain with the last draw missing = %v, %v, want io.EOF and no chain", chain, err)
+	}
+}
+
+func TestFailureOfTheEntryDoesNotNameIt(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
+
+	_, logged, err := build(tb.selection(3, words(7, 6, 5)), tb.p)
+	const unpublished = "the entry: no descriptors published, the node has no descriptor of its own in service"
+	if err == nil || err.Error() != unpublished || logged != "" {
+		t.Fatalf("chain = %v with the log %q, want %q and no line", err, logged, unpublished)
+	}
+
+	delete(tb.routes, infoAddr(t, tb.addrs[2]))
+	tb.web.CloseIdleConnections()
+	_, logged, err = build(tb.selection(3, words(7, 6, 5)), tb.p)
+	if err == nil || err.Error() != "the entry: connection failed" || logged != "" {
+		t.Fatalf("chain = %v with the log %q, want the entry: connection failed", err, logged)
+	}
+
+	big := bytes.Repeat([]byte{' '}, fetch.MaxMirror+1)
+	tb.info[1].mirror.Store(&big)
+	_, _, err = build(tb.selection(3, words(6, 4, 3)), tb.p)
+	if err == nil || err.Error() != "the entry: "+fetch.ErrTooLarge.Error() || namesAny(err.Error(), tb.addrs) {
+		t.Fatalf("chain = %v, want the entry: %v", err, fetch.ErrTooLarge)
+	}
+
+	s := tb.selection(3, nil)
+	s.fixed = true
+	_, _, err = build(s, tb.p)
+	if err == nil || !strings.HasPrefix(err.Error(), "node "+tb.addrs[0]+": ") {
+		t.Fatalf("fixed chain = %v, want the first listed node named", err)
+	}
+}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
+
+func TestFailureClassNamesNoAddress(t *testing.T) {
+	entry := &net.TCPAddr{IP: net.IPv4(10, 96, 0, 7), Port: 9000}
+	refused := &net.OpError{Op: "dial", Net: "tcp", Addr: entry, Err: errors.New("connect: connection refused")}
+	timedOut := &net.OpError{Op: "read", Net: "tcp", Addr: entry, Err: timeoutError{}}
+	lookup := &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "relay-3.jimichi.svc.cluster.local", IsNotFound: true}}
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{refused, "connection failed"},
+		{lookup, "connection failed"},
+		{timedOut, "timed out"},
+		{fmt.Errorf("dial: %w", context.DeadlineExceeded), "timed out"},
+		{fmt.Errorf("%w: %w", link.ErrHandshake, timedOut), link.ErrHandshake.Error()},
+		{fmt.Errorf("%w: node %s", client.ErrNodeKey, "relay-3.jimichi.svc.cluster.local:9000"), client.ErrNodeKey.Error()},
+		{fmt.Errorf("%w of %d bytes", fetch.ErrTooLarge, fetch.MaxMirror), fetch.ErrTooLarge.Error()},
+		{&fetch.StatusError{Code: http.StatusNotFound}, "request answered status 404"},
+		{pki.ErrFormat, pki.ErrFormat.Error()},
+		{errors.New("write tcp 10.244.0.9:51234->10.96.0.7:9000: broken pipe"), "connection failed"},
+	} {
+		drawn := selection{}.cause(c.err)
+		if drawn != c.want || strings.Contains(drawn, "10.") || strings.Contains(drawn, "relay-") {
+			t.Errorf("cause of %q with a drawn chain is %q, want %q", c.err, drawn, c.want)
+		}
+		if fixed := (selection{fixed: true}).cause(c.err); fixed != c.err.Error() {
+			t.Errorf("cause of %q with a fixed chain is %q, want the error itself", c.err, fixed)
+		}
 	}
 }

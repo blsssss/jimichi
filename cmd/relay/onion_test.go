@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -392,8 +393,8 @@ func TestMirroredBundleOfTheReplacedKeyStaysUsable(t *testing.T) {
 			}
 
 			step(time.Second)
-			if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
-				t.Fatalf("GET /descriptors once the held bundle expired = %d, want 503", code)
+			if listed := n1.mirrored(t); len(listed) == 0 || slices.Contains(listed, n2.n.addr) {
+				t.Fatalf("GET /descriptors once the held bundle expired lists %v, want the mirror without relay-2", listed)
 			}
 			if err := n2.verifyAt(held, c.clock.Now()); !errors.Is(err, pki.ErrDescTime) {
 				t.Fatalf("the held bundle at its expiry = %v, want %v", err, pki.ErrDescTime)

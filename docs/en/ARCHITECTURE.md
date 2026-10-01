@@ -4,15 +4,15 @@ English | [Русский](../ru/ARCHITECTURE.md)
 
 ## What the system is
 
-Messages travel through a chain of three relay nodes under nested encryption. No node knows both
-the sender and the recipient, key material exists only in the node's memory, and every cell is
-the same size.
+Messages travel through a chain of relay nodes under nested encryption. The client draws the
+chain, three nodes by default, at random from a list of nodes. No node knows both the sender and
+the recipient, key material exists only in the node's memory, and every cell is the same size.
 
 ## Components
 
 | Component | Purpose |
 |---|---|
-| client | builds the circuit, encrypts the layers, sends payload and cover cells, receives replies |
+| client | draws the chain, builds the circuit, encrypts the layers, sends payload and cover cells, receives replies |
 | relay | strips its own layer and forwards; writes nothing to disk |
 | crypto | CryptoProvider: two primitive suites behind one interface |
 | crypto/secmem | key buffers outside the Go heap: mlock, no dumps, zeroed on release |
@@ -24,20 +24,56 @@ the same size.
 ## Message flow
 
 ```
-client-a -> relay-1 -> relay-2 -> relay-3 -> client-b
+client-a -> entry -> middle -> exit -> client-b
 ```
 
-1. The client obtains the signed bundles of the three chain nodes from its entry node, the only
-   node it connects to. A bundle is the node's certificate from the CA and a descriptor with the
-   node keys, signed by the node signing key.
-2. Before the circuit setup the client checks every bundle against the trust anchor (section
-   "Node authentication"). If any node fails the check, the client refuses to build the circuit.
-   It then agrees an ephemeral session key with each node separately.
-3. The client wraps the message in three layers: the outer one for relay-1, the inner one for
-   relay-3.
-4. Each node strips exactly its own layer and learns only the next hop.
-5. Session keys live until the circuit is torn down, and their buffers are then zeroed. Copies the
+1. The client holds a list of N nodes and the length of the chain, three by default. It draws
+   its entry uniformly among the N nodes.
+2. It obtains the signed bundles of all N nodes from the entry, the only node it connects to. A
+   bundle is the node's certificate from the CA and a descriptor with the node keys, signed by
+   the node signing key.
+3. Before the circuit setup the client checks every bundle against the trust anchor (section
+   "Node authentication"). If any listed node fails the check, the client refuses to build the
+   circuit.
+4. It draws the other nodes of the chain uniformly among the remaining N-1 nodes (section "Choice
+   of the chain") and agrees an ephemeral session key with each node of the chain separately.
+5. The client wraps the message in one layer per node: the outer one for the entry, the inner one
+   for the exit.
+6. Each node strips exactly its own layer and learns only the next hop.
+7. Session keys live until the circuit is torn down, and their buffers are then zeroed. Copies the
    libraries keep are described in CRYPTO.
+
+## Choice of the chain
+
+- The node list (-nodes) is static: N addresses, N not less than the length of the chain. There
+  is no node discovery. The length of the chain (-hops) is 3 by default and at most what one
+  setup cell carries: 4 on c25519, 3 on GOST (section "Cell format").
+- The list is checked at start, before any request and before anything is drawn: an address that
+  is malformed or listed twice, fewer nodes than hops, or more hops than the setup cell carries
+  stop the client.
+- The entry is drawn uniformly among the N nodes. The other hops are drawn once the bundles of
+  all N nodes have passed the check: uniformly and without replacement among the other N-1
+  nodes, in the order of the chain (the first steps of a Fisher-Yates shuffle). Every ordered
+  chain of distinct nodes is equally likely; three hops among five nodes give 60 of them.
+- The randomness comes from the system generator (crypto/rand). A draw among m nodes reads 64
+  bits, throws the value away and reads again while it is below 2^64 mod m, and only then
+  reduces it modulo m: without that the low remainders would come up more often.
+- The request to the entry does not depend on the rest of the chain: the client asks for the one
+  mirror and checks the bundles of all N nodes, not only of the nodes it will use. A node that
+  is missing or fails the check refuses the circuit whichever chain would have been drawn.
+- Any failure ends the process: an entry that does not answer, a mirror without a listed node, a
+  bundle that fails the check, a setup that fails. The orchestrator restarts the client, and the
+  new process draws a new entry. Within one run the client does not move on to another entry.
+- The client logs neither the chain nor any node of it. Its log holds the fingerprint and
+  validity of every listed node, in the listed order, and one line with the number of hops and
+  of listed nodes. A failed request to the entry and a failure on the circuit are logged by
+  class only (a status code, the size limit, a failed handshake, a timeout, a failed
+  connection): the error itself names the address of the entry.
+- -fixed-chain takes the first -hops nodes of the list in the listed order, the first of them as
+  the entry, and draws nothing. Every listed node is still checked, and errors name the entry in
+  full. It serves measurements that need a known path. The lab harness builds its chain itself,
+  in a fixed order.
+- With N equal to the length of the chain the chain is a random permutation of the list.
 
 ## Cell format
 
@@ -49,7 +85,7 @@ Every cell is 512 bytes, payload and cover cells alike.
 | kind | 1 | data, control, link padding |
 | circuit | 8 | circuit identifier, different on every link |
 | counter | 8 | cell number on the link, the source of the nonce and of replay protection; a value of its own on every link |
-| body | 494 | layers: three 16-byte tags, the length prefix and the payload |
+| body | 494 | layers: a 16-byte tag per hop, the length prefix and the payload |
 
 - The nonce never travels: it is derived from the direction, the circuit identifier and the
   counter. A key belongs to one hop of one circuit, so the pair never repeats under it.
@@ -72,9 +108,10 @@ Every cell is 512 bytes, payload and cover cells alike.
   layer, in the top bit of the length field, where only the exit sees it. Nodes on the way,
   including the entry that knows the client, cannot tell a cover cell from a payload cell.
 - Inside the innermost layer: two bytes of length, the data, random padding. Three hops leave 444
-  bytes for a message, in both suites.
+  bytes for a message, in both suites; four hops, on c25519 only, leave 428.
 - The setup cell holds four hops on c25519 and three on GOST: a GOST public key is 64 bytes
-  against 32, and every setup layer grows by the difference.
+  against 32, and every setup layer grows by the difference. This bounds the length of a chain,
+  and the client checks -hops against it at start.
 - Counters on every link follow strictly one after another: a node accepts a cell only if its
   counter is one above the last one accepted, modulo 2^62. Every node except the exit takes the
   first value in each direction as it comes, since it depends on the offsets of the other nodes.
@@ -286,8 +323,8 @@ Circuit teardown:
   lifetime, is torn down by closing its inbound link and counted with the expired circuits, not
   with the closed ones. Link padding does not count as traffic.
 - Circuit keys are released once every goroutine using them has stopped.
-- The client sees the break as its reply channel closing and exits. The orchestrator restarts it
-  on a new circuit.
+- The client sees the break as its reply channel closing and exits. The orchestrator restarts
+  it, and it draws a new chain.
 
 ## Node limits
 
@@ -320,11 +357,11 @@ shared cap is off, unless it is set to -1 itself.
 - Every connection costs its address a token of the link rate, admitted or refused, and the limits
   of one address are checked before the shared ones: retrying against a full node spends the
   address's own allowance and leaves the shared slots to others.
-- On the testbed the per-address limits are on at the entry relay-1 and off on relay-2 and
-  relay-3, where every circuit arrives from the previous relay's one address (LIMITATIONS). A
-  network policy (deploy/base/network.yaml) lets only client pods reach the cell port of relay-1
-  and only the previous relay reach that of relay-2 and relay-3; the info port stays open to the
-  namespace.
+- Any node can be an entry, so every node of the testbed keeps the per-address limits at their
+  defaults. A node that forwards for many clients is one address at the next node, and the
+  circuits it forwards share one address's allowance there (LIMITATIONS). A network policy
+  (deploy/base/network.yaml) lets the pods of clients and of relays reach the cell port of every
+  relay and no other pod; the info port stays open to the namespace.
 - One address is an IPv4 address or an IPv6 /64 prefix. The table of addresses lives only in
   memory, holds at most 16384 of them and forgets an address once it has no open links and its
   buckets have refilled. A new address past the bound is refused and counted with the per-address
@@ -414,6 +451,10 @@ transmitted.
 - The descriptor mirror: JSON `[{"addr":"<host:port>","bundle":{...}},...]`, sorted by address,
   every bundle in its own canonical spelling; parsing accepts only that. The mirror carries no
   signature of its own: each bundle in it is verified like any other.
+- The roster limit bounds the number of nodes: 4 KiB hold 58 nodes with names and addresses of
+  the testbed form (relay-N, relay-N.jimichi.svc.cluster.local:9000) on c25519 and 57 on GOST.
+  The mirror of five nodes takes about 3 KiB on c25519 and 3.6 KiB on GOST, the mirror of the
+  largest roster about 35 and 41 KiB, against the 256 KiB a client accepts.
 
 Validity:
 
@@ -441,8 +482,9 @@ The first failure stops the check; every check after parsing has its own error:
 8. descriptor validity, expires <= not_after, lifetime at most 24 h (ErrDescTime);
 9. the link and onion keys have the length of the suite's agreement key (ErrKeySize).
 
-- pki.VerifyChain runs this check for every node of the chain and requires addresses, signing keys
-  and onion keys to be pairwise distinct (ErrDuplicate).
+- pki.VerifyChain runs this check for every node it is given, for a client every listed node and
+  for enroll every node of the roster, and requires addresses, signing keys and onion keys to be
+  pairwise distinct (ErrDuplicate).
 - pki.Unverified reads the same bundles checking only format, suite, key length and repeats, with
   no signatures, validity or addresses. It is the baseline for measuring what authentication is
   worth. It also rejects repeated addresses and onion keys (ErrDuplicate), so when several nodes
@@ -455,16 +497,20 @@ The first failure stops the check; every check after parsing has its own error:
 
 - Before any network request: with -auth (the default) an empty -ca is fatal, and the anchor
   suite must equal -suite.
-- The client requests /descriptors from its entry, the first node of -nodes, and from no other
-  node: a 5 s timeout per request and a 256 KiB limit, retrying up to 30 times 1 s apart only on
-  a connection error or a 503 answer; decoding is strict. A chain node with no bundle in the
-  answer stops the client with
+- The client requests /descriptors from its entry, the node it drew first (with -fixed-chain the
+  first node of -nodes), and from no other node: a 5 s timeout per request and a 256 KiB limit,
+  retrying up to 30 times 1 s apart only on a connection error or a 503 answer; decoding is
+  strict. A request that fails stops the client with
+  `refusing to build the circuit: the entry: <class>`, with -fixed-chain with
+  `refusing to build the circuit: node <address>: <error>`. A listed node with no bundle in the
+  answer stops it with
   `refusing to build the circuit: node <address>: the entry holds no bundle for it`.
-- pki.VerifyChain checks every node of the chain. On the first error the client exits with
+- pki.VerifyChain checks every listed node, in the listed order, whether the chain will hold it
+  or not. On the first error the client exits with
   `refusing to build the circuit: node <address>: <reason>`, or, when a node repeats, with
   `refusing to build the circuit: nodes <address> and <address>: pki: node repeated in the chain`.
-  There is no fallback to unverified keys and no partial chain. On success it logs one line per
-  node: the signing key fingerprint and the certificate and descriptor validity.
+  There is no fallback to unverified keys and no partial list. On success it logs one line per
+  listed node: the signing key fingerprint and the certificate and descriptor validity.
 - The onion key from the descriptor goes into circuit setup, the entry node's link key into
   link.Dial. client.Dial refuses a node with an empty key or a key of the wrong size: an empty
   link key would make the link to the entry anonymous.
@@ -477,7 +523,8 @@ The first failure stops the check; every check after parsing has its own error:
 ### Certificate issuance
 
 Certificates are issued by `jimichi enroll` (cmd/jimichi) outside the cluster: on the operator's
-machine or the CI runner. scripts/enroll.sh runs it for every node of the testbed.
+machine or the CI runner. scripts/enroll.sh runs it for every relay of the testbed, which it
+finds by the label of their deployments (app=relay).
 
 1. The operator passes a roster: for each node the name and address for its certificate, two
    local addresses that reach the node's admin port and descriptor port, and the hash of the
@@ -566,8 +613,14 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
   -auth extends nowhere until its roster arrives.
 - GET /descriptors on the info port is the mirror: the node's own bundle and the cached
   bundles of its roster peers. It is encoded when the cache is refreshed and when the node signs
-  its own descriptor; a request copies ready bytes. The answer is 503 until the node holds a
-  valid bundle of every roster node, and again from the moment one of them expires.
+  its own descriptor; a request copies ready bytes. The mirror lists what the node holds: a peer
+  whose bundle it does not hold, or whose bundle has expired, is left out. The answer is 503 only
+  while the node has no descriptor of its own in service.
+- The client (-missing, 1 by default, at most the listed nodes beyond -hops) accepts a mirror that
+  lists the entry itself and all but that many listed nodes, verifies every bundle the mirror
+  does list, and draws the other hops among those nodes. A bundle that is listed and fails the
+  check refuses the circuit; it is never treated as a node left out. A fixed chain needs the
+  bundles of its own nodes.
 - A cached bundle may name an onion key its node has already replaced. The node holds that key
   until the bundle has expired (section "Circuit setup", onion key epochs), so a client that
   takes the bundle from the mirror still builds its circuit.
@@ -578,11 +631,11 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
   together with the unsigned bundles of the nodes named in -peers, read without verification,
   and extends circuits to any address. Without -advertise it answers /descriptors with 503 and
   names the two flags.
-- scripts/e2e.sh checks that clients ask the entry alone. It waits until two passes in a row
-  show every node with both peers and relay-2 and relay-3 with unchanged counts, then runs the
-  clients. It requires that relay-1 has answered more requests for the mirror after client-a
-  and again after the client with the foreign anchor, that mirror_requests of relay-2 and
-  relay-3 is still 0 and that their descriptor_requests has not changed.
+- scripts/e2e.sh checks that a client asks its entry alone. It waits until two passes in a row
+  show every relay with all its roster peers and unchanged counts of descriptor_requests, then
+  runs the clients. Between two readings of the counters mirror_requests must have grown at one
+  relay per start of a client, first client-a and then the client with the foreign anchor, and
+  at no other relay; descriptor_requests of every relay must be what it was before the clients.
 
 ### Key lifetime and revocation
 
@@ -626,7 +679,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 
 | Source | Data |
 |---|---|
-| client | send and receive timestamps per cell, losses, flow identifier; at start the fingerprint and validity of every verified node |
+| client | send and receive timestamps per cell, losses, flow identifier; at start the fingerprint and validity of every listed node, in the listed order, and the number of hops; never the chain or a node of it |
 | relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), the epoch of the onion key and the failed attempts to rotate it (onion_epoch, onion_rotate_failed). No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
 | network | traffic captures at the entry and the exit for the correlation attack |
 | memory | dumps of the relay process in the key extraction scenario |
@@ -658,7 +711,7 @@ adversary with several snapshots) are stated in LIMITATIONS.
 | pki | certificate, descriptor and request of a node, roster and mirror formats, issuing and checking | crypto, crypto/secmem, wire |
 | internal/fetch | reading bundles and the mirror from an info port | pki |
 | relay | relay node, sending on its own clock | crypto, crypto/secmem, link, wire |
-| client | send, receive, cover traffic | crypto, crypto/secmem, link, wire |
+| client | choice of the chain, send, receive, cover traffic | crypto, crypto/secmem, link, wire |
 | vault | container with two volumes | crypto, crypto/secmem |
 | lab/* | scenarios, observer, metrics, reports | client, relay, link, crypto/suite |
 | web | testbed dashboard | lab |
@@ -672,9 +725,10 @@ on the system, not the other way round.
 
 - deploy/kind: kind cluster configurations, cluster.yaml for the testbed (a control plane and two
   workers) and ci.yaml for CI (a single node).
-- deploy/base: the jimichi namespace, three relays with their Services and the client client-a.
-  There are no volumes, the root filesystem is read-only, the user is 65532, seccomp is
-  RuntimeDefault and every capability is dropped; relays keep only IPC_LOCK for mlock.
+- deploy/base: the jimichi namespace, five relays (relay-1 to relay-5), each a Deployment with
+  its Service, and the client client-a, which lists all five and draws chains of three. There
+  are no volumes, the root filesystem is read-only, the user is 65532, seccomp is RuntimeDefault
+  and every capability is dropped; relays keep only IPC_LOCK for mlock.
 - The manifests hold no Secret at all: node keys are created in process memory and never leave
   it. The only thing that enters the cluster is the public anchor, in ConfigMap jimichi-ca.
 - The CA runs outside the cluster: `jimichi enroll` (cmd/jimichi) through scripts/enroll.sh on the
@@ -684,9 +738,12 @@ on the system, not the other way round.
   certificate, and the address is the one the client knows.
 - The relays run with -onion-rotate 1h and -descriptor-ttl 20m: the grace period is 22 min, so
   a node holds a single onion key for the other 38 minutes of every hour.
-- deploy/base/network.yaml: a network policy lets each cell port take connections only from the
-  hop before it; the info port stays open to the namespace, and the port-forward that issuance
-  and the counters use does not pass through it.
+- deploy/base/network.yaml: a network policy lets the cell port of every relay take connections
+  from the pods of clients and of relays only; the info port stays open to the namespace, and
+  the port-forward that issuance and the counters use does not pass through it.
+- The scripts (enroll, e2e, stats, redeploy) take the relays from the deployments labelled
+  app=relay, so the manifest alone sets how many there are. The hop label only tells the relays
+  apart: any relay takes any place in a chain.
 - Each relay Service exposes the cell port 9000 and the info port 9100. A client uses both ports
   of its entry only; nodes use the info port of every roster node for the peer descriptors and
   the cell port of the next node of a circuit.
