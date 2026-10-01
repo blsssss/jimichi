@@ -33,7 +33,7 @@ var (
 	errNoRequest = fmt.Errorf("no open certificate request: install within %v of POST /csr, once per request", pki.InstallWindow)
 	errStaleCert = errors.New("certificate issued before the open request")
 	// jimichi enroll recognises this text and prints the restart hint
-	errInstalled = errors.New("certificate already installed and valid: a new one needs a relay restart, which gives a fresh identity")
+	errInstalled = errors.New("certificate already installed: a new one needs a relay restart, which gives a fresh identity")
 )
 
 // the bundle clients get, with the times that end it
@@ -53,14 +53,15 @@ type node struct {
 	now      func() time.Time
 	logger   *log.Logger
 
-	// replaced only by a signing that succeeded, so a refused or failed
-	// installation leaves the previous bundle in service
+	// replaced only by a signing that succeeded, so a failed re-signing leaves
+	// the last good bundle in service until it expires
 	out atomic.Pointer[served]
 	// not_after of the installed certificate, 0 before the first installation
 	notAfter atomic.Int64
 
-	mu          sync.Mutex
-	requestAt   time.Time
+	mu        sync.Mutex
+	requestAt time.Time
+	// the one certificate this process takes, nil until then
 	installed   []byte
 	signedState string
 }
@@ -162,7 +163,9 @@ func (n *node) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	copy(nonce[:], body)
-	if n.certState() == certValid {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.installed != nil {
 		http.Error(w, errInstalled.Error(), http.StatusConflict)
 		return
 	}
@@ -171,18 +174,16 @@ func (n *node) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	n.mu.Lock()
 	n.requestAt = n.now()
-	n.mu.Unlock()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(req)
 }
 
 // the loopback port is reachable by anyone allowed to port-forward to the pod
-// and Install cannot check a CA signature, so a valid certificate is never
-// replaced for the life of the process; a new one needs a restart and with it a
-// fresh identity. Sending the installed bytes again succeeds, so a retry after a
-// lost answer does not fail
+// and Install cannot check a CA signature, so a process takes one certificate
+// and keeps it, expired or not; a new one needs a restart and with it a fresh
+// identity. Sending the installed bytes again while they are valid succeeds, so
+// a retry after a lost answer does not fail
 func (n *node) handleCert(w http.ResponseWriter, r *http.Request) {
 	raw, ok := readBody(w, r)
 	if !ok {
@@ -197,10 +198,10 @@ func (n *node) handleCert(w http.ResponseWriter, r *http.Request) {
 	defer n.mu.Unlock()
 	now := n.now()
 	switch {
-	case bytes.Equal(raw, n.installed) && n.certState() == certValid:
+	case n.installed != nil && bytes.Equal(raw, n.installed) && n.certState() == certValid:
 		w.WriteHeader(http.StatusNoContent)
 		return
-	case n.certState() == certValid:
+	case n.installed != nil:
 		http.Error(w, errInstalled.Error(), http.StatusConflict)
 		return
 	case n.requestAt.IsZero() || now.Sub(n.requestAt) > pki.InstallWindow:
