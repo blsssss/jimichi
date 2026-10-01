@@ -373,7 +373,7 @@ func (e *entryError) Unwrap() error { return e.err }
 
 var knownFailures = []error{
 	errNoBundle, fetch.ErrTooLarge, pki.ErrFormat, pki.ErrVersion, pki.ErrDuplicate,
-	link.ErrHandshake, client.ErrNodeKey,
+	link.ErrHandshake, client.ErrNodeKey, wire.ErrPayloadSize,
 }
 
 // one of a fixed set of texts, none of which names a node
