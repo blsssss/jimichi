@@ -87,7 +87,7 @@ func Bundle(web *http.Client, url string, attempts int, pause time.Duration) ([]
 func Mirror(web *http.Client, url string, attempts int, pause time.Duration) ([]pki.MirrorEntry, error) {
 	var entries []pki.MirrorEntry
 	_, err := retried(attempts, pause, func() ([]byte, bool, error) {
-		return get(web, url, MaxMirror, "no descriptors published, the node does not hold a valid descriptor of every roster node", func(body []byte) (err error) {
+		return get(web, url, MaxMirror, "no descriptors published, the node has no descriptor of its own in service", func(body []byte) (err error) {
 			entries, err = pki.ParseMirror(body)
 			return err
 		})

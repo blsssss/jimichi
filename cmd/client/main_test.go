@@ -272,6 +272,9 @@ func newTestbed(t *testing.T, s jcrypto.Suite, n int) *testbed {
 		tb.info = append(tb.info, srv)
 	}
 	tb.web = fetch.NewClient()
+	// a kept connection would outlive the removal of its route, and whether it
+	// has gone idle by then is a race
+	tb.web.Transport.(*http.Transport).DisableKeepAlives = true
 	tb.web.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		to, ok := tb.routes[addr]
 		if !ok {
@@ -770,7 +773,7 @@ func TestFailureOfTheEntryDoesNotNameIt(t *testing.T) {
 	tb := newTestbed(t, jcrypto.SuiteC25519, 5)
 
 	_, logged, err := build(tb.selection(3, words(7, 6, 5)), tb.p)
-	const unpublished = "the entry: no descriptors published, the node does not hold a valid descriptor of every roster node"
+	const unpublished = "the entry: no descriptors published, the node has no descriptor of its own in service"
 	if err == nil || err.Error() != unpublished || logged != "" {
 		t.Fatalf("chain = %v with the log %q, want %q and no line", err, logged, unpublished)
 	}
