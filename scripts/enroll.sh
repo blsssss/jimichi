@@ -95,7 +95,7 @@ esac
 # a relay takes one certificate per process, so after a failure every relay
 # that holds one, from this run or an earlier one, must restart first
 if ! anchor=$("$jimichi" enroll "${args[@]}"); then
-  echo "enrollment failed; a relay that holds a valid certificate takes a new one only after a restart:" >&2
+  echo "enrollment failed; a relay that has taken a certificate takes a new one only after a restart:" >&2
   echo "  kubectl -n $NAMESPACE rollout restart deployment/relay-1 deployment/relay-2 deployment/relay-3" >&2
   echo "then run scripts/enroll.sh again" >&2
   exit 1

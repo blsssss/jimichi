@@ -11,7 +11,7 @@ this is engineering work, not a certification exercise.
 | Asset | Where it lives | What compromise costs |
 |---|---|---|
 | Session keys of the layers | memory of the relay process | confidentiality of messages passing that node |
-| Node signing key | memory of the relay process (secmem), until the node restarts | the ability to impersonate the node until the certificate's not_after or the next issuance |
+| Node signing key | memory of the relay process (secmem), until the node restarts | the ability to impersonate the node until the certificate's not_after or the node restarts |
 | Node onion key (agreement key) | memory of the relay process (secmem), until the node restarts | the layers of circuits that passed the node while it ran, for whoever kept their setup cells |
 | CA key | memory of the jimichi enroll process outside the cluster, only while it issues certificates | issuing certificates for any name and address until the anchor changes |
 | Trust anchor (integrity) | ConfigMap jimichi-ca, client environment | a substituted anchor makes the client accept nodes of another CA |

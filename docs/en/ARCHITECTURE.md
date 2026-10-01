@@ -313,26 +313,25 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
 3. Each node gets POST /csr with a fresh 16-byte nonce and answers with a request signed by its
    signing key. Request.Check matches the nonce, name and address against the roster, the key
    hash in the request must equal the hash from the log, and the signing keys of the nodes must
-   be pairwise distinct. A node holding a valid certificate answers POST /csr with 409, and enroll
-   prints the command that restarts it.
+   be pairwise distinct. A node that has already taken a certificate, valid or expired, answers
+   POST /csr with 409, and enroll prints the command that restarts it.
 4. Only when every request has passed is the CA key created in a secmem buffer. The CA issues
    every certificate and its key is released at once (Close): it lives for the issuance only.
 5. Each certificate goes to its node with PUT /cert. The node accepts a certificate only if it
-   holds no valid one (none installed yet, or expired), within 60 s of POST /csr
-   (pki.InstallWindow), once per request and only with a not_before no earlier than the request
-   time minus Skew; otherwise it answers 409 with the error class. It then installs the
-   certificate, signs a descriptor and answers 204, or 400 if the install is refused. Sending the
-   installed certificate again gets 204, so a retry after a lost answer goes through. Until a new
-   installation succeeds the node keeps serving its previous bundle.
+   has taken none before, within 60 s of POST /csr (pki.InstallWindow), once per request and only
+   with a not_before no earlier than the request time minus Skew; otherwise it answers 409 with
+   the error class. It then installs the certificate, signs a descriptor and answers 204, or 400
+   if the install is refused. Sending the installed certificate again while it is valid gets 204,
+   so a retry after a lost answer goes through.
 6. enroll reads /descriptor of every node and checks the whole chain with pki.VerifyChain against
    the new anchor, exactly as a client does.
 7. Only then is the anchor printed on stdout. On any error stdout stays empty and the exit code
    is 1.
 
-- A certificate is installed once per node process: a valid certificate is never replaced, and
-  re-enrollment needs a node restart, which brings a new identity. Install does not check the CA
-  signature, so without this rule anyone who reaches the admin port could replace a working
-  certificate with their own.
+- A certificate is installed once per node process: an installed certificate is never replaced, not
+  even an expired one, and re-enrollment needs a node restart, which brings a new identity. Install
+  does not check the CA signature, so without this rule anyone who reaches the admin port could
+  replace a working certificate with their own.
 - Installation across the nodes is not atomic. If issuance fails after the first PUT /cert, the
   nodes that already took a certificate keep it under a discarded CA until they restart, and
   clients refuse them. enroll lists those nodes on stderr, together with the nodes whose answer
@@ -368,17 +367,19 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
 - A node restart gives a new signing key and no certificate. The node is ready (readiness on
   /healthz), but /descriptor answers 503 and clients refuse to build a circuit through it until
   scripts/enroll.sh runs. make deploy, make start and scripts/e2e.sh run it themselves.
-- A new issuance needs fresh node processes. scripts/redeploy.sh and make start begin with them,
-  while running make deploy or scripts/e2e.sh again on certified nodes stops with a restart
-  hint. Certificates of the previous CA die when the nodes restart with new identities and the
-  clients with the new anchor: revocation by forgetting. There is no other revocation.
+- A new issuance needs fresh node processes. scripts/redeploy.sh restarts the nodes itself, make
+  start after make stop brings them up anew, while running make deploy again, make start without
+  make stop or scripts/e2e.sh on certified nodes stops with a restart hint. Certificates of the
+  previous CA die when the nodes restart with new identities and the clients with the new anchor:
+  revocation by forgetting. There is no other revocation.
 - The certificate lifetime comes from -cert-ttl: 72 h on the testbed, 1 h in CI.
 - The descriptor is signed when the certificate is installed and after that only by the timer; a
   /descriptor request serves the ready bundle and never triggers a signature. The timer fires
   every min(ttl/4, 1 min) and signs again once the descriptor's wall-clock age reaches half its
   lifetime or the certificate state changes. The wall clock matters because the timer runs on
   the monotonic clock, which stands still while the host sleeps.
-- After the descriptor's expires or the certificate's not_after the node answers 503.
+- After the descriptor's expires or the certificate's not_after the node answers 503. A node
+  whose certificate expired comes back only through a restart and a new issuance.
 
 ### CA compromise
 
