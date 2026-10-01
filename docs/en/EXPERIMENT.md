@@ -165,7 +165,8 @@ hold. It is reported as a measured boundary, not passed over.
 
 ## Statistics
 
-- At least 30 clean repetitions per point (runs without a closed circuit), warm-up discarded.
+- At least 30 clean repetitions per point (runs with no closed circuit and no node limit acting,
+  clean_runs in the report), warm-up discarded.
 - Series run on an idle host: concurrent load disturbs timing and lowers the AUC of individual
   runs. Tables report the median.
 - Median and a 95 percent confidence interval, BCa bootstrap, 10000 resamples.
@@ -217,7 +218,7 @@ hold. It is reported as a measured boundary, not passed over.
 | External | the testbed runs on one machine, delays are modelled | results are reported as a function of the configured delay, not as absolute numbers |
 | Construct | AUC alone does not imply a practical attack | precision at the real base rate is reported alongside |
 | Reproducibility | randomness across runs | fixed seeds, configuration and code version in every report |
-| Survival bias | medians without broken runs describe the runs where every circuit survived; when closures depend on the configuration, such as a node period close to the client's, its medians describe the luckier runs | runs and broken_runs stand next to every median, and circuit survival is measured on its own |
+| Survival bias | medians without broken and limited runs describe the runs where every circuit survived; when closures depend on the configuration, such as a node period close to the client's, its medians describe the luckier runs | runs, broken_runs, limited_runs and clean_runs stand next to every median, and circuit survival is measured on its own |
 
 ## Comparison with existing systems
 

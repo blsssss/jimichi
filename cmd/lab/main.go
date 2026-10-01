@@ -346,11 +346,11 @@ func printSummary(w io.Writer, sum []summary) {
 	if len(sum) > 0 {
 		fmt.Fprintf(w, "\nsuite %s", sum[0].Suite)
 	}
-	fmt.Fprintf(w, "\n%-11s %6s %4s %4s %4s %20s %6s %8s %8s %10s %4s\n",
-		"traffic", "bin", "runs", "brk", "lim", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
+	fmt.Fprintf(w, "\n%-11s %6s %4s %4s %4s %5s %20s %6s %8s %8s %10s %4s\n",
+		"traffic", "bin", "runs", "brk", "lim", "clean", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
 	for _, s := range sum {
 		if s.CleanRuns == 0 {
-			fmt.Fprintf(w, "%-11s %6s %4d %4d %4d  no clean run, nothing to summarise\n", s.Traffic, s.Bin, s.Runs, s.BrokenRuns, s.LimitedRuns)
+			fmt.Fprintf(w, "%-11s %6s %4d %4d %4d %5d  no clean run, nothing to summarise\n", s.Traffic, s.Bin, s.Runs, s.BrokenRuns, s.LimitedRuns, s.CleanRuns)
 			continue
 		}
 		p50 := "-"
@@ -361,8 +361,8 @@ func printSummary(w io.Writer, sum []summary) {
 		if s.CleanRuns == 1 {
 			note = "  one clean run: its values, not a median"
 		}
-		fmt.Fprintf(w, "%-11s %6s %4d %4d %4d %6.3f [%.3f, %.3f] %6.3f %8.2f %8.2f %10s %4d%s\n",
-			s.Traffic, s.Bin, s.Runs, s.BrokenRuns, s.LimitedRuns, *s.AUC, *s.AUCMin, *s.AUCMax, *s.TopOne, *s.Multiplier, *s.RelayMult, p50, *s.DegenerateRuns, note)
+		fmt.Fprintf(w, "%-11s %6s %4d %4d %4d %5d %6.3f [%.3f, %.3f] %6.3f %8.2f %8.2f %10s %4d%s\n",
+			s.Traffic, s.Bin, s.Runs, s.BrokenRuns, s.LimitedRuns, s.CleanRuns, *s.AUC, *s.AUCMin, *s.AUCMax, *s.TopOne, *s.Multiplier, *s.RelayMult, p50, *s.DegenerateRuns, note)
 	}
 	fmt.Fprintln(w, "brk: runs where a circuit closed; lim: runs where a relay deadline, lifetime or admission limit acted")
 	fmt.Fprintln(w, "both are left out of the medians, ranges and deg, which rest on the clean runs")
