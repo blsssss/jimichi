@@ -2223,3 +2223,44 @@ func TestReplyThatDoesNotSealLeavesAsCover(t *testing.T) {
 		t.Fatalf("the exit counted %d replies it could not seal, want 1", d)
 	}
 }
+
+// a message too long for a cell is refused when it is handed over, in either
+// sending mode, and one of exactly the limit makes its round trip
+func TestSendRefusesAMessageAboveTheLimit(t *testing.T) {
+	p := c25519.New()
+	exit := startNode(t, p, func(_ uint64, payload []byte) []byte { return payload })
+	middle := startNode(t, p, nil)
+	entry := startNode(t, p, nil)
+
+	for name, cfg := range map[string]client.Config{
+		"immediate":     {},
+		"constant rate": {Mode: client.ConstantRate, Rate: 5 * time.Millisecond},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg.Provider, cfg.Chain = p, chainOf(entry, middle, exit)
+			cl, err := client.Dial(cfg)
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer cl.Close()
+
+			limit := cl.MaxPayload()
+			if err := cl.Send(make([]byte, limit+1)); !errors.Is(err, wire.ErrPayloadSize) {
+				t.Fatalf("Send of %d bytes with a limit of %d: %v, want ErrPayloadSize", limit+1, limit, err)
+			}
+
+			msg := bytes.Repeat([]byte{0x5a}, limit)
+			if err := cl.Send(msg); err != nil {
+				t.Fatalf("Send of %d bytes: %v", limit, err)
+			}
+			select {
+			case got := <-cl.Replies():
+				if !bytes.Equal(got, msg) {
+					t.Fatalf("reply of %d bytes, want the %d sent", len(got), len(msg))
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("no reply to a message of %d bytes, the limit", limit)
+			}
+		})
+	}
+}

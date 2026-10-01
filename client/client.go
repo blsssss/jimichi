@@ -79,6 +79,8 @@ type Client struct {
 	replies chan []byte
 	queue   chan []byte
 	dropped uint64
+	// fixed at Dial: Close empties the circuit, and Send must not read it then
+	maxPayload int
 
 	mu     sync.Mutex
 	closed bool
@@ -182,6 +184,8 @@ func Dial(cfg Config) (*Client, error) {
 		keys:    setup.CellKeys,
 		replies: make(chan []byte, 64),
 		queue:   make(chan []byte, 256),
+
+		maxPayload: circuit.MaxPayload(),
 	}
 	c.busy.Add(1)
 	go c.receive()
@@ -211,7 +215,7 @@ func orDefault(d, def time.Duration) time.Duration {
 	return d
 }
 
-func (c *Client) MaxPayload() int { return c.circuit.MaxPayload() }
+func (c *Client) MaxPayload() int { return c.maxPayload }
 
 // replies arrive wrapped in one layer per hop, in the reverse order
 func (c *Client) Replies() <-chan []byte { return c.replies }
@@ -268,6 +272,11 @@ func (c *Client) Broken() bool {
 
 func (c *Client) Send(payload []byte) error {
 	if c.cfg.Mode == ConstantRate && c.cfg.Rate > 0 {
+		// the schedule seals a message only at its tick, where no caller is left
+		// to take the error
+		if len(payload) > c.maxPayload {
+			return fmt.Errorf("%w: %d > %d", wire.ErrPayloadSize, len(payload), c.maxPayload)
+		}
 		buf := make([]byte, len(payload))
 		copy(buf, payload)
 		select {

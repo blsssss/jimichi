@@ -25,6 +25,7 @@ import (
 	"github.com/jimichi-org/jimichi/internal/fetch"
 	"github.com/jimichi-org/jimichi/link"
 	"github.com/jimichi-org/jimichi/pki"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 var t0 = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -824,6 +825,7 @@ func TestFailureClassNamesNoAddress(t *testing.T) {
 		{fmt.Errorf("%w of %d bytes", fetch.ErrTooLarge, fetch.MaxMirror), fetch.ErrTooLarge.Error()},
 		{&fetch.StatusError{Code: http.StatusNotFound}, "request answered status 404"},
 		{pki.ErrFormat, pki.ErrFormat.Error()},
+		{fmt.Errorf("%w: %d > %d", wire.ErrPayloadSize, 445, 444), wire.ErrPayloadSize.Error()},
 		{errors.New("write tcp 10.244.0.9:51234->10.96.0.7:9000: broken pipe"), "connection failed"},
 	} {
 		drawn := selection{}.cause(c.err)
