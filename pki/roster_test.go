@@ -83,6 +83,48 @@ func TestRosterHasASizeLimit(t *testing.T) {
 	}
 }
 
+// a roster of the testbed form, relay-N at relay-N.jimichi.svc.cluster.local:9000,
+// counted by hand. The frame {"anchor":"","nodes":[]} is 24 bytes. The anchor
+// is the suite name, a colon and the base64 of the CA key: 7 + 44 = 51 bytes
+// on c25519 (a 32-byte key), 5 + 88 = 93 on GOST (64 bytes). A node is
+// {"name":"","addr":""}, 21 bytes, with a 7-byte name and a 38-byte address:
+// 66 bytes, 68 from relay-10 on, and a comma between nodes.
+//
+//	five nodes: 24 + 51 + 5*66 + 4 = 409 bytes on c25519, 451 on GOST
+//	n nodes, 10 <= n < 100: 24 + anchor + 9*66 + 68*(n-9) + n-1 = 69n + 5 + anchor
+//	c25519: 69n + 56 <= 4096 gives n = 58 (4058 bytes); GOST: 69n + 98 gives n = 57 (4031)
+func TestRosterOfTheTestbedForm(t *testing.T) {
+	for _, c := range []struct {
+		suite   jcrypto.Suite
+		five    int
+		largest int
+		size    int
+	}{
+		{jcrypto.SuiteC25519, 409, 58, 4058},
+		{jcrypto.SuiteGOST, 451, 57, 4031},
+	} {
+		p, err := suite.New(c.suite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := Roster{Anchor: newEnv(t, p).pol.Anchor}
+		sizes := []int{len(r.Marshal())}
+		for n := 1; sizes[n-1] <= MaxRoster; n++ {
+			name := fmt.Sprintf("relay-%d", n)
+			r.Nodes = append(r.Nodes, RosterNode{Name: name, Addr: addrOf(name)})
+			raw := r.Marshal()
+			if _, err := ParseRoster(raw); (err == nil) != (len(raw) <= MaxRoster) {
+				t.Fatalf("%v: ParseRoster of %d nodes in %d bytes: %v", c.suite, n, len(raw), err)
+			}
+			sizes = append(sizes, len(raw))
+		}
+		if largest := len(sizes) - 2; sizes[5] != c.five || largest != c.largest || sizes[largest] != c.size {
+			t.Fatalf("%v: five nodes take %d bytes and the largest roster holds %d nodes in %d bytes; want %d, %d and %d",
+				c.suite, sizes[5], largest, sizes[largest], c.five, c.largest, c.size)
+		}
+	}
+}
+
 func c25519Provider(t *testing.T) jcrypto.CryptoProvider {
 	t.Helper()
 	p, err := suite.New(jcrypto.SuiteC25519)
