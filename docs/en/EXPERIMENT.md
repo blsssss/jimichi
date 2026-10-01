@@ -43,7 +43,8 @@ indistinguishability, not on the secrecy of the implementation.
 
 | Metric | Definition | Why it is used |
 |---|---|---|
-| ROC AUC | area under the error curve of the linking attack | one number, comparable across configurations |
+| ROC AUC | area under the error curve of the linking attack; a tie between a true and a false pair counts as half a pair | one number, comparable across configurations |
+| Top-1 accuracy | share of entry flows whose highest-scoring exit flow is their own; when k exit flows tie for the highest score and the own one is among them, the flow counts 1/k | what an adversary that picks the best pair gets |
 | TPR at FPR 0.01 | fraction of correctly linked pairs at a fixed false positive rate | an attack matters in the low false positive region |
 | Precision at the base rate | fraction correct among positive decisions at the real number of flows | guards against a false claim: with a thousand flows AUC 0.9 is nearly useless to the adversary |
 | Degree of anonymity | entropy of the posterior sender distribution over its maximum | a standard measure, comparable with the literature |
@@ -114,7 +115,7 @@ This is stronger than passive correlation and tests whether batching helps.
 | Watermark detectability | AUC of the watermark detector at the exit |
 | Resistance threshold | batching parameters at which the watermark stops being detected |
 | Price of resistance | added delivery latency that buys it |
-| Circuit survival | share of circuits still open at the end of a run and time to the first closed circuit, against the ratio of the node period to the client's; one lost or reordered cell closes a circuit |
+| Circuit survival | share of circuits still open at the end of a run and time to the first closed circuit, against the ratio of the node period to the client's, from the flow_closed and flow_closed_after fields of the report rows; one lost or reordered cell closes a circuit |
 
 ### Block 3. Node compromise, adversary A4
 
@@ -164,7 +165,7 @@ hold. It is reported as a measured boundary, not passed over.
 
 ## Statistics
 
-- At least 30 repetitions per point, warm-up discarded.
+- At least 30 clean repetitions per point (runs without a closed circuit), warm-up discarded.
 - Series run on an idle host: concurrent load disturbs timing and lowers the AUC of individual
   runs. Tables report the median.
 - Median and a 95 percent confidence interval, BCa bootstrap, 10000 resamples.
@@ -175,14 +176,28 @@ hold. It is reported as a measured boundary, not passed over.
   computed.
 - Adversary classifiers are trained and evaluated on separate samples, split by time, with no
   feature leakage.
-- A relay closes a circuit whose counters break the order or whose queue is full, and a client
-  closes one on a reply out of turn. The flow then stops before the run ends and its traces are
-  shorter. Every report row carries relay_broken_circuits and broken_flows; the summary counts such
-  runs in broken_runs and leaves them out of every median, range and count of degenerate
-  intervals. When every run of a configuration is broken, its summary line has no medians.
-- relay_dropped_cells counts cells the relays dropped: cells whose layer did not open, cells still
-  waiting in the queue of a circuit that closed, and replies the exit could not seal, which go back
-  as cover under their own number.
+- A relay closes a circuit when a counter breaks the order (a copy, a gap, a step back, a jump, or
+  at the exit a first forward counter other than the one in its setup layer), a cell finds no room
+  in a queue in either direction, a backward cell of another kind or one it cannot wrap arrives,
+  the exit cannot seal even a cover reply, or a cell cannot be written onward. A client closes its
+  circuit on a reply out of turn, a reply that does not open, or a reply beyond the number of cells
+  it wrote. The flow then stops before the run ends and its traces are shorter.
+- A report row carries relay_broken_circuits (the sum of the closures each relay noticed, so one
+  circuit can be counted by several relays), broken_flows (clients that closed their circuit) and,
+  per flow, flow_closed and flow_closed_after: whether the circuit closed before the run was read,
+  as the client saw it and whatever the cause, and how long after the flows started ("" for one
+  that stayed open).
+- A run is broken when any of these is non-zero. In the summary, runs counts every run and
+  broken_runs the broken ones; medians, ranges and ci_degenerate_runs rest on runs - broken_runs.
+  With none left those fields are null, and the latency median is null as well when the clean runs
+  have no latency sample. A line resting on a single clean run gives that run's values, not a
+  median, and the printed summary marks it.
+- relay_dropped_cells counts cells the relays dropped: cells whose layer did not open, cells with
+  an unparseable header, cells for an unknown circuit, control cells of a failed or refused setup
+  (a layer that does not open, a copy of a setup seen before, a full tag cache, an identifier in
+  use, a link that already carries a circuit, an unreachable next node), replies too long for a
+  cell (a cover reply goes back under the same number), replies the exit could not write back, and
+  cells still waiting in the queue of a circuit that closed.
 
 ## Threats to validity
 
@@ -193,6 +208,7 @@ hold. It is reported as a measured boundary, not passed over.
 | External | the testbed runs on one machine, delays are modelled | results are reported as a function of the configured delay, not as absolute numbers |
 | Construct | AUC alone does not imply a practical attack | precision at the real base rate is reported alongside |
 | Reproducibility | randomness across runs | fixed seeds, configuration and code version in every report |
+| Survival bias | medians without broken runs describe the runs where every circuit survived; when closures depend on the configuration, such as a node period close to the client's, its medians describe the luckier runs | runs and broken_runs stand next to every median, and circuit survival is measured on its own |
 
 ## Comparison with existing systems
 

@@ -75,8 +75,10 @@ Every cell is 512 bytes, payload and cover cells alike.
 - The setup cell holds four hops on c25519 and three on GOST: a GOST public key is 64 bytes
   against 32, and every setup layer grows by the difference.
 - Counters on every link follow strictly one after another: a node accepts a cell only if its
-  counter is one above the last one accepted, modulo 2^62. The first value in each direction is
-  taken as it comes, since it depends on the offsets of the other nodes. A copy, a gap, a step back
+  counter is one above the last one accepted, modulo 2^62. Every node except the exit takes the
+  first value in each direction as it comes, since it depends on the offsets of the other nodes.
+  The exit expects a fixed first forward value, and the client checks the number of every reply
+  (section "Return path"). A copy, a gap, a step back
   or a jump closes the circuit and the cell goes no further: forwarding a replay would hand an
   active observer a free timing mark, and a gap or a reorder would carry on to every later link.
 - The exit knows the counter the first forward cell arrives with: the client puts that value in
@@ -157,7 +159,13 @@ A relay cannot check a backward cell: its inner layers do not open for it. It th
 only cells of kind "data" with the next counter in turn, and any other cell closes the circuit. The
 exit numbers its replies from zero. The client knows the offsets of all nodes, recovers the number
 of every reply and accepts only the next one: a reply out of turn, or one that does not open,
-closes the circuit on the client's side as well.
+closes the circuit on the client's side as well. The client counts the cells it has written to the
+link and closes the circuit on a reply numbered at or past that count: the exit answers every cell
+once.
+
+A reply too long for a cell is replaced by a cover reply under the same number. The length is
+checked before anything is sealed, so no nonce is used twice. Any other failure to seal a reply
+closes the circuit.
 
 The exit answers every data cell with exactly one backward cell: a message with its reply, a cover
 cell with a cover reply. Replies to messages only would show every node on the way back, by their
@@ -203,8 +211,9 @@ Circuit teardown:
   another link is dropped, and so is a second control cell with an identifier already in use.
 - Closing a link anywhere closes the neighbouring links of the circuit in both directions, so the
   break reaches the client and the exit node.
-- A node closes a circuit itself when a cell arrives out of turn, a cell of another kind comes
-  back, or a cell finds no room in its queue. The close takes the same path as a closed link and
+- A node closes a circuit itself when a cell arrives out of turn, a cell of another kind or one
+  it cannot wrap comes back, a cell finds no room in its queue, a cell cannot be written onward, or
+  the exit cannot seal a reply. The close takes the same path as a closed link and
   is counted with the closed circuits.
 - Circuit keys are released once every goroutine using them has stopped.
 - The client sees the break as its reply channel closing and exits. The orchestrator restarts it
