@@ -264,6 +264,7 @@ func (n *node) adminMux(counters func() relay.Counters) http.Handler {
 			"descriptor_requests": n.descriptorRequests.Load(),
 			"mirror_requests":     n.mirrorRequests.Load(),
 			"onion_epoch":         n.onionEpoch(),
+			"onion_rotate_failed": n.onionFailures(),
 		})
 	})
 	if n.id != nil {

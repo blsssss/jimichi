@@ -42,6 +42,8 @@ type config struct {
 	harden bool
 	// only the limit fields are set, straight from the flags
 	limits relay.Config
+	// time.Now when nil
+	now func() time.Time
 }
 
 func main() {
@@ -61,7 +63,7 @@ func main() {
 	flag.StringVar(&cfg.name, "name", "", "node name for its certificate, required with -auth")
 	flag.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth; without -auth the address this node lists itself under in /descriptors", wire.AddrSize))
 	flag.DurationVar(&cfg.descriptorTTL, "descriptor-ttl", time.Hour, "lifetime of a signed descriptor, re-signed once half of it has passed")
-	flag.DurationVar(&cfg.onionRotate, "onion-rotate", 0, fmt.Sprintf("replace the onion key this often and release the replaced one -descriptor-ttl plus %v later, once no valid descriptor names it; a setup cell recorded before that no longer opens with what the node holds; the next rotation waits for that release; not shorter than -descriptor-ttl; 0 keeps the link key as the onion key for the life of the process", pki.Skew))
+	flag.DurationVar(&cfg.onionRotate, "onion-rotate", time.Hour, fmt.Sprintf("replace the onion key this often and release the replaced one -descriptor-ttl plus %v later, once no valid descriptor names it; a setup cell recorded before that no longer opens with what the node holds; the next rotation waits for that release; not shorter than -descriptor-ttl; 0 is the baseline for measurements: the link key is the onion key for the life of the process and recorded setups never stop opening", pki.Skew))
 	flag.StringVar(&cfg.peerInfoPort, "peer-info-port", "9100", "port where the other nodes publish their descriptors")
 	peers := flag.String("peers", "", "without -auth only: comma separated host:port of the other nodes, whose unsigned descriptors this node serves in /descriptors; with -auth they come from the roster")
 	flag.DurationVar(&cfg.limits.HandshakeTimeout, "handshake-timeout", relay.DefaultHandshakeTimeout, "close a connection whose link handshake has not finished this long after it was accepted; an initiator sends its hello at once; negative turns it off")
@@ -145,16 +147,22 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		return errors.New("key memory is not locked, refusing to start")
 	}
 
+	clock := cfg.now
+	if clock == nil {
+		clock = time.Now
+	}
 	n := &node{
 		p: provider, name: cfg.name, addr: cfg.advertise,
-		ttl: cfg.descriptorTTL, now: time.Now, logger: logger,
+		ttl: cfg.descriptorTTL, now: clock, logger: logger,
 		wake:      make(chan struct{}),
 		fetchPeer: peerFetcher(fetch.NewClient(), cfg.peerInfoPort),
 	}
 	// a rotating node opens setups with a key of its own from the start: the
 	// link key lives as long as the process, so an epoch under it would not end
 	onionPub := staticPub
-	if cfg.onionRotate > 0 {
+	if cfg.onionRotate == 0 {
+		logger.Print("WARNING: -onion-rotate=0, the link key opens setup layers for the life of the process, so a recorded setup opens with a key taken from memory at any later time")
+	} else {
 		onionPriv, pub, err := provider.GenerateEphemeral()
 		if err != nil {
 			return fmt.Errorf("onion key: %w", err)
@@ -168,10 +176,10 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 			onionPriv.Release()
 			return fmt.Errorf("onion key: %w", err)
 		}
-		defer ring.Close()
 		onionPub = pub
 		n.link = staticPub
 		n.onion = newOnionKeys(ring, cfg.onionRotate, cfg.descriptorTTL, cfg.lock, n.now())
+		defer n.closeOnion()
 	}
 	if cfg.auth {
 		id, err := pki.NewIdentity(provider, cfg.name, cfg.advertise)
@@ -301,9 +309,9 @@ func splitList(s string) []string {
 }
 
 // a setup holds a handful of key pages at once, the static and identity keys
-// one more each, and a rotating node two onion keys with one more page per
-// setup while both are tried; below this the node would start and then fail
-// its first circuits
+// one more each, and a rotating node two onion keys, the page it keeps for the
+// next one and one more page per setup while both keys are tried; below this
+// the node would start and then fail its first circuits
 const minMemlock = 64 << 10
 
 func checkMemlock() error {
@@ -332,10 +340,10 @@ func logCounters(r *relay.Relay, n *node, every time.Duration, logger *log.Logge
 		roster, held := n.peerState()
 		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d broken=%d"+
 			" accept_retries=%d refused_links=%d refused_busy=%d refused_source=%d refused_rate=%d refused_setups=%d refused_extend=%d failed_extend=%d timed_out=%d expired=%d"+
-			" cert=%s roster=%d peers=%d descriptor_requests=%d mirror_requests=%d onion_epoch=%d",
+			" cert=%s roster=%d peers=%d descriptor_requests=%d mirror_requests=%d onion_epoch=%d onion_rotate_failed=%d",
 			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, s.Broken,
 			s.AcceptRetries, s.RefusedLinks, s.RefusedBusy, s.RefusedSource, s.RefusedRate, s.RefusedSetups, s.RefusedExtend, s.FailedExtend, s.TimedOut, s.Expired,
-			n.certState(), roster, held, n.descriptorRequests.Load(), n.mirrorRequests.Load(), n.onionEpoch())
+			n.certState(), roster, held, n.descriptorRequests.Load(), n.mirrorRequests.Load(), n.onionEpoch(), n.onionFailures())
 	}
 }
 

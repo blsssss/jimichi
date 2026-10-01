@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/jimichi-org/jimichi/client"
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
@@ -30,12 +34,52 @@ func (f *fixture) rotating(t *testing.T, every time.Duration) *relay.OnionRing {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(ring.Close)
 	f.n.mu.Lock()
 	f.n.link = f.pub
 	f.n.onion = newOnionKeys(ring, every, f.n.ttl, false, f.clock.Now())
 	f.n.mu.Unlock()
+	t.Cleanup(f.n.closeOnion)
 	return ring
+}
+
+// what time.Now returns once the wall clock has moved by d against the running
+// time: after the host slept, or after the clock was set. A reading with both
+// parts cannot be built through the time package, so the wall field is moved
+// in place: with a monotonic reading it holds a flag bit, 33 bits of seconds
+// and 30 bits of nanoseconds. The checks at the end fail if that ever changes
+func shiftWall(t *testing.T, at time.Time, d time.Duration) time.Time {
+	t.Helper()
+	if d%time.Second != 0 {
+		t.Fatalf("shiftWall by %v: whole seconds only", d)
+	}
+	out := at
+	wall := (*uint64)(unsafe.Pointer(&out))
+	*wall += uint64(int64(d/time.Second)) << 30
+	if got := out.Sub(at); got != 0 {
+		t.Fatalf("the shifted reading is %v of running time away", got)
+	}
+	if got := out.Round(0).Sub(at.Round(0)); got != d {
+		t.Fatalf("the wall clock moved by %v, want %v", got, d)
+	}
+	return out
+}
+
+// the wall clock jumps by d while the running time stays where it is
+func (c *clock) jump(t *testing.T, d time.Duration) {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = shiftWall(t, c.now, d)
+}
+
+// a node whose clock gives readings like time.Now: wall and running time
+func newRunningFixture(t *testing.T) *fixture {
+	t.Helper()
+	p, err := suite.New(jcrypto.SuiteC25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newNode(t, p, newCA(t, p), &clock{now: time.Now()}, testName)
 }
 
 var setupLinks atomic.Uint64
@@ -469,6 +513,9 @@ func TestRotationRefusesAKeyThatIsNotLocked(t *testing.T) {
 	if n := strings.Count(f.log.String(), "onion key rotation: "+errOnionUnlocked.Error()); n != 1 {
 		t.Fatalf("the refusal was logged %d times, want once: %q", n, f.log.String())
 	}
+	if got := f.stats(t); !strings.Contains(got, `"onion_rotate_failed":3`) {
+		t.Fatalf("stats after three refused keys: %s", got)
+	}
 
 	f.n.mu.Lock()
 	f.n.onion.lock = false
@@ -497,8 +544,410 @@ func TestRotateFlags(t *testing.T) {
 			t.Errorf("%s: checkRotateFlags(%v, %v) = %v, want ok %v", c.name, c.rotate, c.ttl, err, c.ok)
 		}
 	}
-	if got := newOnionKeys(nil, time.Hour, 30*time.Minute, false, t0); got.grace != 30*time.Minute+pki.Skew || !got.rotateAt.Equal(t0.Add(time.Hour)) || !got.retireAt.IsZero() {
-		t.Fatalf("newOnionKeys: grace %v, first rotation at %v", got.grace, got.rotateAt)
+	got := newOnionKeys(nil, time.Hour, 30*time.Minute, false, t0)
+	defer got.letGo()
+	if got.grace != 30*time.Minute+pki.Skew || got.rotateAt.wall != t0.Add(time.Hour).UnixNano() || got.retireAt.pending() {
+		t.Fatalf("newOnionKeys: grace %v, first rotation at %v", got.grace, time.Unix(0, got.rotateAt.wall))
+	}
+}
+
+// the readings of time.Now compare by the running time, which stands still
+// while the host sleeps: a deadline has to look at the wall clock as well
+func TestHostSleepDoesNotExtendTheLifeOfAKey(t *testing.T) {
+	f := newRunningFixture(t)
+	if f.clock.Now().Round(0) == f.clock.Now() {
+		t.Fatal("the clock of this test must carry a monotonic reading, as time.Now does")
+	}
+	ring := f.rotating(t, time.Hour)
+	f.enroll(t, f.clock.Now().Add(72*time.Hour))
+	_, k0 := ring.Current()
+	f.clock.advance(time.Hour)
+	f.n.rotateIfDue()
+	epoch, k1 := ring.Current()
+	if epoch != 1 {
+		t.Fatalf("epoch %d after one period of running time, want 1", epoch)
+	}
+
+	f.clock.jump(t, 10*time.Hour)
+	f.n.rotateIfDue()
+	if opensFor(t, f.p, ring, k0) {
+		t.Fatal("the key whose grace ended while the host slept is still held: the release went by the running time alone")
+	}
+	epoch, k2 := ring.Current()
+	if epoch != 2 {
+		t.Fatalf("epoch %d after the sleep, want the one rotation that was due by the wall clock", epoch)
+	}
+	if _, v := f.inService(t); v.Epoch != 2 || !bytes.Equal(v.OnionPub, k2) {
+		t.Fatalf("the descriptor in service names epoch %d, want 2", v.Epoch)
+	}
+
+	f.clock.advance(time.Hour + pki.Skew - time.Second)
+	f.n.rotateIfDue()
+	if !opensFor(t, f.p, ring, k1) {
+		t.Fatal("the key replaced on waking was released before its grace ended")
+	}
+	f.clock.advance(time.Second)
+	f.n.rotateIfDue()
+	if opensFor(t, f.p, ring, k1) {
+		t.Fatal("the key replaced on waking outlived its grace")
+	}
+}
+
+// a wall clock set back must not keep a key either: the running time ends the
+// grace and the period
+func TestClockSetBackDoesNotExtendTheLifeOfAKey(t *testing.T) {
+	f := newRunningFixture(t)
+	ring := f.rotating(t, time.Hour)
+	f.enroll(t, f.clock.Now().Add(72*time.Hour))
+	_, k0 := ring.Current()
+	f.clock.advance(time.Hour)
+	f.n.rotateIfDue()
+	_, k1 := ring.Current()
+
+	f.clock.jump(t, -30*time.Minute)
+	f.clock.advance(time.Hour + pki.Skew - time.Second)
+	f.n.rotateIfDue()
+	if epoch, _ := ring.Current(); epoch != 1 || !opensFor(t, f.p, ring, k0) {
+		t.Fatalf("epoch %d a second before the grace ends by the running time, want 1 with the replaced key held", epoch)
+	}
+	f.clock.advance(time.Second)
+	f.n.rotateIfDue()
+	if opensFor(t, f.p, ring, k0) {
+		t.Fatal("the replaced key outlived its grace because the wall clock was set back")
+	}
+	epoch, k2 := ring.Current()
+	if epoch != 2 || !opensFor(t, f.p, ring, k1) {
+		t.Fatalf("epoch %d once the period is over by the running time, want 2 with the replaced key held", epoch)
+	}
+	if _, v := f.inService(t); v.Epoch != 2 || !bytes.Equal(v.OnionPub, k2) {
+		t.Fatalf("the descriptor in service names epoch %d, want 2", v.Epoch)
+	}
+
+	// a clock set forwards ends the grace early, which costs a refused setup
+	// and no secrecy
+	f.clock.jump(t, 2*time.Hour)
+	f.n.rotateIfDue()
+	if opensFor(t, f.p, ring, k1) {
+		t.Fatal("the replaced key was held past its grace by the wall clock")
+	}
+}
+
+func TestDeadlinePassesByEitherClock(t *testing.T) {
+	start := time.Now()
+	d := after(start, time.Minute)
+	if !d.pending() || (deadline{}).pending() {
+		t.Fatal("pending must tell a deadline from none")
+	}
+	for _, c := range []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{"at once", start, false},
+		{"a second early by both clocks", start.Add(time.Minute - time.Second), false},
+		{"on time by both clocks", start.Add(time.Minute), true},
+		{"by the wall clock alone", shiftWall(t, start, time.Minute), true},
+		{"a second early by the wall clock alone", shiftWall(t, start, time.Minute-time.Second), false},
+		{"by the running time alone", shiftWall(t, start.Add(time.Minute), -time.Hour), true},
+		{"a second early by the running time, the wall clock behind", shiftWall(t, start.Add(time.Minute-time.Second), -time.Hour), false},
+		{"a reading without running time, on time", start.Round(0).Add(time.Minute), true},
+		{"a reading without running time, early", start.Round(0).Add(time.Minute - time.Second), false},
+	} {
+		if got := d.passed(c.now); got != c.want {
+			t.Errorf("%s: passed = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// the loop the node runs, not a call from the test, makes the rotation
+func TestKeepOnionRotatesWhenThePeriodIsOver(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	ring := f.rotating(t, time.Hour)
+	f.enroll(t, t0.Add(72*time.Hour))
+	f.clock.advance(time.Hour)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		f.n.keepOnion(stop)
+		close(done)
+	}()
+	limit := time.Now().Add(5 * time.Second)
+	for {
+		epoch, onion := ring.Current()
+		if b, ok := f.n.descriptor(); ok && epoch == 1 {
+			v, err := pki.Verify(f.p, pki.Policy{Anchor: f.ca.Anchor(), Skew: pki.Skew}, f.n.addr, b, f.clock.Now())
+			if err == nil && v.Epoch == 1 && bytes.Equal(v.OnionPub, onion) {
+				break
+			}
+		}
+		if time.Now().After(limit) {
+			t.Fatalf("the loop made no rotation: epoch %d, log %q", epoch, f.log.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the loop did not end with its stop channel")
+	}
+}
+
+func TestRotatingNodeGivesTheRelayItsRing(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	if rc := relayConfig(f.p, nil, config{auth: true}, f.n); rc.Onion != nil {
+		t.Fatal("a node without rotation must leave the relay its link key as the onion key")
+	}
+	ring := f.rotating(t, time.Hour)
+	if rc := relayConfig(f.p, nil, config{auth: true}, f.n); rc.Onion != ring {
+		t.Fatal("the relay of a rotating node does not get the ring the node rotates")
+	}
+}
+
+var listening = regexp.MustCompile(`relay listening on (\S+), info on (\S+),`)
+
+// the binary as it starts: its own loop rotates, its info port serves the new
+// key and its relay opens setups with that key and not with the link key
+func TestNodeRotatesAndOpensSetupsWithItsNewKey(t *testing.T) {
+	p, err := suite.New(jcrypto.SuiteC25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := &clock{now: time.Now()}
+	cfg := config{
+		listen: "127.0.0.1:0", info: "127.0.0.1:0", stats: "127.0.0.1:0", echo: true,
+		descriptorTTL: time.Hour, onionRotate: time.Hour, now: clk.Now,
+	}
+	var out logBuffer
+	stop := make(chan os.Signal, 1)
+	done := make(chan error, 1)
+	go func() { done <- serveNode(p, cfg, log.New(&out, "", 0), stop) }()
+	defer func() {
+		stop <- os.Interrupt
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serveNode = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("the node did not stop")
+		}
+	}()
+	logged := func(what string, found func(string) bool) {
+		t.Helper()
+		limit := time.Now().Add(5 * time.Second)
+		for !found(out.String()) {
+			if time.Now().After(limit) {
+				t.Fatalf("%s: %q", what, out.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	logged("the node did not start", listening.MatchString)
+	addrs := listening.FindStringSubmatch(out.String())
+	cells, info := addrs[1], addrs[2]
+	read := func() pki.Verified {
+		t.Helper()
+		code, bundle := call(t, http.MethodGet, "http://"+info+"/descriptor", nil)
+		if code != http.StatusOK {
+			t.Fatalf("GET /descriptor = %d", code)
+		}
+		nodes, err := pki.Unverified(p, []string{cells}, [][]byte{bundle})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return nodes[0]
+	}
+	echoes := func(onion []byte, link []byte) bool {
+		t.Helper()
+		cl, err := client.Dial(client.Config{Provider: p, Chain: []client.Node{{Addr: cells, StaticPub: onion, LinkPub: link}}})
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer cl.Close()
+		_ = cl.Send([]byte("ping"))
+		select {
+		case reply, open := <-cl.Replies():
+			return open && string(reply) == "ping"
+		case <-time.After(5 * time.Second):
+			t.Fatal("the circuit neither answered nor closed")
+			return false
+		}
+	}
+
+	first := read()
+	if first.Epoch != 0 || bytes.Equal(first.OnionPub, first.LinkPub) {
+		t.Fatalf("a rotating node starts at epoch %d, want 0 with an onion key of its own", first.Epoch)
+	}
+	if strings.Contains(out.String(), "WARNING") {
+		t.Fatalf("a rotating node warned at start: %q", out.String())
+	}
+	clk.advance(time.Hour)
+	logged("the node did not rotate", func(log string) bool { return strings.Contains(log, "onion key rotated epoch=1\n") })
+	var next pki.Verified
+	for wait := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if next = read(); next.Epoch == 1 {
+			break
+		}
+		if time.Now().After(wait) {
+			t.Fatal("the node rotated and kept serving the descriptor of its replaced key")
+		}
+	}
+	if bytes.Equal(next.OnionPub, first.OnionPub) || !bytes.Equal(next.LinkPub, first.LinkPub) {
+		t.Fatal("the rotation must change the onion key and keep the link key")
+	}
+	if !echoes(next.OnionPub, next.LinkPub) {
+		t.Fatal("the relay does not open a setup for the key its node publishes")
+	}
+	if !echoes(first.OnionPub, next.LinkPub) {
+		t.Fatal("the relay does not open a setup for the replaced key during its grace")
+	}
+	if echoes(next.LinkPub, next.LinkPub) {
+		t.Fatal("the relay opened a setup with its link key")
+	}
+}
+
+func TestBaselineNodeWarnsAtStart(t *testing.T) {
+	p, err := suite.New(jcrypto.SuiteC25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	var out logBuffer
+	cfg := config{listen: taken.Addr().String(), info: "127.0.0.1:0", stats: "127.0.0.1:0", descriptorTTL: time.Hour}
+	if err := serveNode(p, cfg, log.New(&out, "", 0), make(chan os.Signal)); err == nil {
+		t.Fatal("serveNode started on a taken port")
+	}
+	if n := strings.Count(out.String(), "WARNING: -onion-rotate=0"); n != 1 {
+		t.Fatalf("%d warnings for a node without rotation, want one: %q", n, out.String())
+	}
+}
+
+// a rotation needs no certificate: the keys change all the same, and the first
+// descriptor signed afterwards names the key that is current then
+func TestRotationWithoutAValidCertificate(t *testing.T) {
+	t.Run("no certificate", func(t *testing.T) {
+		f := newFixture(t, jcrypto.SuiteC25519)
+		ring := f.rotating(t, time.Hour)
+		f.clock.advance(time.Hour)
+		f.n.rotateIfDue()
+		epoch, onion := ring.Current()
+		if epoch != 1 {
+			t.Fatalf("epoch %d without a certificate, want 1", epoch)
+		}
+		if code, _ := f.descriptor(t); code != http.StatusServiceUnavailable {
+			t.Fatalf("GET /descriptor without a certificate = %d, want 503", code)
+		}
+		if strings.Contains(f.log.String(), "descriptor after the rotation") {
+			t.Fatalf("a rotation without a certificate logged a failed signing: %q", f.log.String())
+		}
+		f.enroll(t, f.clock.Now().Add(72*time.Hour))
+		if _, v := f.inService(t); v.Epoch != 1 || !bytes.Equal(v.OnionPub, onion) {
+			t.Fatalf("the first descriptor names epoch %d, want the key current at the signing", v.Epoch)
+		}
+	})
+	t.Run("expired certificate", func(t *testing.T) {
+		f := newFixture(t, jcrypto.SuiteC25519)
+		ring := f.rotating(t, time.Hour)
+		f.enroll(t, t0.Add(90*time.Minute))
+		_, k0 := ring.Current()
+		f.clock.advance(time.Hour)
+		f.n.rotateIfDue()
+		if _, v := f.inService(t); v.Epoch != 1 || !v.DescUntil.Equal(t0.Add(90*time.Minute)) {
+			t.Fatalf("epoch %d until %v, want 1 until the certificate ends", v.Epoch, v.DescUntil)
+		}
+
+		f.clock.advance(time.Hour + pki.Skew)
+		f.n.rotateIfDue()
+		if epoch, _ := ring.Current(); epoch != 2 || opensFor(t, f.p, ring, k0) {
+			t.Fatalf("epoch %d with the certificate expired, want 2 and the first key released", epoch)
+		}
+		if code, _ := f.descriptor(t); code != http.StatusServiceUnavailable {
+			t.Fatalf("GET /descriptor with the certificate expired = %d, want 503", code)
+		}
+		if strings.Contains(f.log.String(), "descriptor after the rotation") {
+			t.Fatalf("a rotation under an expired certificate logged a failed signing: %q", f.log.String())
+		}
+		if got := f.stats(t); !strings.Contains(got, `"cert":"expired"`) || !strings.Contains(got, `"onion_epoch":2`) {
+			t.Fatalf("stats: %s", got)
+		}
+	})
+}
+
+// finds room for a key only when asked
+type tightProvider struct {
+	jcrypto.CryptoProvider
+	room func() bool
+}
+
+func (p *tightProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
+	if !p.room() {
+		return nil, nil, errors.New("no room for a key")
+	}
+	return p.CryptoProvider.GenerateEphemeral()
+}
+
+func TestRotationGivesItsHeldPageToTheNewKey(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	inner := f.p
+	ring := f.rotating(t, time.Hour)
+	f.enroll(t, t0.Add(72*time.Hour))
+	held := f.n.onion.reserve
+	if held == nil || held.Bytes() == nil {
+		t.Fatal("a rotating node holds no page for its next key")
+	}
+
+	f.n.p = &tightProvider{CryptoProvider: inner, room: func() bool { return held.Bytes() == nil }}
+	f.clock.advance(time.Hour)
+	f.n.rotateIfDue()
+	if epoch, _ := ring.Current(); epoch != 1 {
+		t.Fatalf("epoch %d: the held page was not given back before the key was made: %q", epoch, f.log.String())
+	}
+	again := f.n.onion.reserve
+	if again == nil || again == held || again.Bytes() == nil {
+		t.Fatal("no page is held for the rotation after this one")
+	}
+	if got := f.stats(t); !strings.Contains(got, `"onion_rotate_failed":0`) {
+		t.Fatalf("stats after a rotation: %s", got)
+	}
+
+	f.n.p = &tightProvider{CryptoProvider: inner, room: func() bool { return false }}
+	f.clock.advance(time.Hour + pki.Skew)
+	f.n.rotateIfDue()
+	f.n.rotateIfDue()
+	if epoch, _ := ring.Current(); epoch != 1 {
+		t.Fatalf("epoch %d after two failed attempts, want 1", epoch)
+	}
+	if got := f.stats(t); !strings.Contains(got, `"onion_rotate_failed":2`) || !strings.Contains(got, `"onion_epoch":1`) {
+		t.Fatalf("stats after two failed attempts: %s", got)
+	}
+	if n := strings.Count(f.log.String(), "onion key rotation: no room for a key"); n != 1 {
+		t.Fatalf("the failure was logged %d times, want once: %q", n, f.log.String())
+	}
+	last := f.n.onion.reserve
+	if last == nil || last.Bytes() == nil {
+		t.Fatal("a failed attempt left no page for the next one")
+	}
+
+	f.n.p = inner
+	f.n.rotateIfDue()
+	if epoch, _ := ring.Current(); epoch != 2 {
+		t.Fatalf("epoch %d once a key could be made, want 2", epoch)
+	}
+	kept := f.n.onion.reserve
+	f.n.closeOnion()
+	if kept.Bytes() != nil || f.n.onion.reserve != nil {
+		t.Fatal("the held page outlived the node's onion keys")
+	}
+	f.clock.advance(3 * time.Hour)
+	f.n.rotateIfDue()
+	if f.n.onion.reserve != nil || strings.Count(f.log.String(), "onion key rotated") != 2 {
+		t.Fatal("a node that closed its onion keys went on rotating")
 	}
 }
 
@@ -522,9 +971,9 @@ func TestRotatingNodeReleasesItsKeys(t *testing.T) {
 	stop := make(chan os.Signal, 1)
 	done := make(chan error, 1)
 	go func() { done <- serveNode(p, cfg, log.New(&out, "", 0), stop) }()
-	deadline := time.Now().Add(5 * time.Second)
+	limit := time.Now().Add(5 * time.Second)
 	for !strings.Contains(out.String(), "relay listening") {
-		if time.Now().After(deadline) {
+		if time.Now().After(limit) {
 			t.Fatalf("the node did not start: %q", out.String())
 		}
 		time.Sleep(5 * time.Millisecond)
