@@ -67,7 +67,7 @@ func TestStatsCarryEveryCounter(t *testing.T) {
 		`"accepted":1`, `"forwarded":2`, `"delivered":3`, `"dropped":4`, `"padding":5`, `"broken":6`,
 		`"accept_retries":7`, `"refused_links":8`, `"refused_busy":9`, `"refused_source":10`, `"refused_rate":11`,
 		`"refused_setups":12`, `"timed_out":13`, `"expired":14`, `"refused_extend":15`, `"failed_extend":16`, `"cert":"none"`,
-		`"roster":0`, `"peers":0`, `"descriptor_requests":0`, `"mirror_requests":0`,
+		`"roster":0`, `"peers":0`, `"descriptor_requests":0`, `"mirror_requests":0`, `"onion_epoch":0`,
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("/stats %s lacks %s", body, want)

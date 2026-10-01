@@ -51,10 +51,12 @@ type served struct {
 // what the node publishes about itself; without -auth there is no identity and
 // the descriptor goes out unsigned
 type node struct {
-	p        jcrypto.CryptoProvider
-	name     string
-	addr     string
-	id       *pki.Identity
+	p    jcrypto.CryptoProvider
+	name string
+	addr string
+	id   *pki.Identity
+	// without -auth: the descriptor of the first onion key; a rotation puts the
+	// one of the next key in out
 	unsigned []byte
 	ttl      time.Duration
 	now      func() time.Time
@@ -88,6 +90,10 @@ type node struct {
 	// the one roster this process takes, nil until then
 	roster      []byte
 	signedState string
+	// set with -onion-rotate only: link is the key every descriptor of this
+	// process carries next to the onion key of the moment
+	link  []byte
+	onion *onionKeys
 }
 
 func checkAuthFlags(stats, name, advertise string, ttl time.Duration) error {
@@ -162,7 +168,11 @@ func (n *node) certState() string {
 // the bundle in service and the unix second it runs out
 func (n *node) current() ([]byte, int64, bool) {
 	if n.id == nil {
-		return n.unsigned, math.MaxInt64, n.unsigned != nil
+		b := n.unsigned
+		if s := n.out.Load(); s != nil {
+			b = s.bundle
+		}
+		return b, math.MaxInt64, b != nil
 	}
 	s := n.out.Load()
 	if s == nil {
@@ -253,6 +263,7 @@ func (n *node) adminMux(counters func() relay.Counters) http.Handler {
 			"peers":               held,
 			"descriptor_requests": n.descriptorRequests.Load(),
 			"mirror_requests":     n.mirrorRequests.Load(),
+			"onion_epoch":         n.onionEpoch(),
 		})
 	})
 	if n.id != nil {
@@ -355,6 +366,12 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 // callers hold mu
 func (n *node) sign(now time.Time) error {
 	n.signedState = n.certState()
+	if n.onion != nil {
+		// read from the ring at every signing, so a descriptor never names a key
+		// older than the one the node publishes
+		epoch, pub := n.onion.ring.Current()
+		n.id.SetKeys(n.link, pub, epoch)
+	}
 	if err := n.id.Refresh(now, n.ttl); err != nil {
 		return err
 	}
