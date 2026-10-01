@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
@@ -32,8 +33,12 @@ type Conn struct {
 	recv  jcrypto.AEAD
 	frame int
 
-	wmu     sync.Mutex
-	sendSeq uint64
+	wmu          sync.Mutex
+	sendSeq      uint64
+	writeTimeout time.Duration
+	// a frame cut short leaves the peer's stream out of step, so after one
+	// failed write the link carries nothing more
+	werr    error
 	rmu     sync.Mutex
 	recvSeq uint64
 	buf     []byte
@@ -103,7 +108,7 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 
 	peerEph := make([]byte, len(ephPub))
 	if _, err := io.ReadFull(raw, peerEph); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
+		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
 
 	secret, err := combine(func() (*secmem.Buffer, error) {
@@ -128,7 +133,7 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer) (
 	}
 	hello := make([]byte, n+1)
 	if _, err := io.ReadFull(raw, hello); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
+		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
 	mode, peerEph := hello[0], hello[1:]
 	if mode != modeAnonymous && mode != modeAuthenticated {
@@ -218,16 +223,35 @@ func nonce(size int, seq uint64) []byte {
 	return n
 }
 
+// every later frame must leave within d or its write fails; zero waits forever
+func (c *Conn) SetWriteTimeout(d time.Duration) {
+	c.wmu.Lock()
+	c.writeTimeout = d
+	c.wmu.Unlock()
+}
+
 func (c *Conn) WriteCell(cell *wire.Cell) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if c.werr != nil {
+		return c.werr
+	}
 	if c.send == nil {
 		return net.ErrClosed
 	}
 	frame := c.send.Seal(nil, nonce(c.send.NonceSize(), c.sendSeq), cell[:], nil)
 	c.sendSeq++
-	_, err := c.raw.Write(frame)
-	return err
+	if c.writeTimeout > 0 {
+		if err := c.raw.SetWriteDeadline(time.Now().Add(c.writeTimeout)); err != nil {
+			c.werr = err
+			return err
+		}
+	}
+	if _, err := c.raw.Write(frame); err != nil {
+		c.werr = err
+		return err
+	}
+	return nil
 }
 
 // padding is a property of this link only, so it never reaches the caller

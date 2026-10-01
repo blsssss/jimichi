@@ -3,8 +3,11 @@ package link_test
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"net"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/jimichi-org/jimichi/crypto/c25519"
 	"github.com/jimichi-org/jimichi/link"
@@ -185,5 +188,31 @@ func TestPaddingIsDroppedByTheReceiver(t *testing.T) {
 	}
 	if n := rec.seen.Len() - hs; n != 5*frame {
 		t.Fatalf("wire carried %d bytes after the handshake, want %d", n, 5*frame)
+	}
+}
+
+// a peer that stops reading must not hold the writer, and once a frame has
+// failed the link sends nothing more: the peer's frame numbers are out of step
+func TestWriteGivesUpOnAPeerThatStopsReading(t *testing.T) {
+	client, server, _ := pair(t, false)
+	client.SetWriteTimeout(50 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- client.WriteCell(sample(1)) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("write returned %v, want a deadline error", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("write still blocked on a peer that does not read")
+	}
+
+	go func() {
+		var cell wire.Cell
+		_ = server.ReadCell(&cell)
+	}()
+	if err := client.WriteCell(sample(2)); err == nil {
+		t.Fatal("the link sent a frame after a failed one")
 	}
 }

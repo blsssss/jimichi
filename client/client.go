@@ -3,6 +3,7 @@
 package client
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -57,9 +58,18 @@ type Config struct {
 	CoverRate time.Duration
 	Jitter    time.Duration
 	// lets the testbed observe the entry link the way a passive network
-	// adversary would; nil means a plain dial
-	Dial func(network, addr string) (net.Conn, error)
+	// adversary would; nil means a plain dial. The context carries the dial
+	// timeout, so a hook cannot hold Dial either
+	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// zero picks the default for each
+	DialTimeout      time.Duration
+	HandshakeTimeout time.Duration
 }
+
+const (
+	DefaultDialTimeout      = 10 * time.Second
+	DefaultHandshakeTimeout = 10 * time.Second
+)
 
 type Client struct {
 	cfg     Config
@@ -142,16 +152,14 @@ func Dial(cfg Config) (*Client, error) {
 		return nil, err
 	}
 
-	dial := cfg.Dial
-	if dial == nil {
-		dial = net.Dial
-	}
-	raw, err := dial("tcp", cfg.Chain[0].Addr)
+	raw, err := dialEntry(cfg)
 	if err != nil {
 		circuit.Close()
 		release()
 		return nil, err
 	}
+	// a silent entry would otherwise hold Dial, and the circuit keys, for good
+	_ = raw.SetDeadline(time.Now().Add(orDefault(cfg.HandshakeTimeout, DefaultHandshakeTimeout)))
 	conn, err := link.Dial(raw, cfg.Provider, cfg.Chain[0].linkKey())
 	if err != nil {
 		circuit.Close()
@@ -165,6 +173,7 @@ func Dial(cfg Config) (*Client, error) {
 		_ = conn.Close()
 		return nil, err
 	}
+	_ = raw.SetDeadline(time.Time{})
 
 	c := &Client{
 		cfg:     cfg,
@@ -183,6 +192,23 @@ func Dial(cfg Config) (*Client, error) {
 		c.startCover()
 	}
 	return c, nil
+}
+
+func dialEntry(cfg Config) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), orDefault(cfg.DialTimeout, DefaultDialTimeout))
+	defer cancel()
+	if cfg.Dial != nil {
+		return cfg.Dial(ctx, "tcp", cfg.Chain[0].Addr)
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", cfg.Chain[0].Addr)
+}
+
+func orDefault(d, def time.Duration) time.Duration {
+	if d <= 0 {
+		return def
+	}
+	return d
 }
 
 func (c *Client) MaxPayload() int { return c.circuit.MaxPayload() }

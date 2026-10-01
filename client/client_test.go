@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"net"
 	"testing"
@@ -25,7 +26,7 @@ func TestDialRefusesMissingOrMisSizedKeys(t *testing.T) {
 			}
 			good := func(addr string) Node { return Node{Addr: addr, StaticPub: key()} }
 			errDialed := errors.New("dialed")
-			dial := func(string, string) (net.Conn, error) { return nil, errDialed }
+			dial := func(context.Context, string, string) (net.Conn, error) { return nil, errDialed }
 
 			for _, c := range []struct {
 				name  string

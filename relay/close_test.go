@@ -3,6 +3,7 @@ package relay
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -143,7 +144,7 @@ func TestFailedForwardWriteBreaksTheCircuit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = r.route(cell, from)
+			err = r.route(cell, from, netip.Addr{})
 			if got := errors.Is(err, errBroken); got != tc.broken || err == nil {
 				t.Fatalf("route: %v; counted as broken %v, want %v", err, got, tc.broken)
 			}

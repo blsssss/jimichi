@@ -629,8 +629,9 @@ func TestRepliesDoNotRevealPayload(t *testing.T) {
 	run := func(real bool) int {
 		var seen *backCounter
 		cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, middle, exit),
-			Dial: func(network, addr string) (net.Conn, error) {
-				conn, err := net.Dial(network, addr)
+			Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				conn, err := d.DialContext(ctx, network, addr)
 				if err != nil {
 					return nil, err
 				}

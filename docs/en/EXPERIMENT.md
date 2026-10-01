@@ -190,11 +190,17 @@ hold. It is reported as a measured boundary, not passed over.
   per flow, flow_closed and flow_closed_after: whether the circuit closed before the run was read,
   as the client saw it and whatever the cause, and how long after the flows started ("" for one
   that stayed open).
-- A run is broken when any of these is non-zero. In the summary, runs counts every run and
-  broken_runs the broken ones; medians, ranges and ci_degenerate_runs rest on runs - broken_runs.
-  With none left those fields are null, and the latency median is null as well when the clean runs
-  have no latency sample. A line resting on a single clean run gives that run's values, not a
-  median, and the printed summary marks it.
+- A row also carries relay_timed_out (handshake, setup and write deadlines that ran out),
+  relay_expired (circuits closed for idleness or age) and relay_refused (connections and setups
+  the relays turned away), summed over the relays. A run is limited when any of them is non-zero:
+  what it lost, it lost to a node limit and not to the configuration under test. A write deadline
+  that ran out closes its circuit, so it shows in relay_timed_out and in relay_broken_circuits.
+- A run is broken when any of the closure fields is non-zero. In the summary, runs counts every
+  run, broken_runs the broken ones, limited_runs the limited ones (a run can be both) and
+  clean_runs those that are neither; medians, ranges and ci_degenerate_runs rest on the clean
+  runs. With none left those fields are null, and the latency median is null as well when the
+  clean runs have no latency sample. A line resting on a single clean run gives that run's
+  values, not a median, and the printed summary marks it.
 - relay_dropped_cells counts cells the relays dropped: cells whose layer did not open, cells with
   an unparseable header, cells for an unknown circuit, control cells of a failed or refused setup
   (a layer that does not open, a copy of a setup seen before, a full tag cache, an identifier in

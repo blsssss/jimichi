@@ -3,6 +3,8 @@ package lab
 import (
 	"testing"
 	"time"
+
+	"github.com/jimichi-org/jimichi/relay"
 )
 
 // in immediate mode every cell on the entry link crosses the observed link
@@ -18,6 +20,10 @@ func TestExitTracesMatchTheirFlow(t *testing.T) {
 	}
 	if len(run.Exit) != len(run.Entry) {
 		t.Fatalf("%d exit traces for %d flows", len(run.Exit), len(run.Entry))
+	}
+	if run.RelayTimedOut != 0 || run.RelayExpired != 0 || run.RelayRefused != 0 {
+		t.Fatalf("relay limits acted on a plain run: %d timed out, %d expired, %d refused",
+			run.RelayTimedOut, run.RelayExpired, run.RelayRefused)
 	}
 	for i := range run.Entry {
 		in, out := run.Entry[i].Len(), run.Exit[i].Len()
@@ -94,5 +100,19 @@ func TestCounterSkipsHandshakeAndCountsFrames(t *testing.T) {
 	}
 	if got := tr.Len(); got != 3 || c.pending != 1 {
 		t.Fatalf("%d frames with %d bytes pending, want 3 and 1", got, c.pending)
+	}
+}
+
+// two relays with the same counters: dropped 1+1, closed circuits 4+4, timed out
+// 2+2, expired 3+3, refused (1+1+1+1+1)+(1+1+1+1+1)
+func TestRelayLimitsReachTheRun(t *testing.T) {
+	var run Run
+	c := relay.Counters{Dropped: 1, Broken: 4, TimedOut: 2, Expired: 3,
+		RefusedLinks: 1, RefusedBusy: 1, RefusedSource: 1, RefusedRate: 1, RefusedSetups: 1}
+	run.addRelay(c)
+	run.addRelay(c)
+	if run.RelayDropped != 2 || run.RelayBroken != 8 || run.RelayTimedOut != 4 || run.RelayExpired != 6 || run.RelayRefused != 10 {
+		t.Fatalf("dropped %d, closed %d, timed out %d, expired %d, refused %d; want 2, 8, 4, 6, 10",
+			run.RelayDropped, run.RelayBroken, run.RelayTimedOut, run.RelayExpired, run.RelayRefused)
 	}
 }

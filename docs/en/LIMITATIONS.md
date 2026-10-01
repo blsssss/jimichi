@@ -40,7 +40,12 @@ English | [Русский](../ru/LIMITATIONS.md)
 - Control cell tags live as long as the node key, and the key lives until the node restarts. Once
   their number reaches the bound the node refuses new circuits until it restarts: forgetting a tag
   would mean accepting a copy again. Anyone who builds circuits can fill the cache, each tag
-  costing a TCP connection and a link handshake. This is a denial of service.
+  costing a TCP connection and a link handshake. This is a denial of service. At the default
+  setup rate of 0.2 per second one address needs about 91 hours to fill the default 65536 tags,
+  n addresses 91/n hours. On the testbed a forwarding node takes cells only from the previous
+  relay (network policy), so its setups pass the per-address rate of the entry first and the same
+  times hold; a node without per-address limits that anyone can reach would be bounded only by
+  how fast it completes handshakes.
 - A tag takes 16 bytes (about 36 bytes of heap) of ordinary node memory per opened control cell
   until restart. It holds no key, but a memory dump gives an upper bound on the number of
   circuits, and together with the node key and a kept control cell it confirms that the node
@@ -76,6 +81,24 @@ English | [Русский](../ru/LIMITATIONS.md)
   number k as math/big: the request, the certificate and every timer re-signing of the descriptor,
   each half of its lifetime (CRYPTO, known gaps). When issuance runs on a Windows host, the CA key
   stays in unlocked memory of a process without dump prevention while it issues.
+- The node limits (ARCHITECTURE) give one address at most 32 of the 512 links, 4 of the 32
+  concurrent handshakes, 10 new links and 0.2 setups per second; an IPv6 /64 counts as one
+  address. Sixteen addresses fill the links and eight keep every handshake slot busy, each slot
+  for at most 2 s, and the node then refuses new connections. This is a denial of service; each
+  slot is held at most until its deadline, the idle timeout or the circuit lifetime runs out.
+- A node cannot tell a relay from a client until links between nodes are authenticated, and on a
+  middle or exit node every circuit arrives from the previous relay's one address. Per-address
+  limits there would let one client use up the allowance of every circuit through that pair of
+  relays, so a node used as middle or exit runs without them and relies on the global caps only;
+  a client that entered the chain at such a node would meet only the global caps as well. The
+  testbed keeps the per-address limits on the entry relay-1, turns them off on relay-2 and
+  relay-3, and lets only the previous relay reach their cell ports (network policy). This is a
+  property of the fixed testbed chain: with a random chain (planned) any relay can be an entry,
+  and a policy by position no longer applies.
+- A circuit is torn down after the idle timeout and after its lifetime, and the client then builds
+  a new one. The moment depends only on the node parameters and the last cell: with constant-rate
+  sending a circuit is never idle, and the lifetime shows only the age of a circuit, which the
+  connection open time already shows.
 - The cell format uses constant size and replay protection but is not full Sphinx: beyond the
   constant size there is no processing that hides the position of a node in the chain.
 - Each circuit opens its own TCP connections between nodes and closes them in a cascade when it

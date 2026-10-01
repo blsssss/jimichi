@@ -144,7 +144,7 @@ docs/         documentation, en/ and ru/
 kind create cluster --config deploy/kind/cluster.yaml
 make images
 kind load docker-image jimichi/relay:dev jimichi/client:dev --name jimichi
-kubectl apply -f deploy/base/relay.yaml
+kubectl apply -f deploy/base/relay.yaml -f deploy/base/network.yaml
 kubectl -n jimichi wait --for=condition=Available deployment -l app=relay --timeout=180s
 bash scripts/enroll.sh
 kubectl apply -f deploy/base/client.yaml

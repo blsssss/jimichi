@@ -52,6 +52,8 @@ type node struct {
 	ttl      time.Duration
 	now      func() time.Time
 	logger   *log.Logger
+	// whether the relay still accepts cells; nil counts as serving
+	serving func() bool
 
 	// replaced only by a signing that succeeded, so a failed re-signing leaves
 	// the last good bundle in service until it expires
@@ -115,6 +117,10 @@ func (n *node) descriptor() ([]byte, bool) {
 func (n *node) infoMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if n.serving != nil && !n.serving() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("GET /descriptor", func(w http.ResponseWriter, _ *http.Request) {
@@ -137,13 +143,21 @@ func (n *node) adminMux(counters func() relay.Counters) http.Handler {
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		s := counters()
 		writeJSON(w, map[string]any{
-			"accepted":  s.Accepted,
-			"forwarded": s.Forwarded,
-			"delivered": s.Delivered,
-			"dropped":   s.Dropped,
-			"padding":   s.Padding,
-			"broken":    s.Broken,
-			"cert":      n.certState(),
+			"accepted":       s.Accepted,
+			"forwarded":      s.Forwarded,
+			"delivered":      s.Delivered,
+			"dropped":        s.Dropped,
+			"padding":        s.Padding,
+			"broken":         s.Broken,
+			"accept_retries": s.AcceptRetries,
+			"refused_links":  s.RefusedLinks,
+			"refused_busy":   s.RefusedBusy,
+			"refused_source": s.RefusedSource,
+			"refused_rate":   s.RefusedRate,
+			"refused_setups": s.RefusedSetups,
+			"timed_out":      s.TimedOut,
+			"expired":        s.Expired,
+			"cert":           n.certState(),
 		})
 	})
 	if n.id != nil {

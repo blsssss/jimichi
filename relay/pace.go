@@ -82,9 +82,11 @@ func (p *pacer) run() {
 	defer ticker.Stop()
 	for {
 		if err := p.send(); err != nil {
-			// the link is broken; closing it lets the circuit teardown run the
-			// same way it does for a failed read, and it counts as a circuit the
-			// node closed unless the node closed the link itself
+			// the link is broken or its peer stopped reading; closing it lets the
+			// circuit teardown run the same way it does for a failed read, and it
+			// counts as a circuit the node closed unless the node closed the link
+			// itself
+			p.stats.timeout(err)
 			if !lostToTeardown(err) {
 				p.stats.add(&p.stats.Broken)
 			}

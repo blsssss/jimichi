@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
@@ -36,23 +38,51 @@ type Config struct {
 	// when there is nothing queued; zero forwards every cell at once
 	Period     time.Duration
 	QueueCells int
+
+	// the limits below take their default at zero and are off when negative
+	HandshakeTimeout time.Duration
+	SetupTimeout     time.Duration
+	// zero picks a few periods when paced and a fixed bound otherwise
+	WriteTimeout time.Duration
+	// a circuit is idle while no cell passes in either direction; padding
+	// does not count
+	IdleTimeout     time.Duration
+	CircuitLifetime time.Duration
+	MaxHandshakes   int
+	// zero picks an eighth of MaxHandshakes, at least one
+	MaxHandshakesPerSource int
+	MaxLinks               int
+	MaxLinksPerSource      int
+	// events per second from one source, allowed in bursts of the given size;
+	// a burst cannot be negative, the rate is what turns the limit off
+	SourceLinkRate   float64
+	SourceLinkBurst  int
+	SourceSetupRate  float64
+	SourceSetupBurst int
 }
 
 type Relay struct {
 	cfg    Config
+	lim    limits
 	setups *wire.SetupCache
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	serving atomic.Int32
+
 	mu       sync.Mutex
 	circuits map[uint64]*circuit
 	// every circuit arrives on a connection of its own; a second one on the same
 	// link would add a pacer whose frame rate counts the circuits sharing it
-	owners   map[*link.Conn]uint64
-	conns    map[net.Conn]struct{}
-	closed   bool
-	handlers sync.WaitGroup
+	owners      map[*link.Conn]uint64
+	conns       map[net.Conn]struct{}
+	inbound     int
+	handshaking int
+	sources     map[netip.Addr]*source
+	sourceCap   int
+	closed      bool
+	handlers    sync.WaitGroup
 
 	stats Stats
 }
@@ -72,8 +102,21 @@ type Counters struct {
 	Padding   uint64
 	// circuits this node closed: a cell out of turn, a backward cell of another
 	// kind or one it could not wrap, a cell with no room in its queue, a cell it
-	// could not write to either neighbour, or a reply the exit could not seal
+	// could not write to either neighbour, or a reply the exit could not seal.
+	// a write that ran into its deadline is such a failed write and is counted
+	// here and in TimedOut; a circuit closed for idleness or age is not
 	Broken uint64
+
+	AcceptRetries uint64
+	RefusedLinks  uint64
+	RefusedBusy   uint64
+	RefusedSource uint64
+	RefusedRate   uint64
+	RefusedSetups uint64
+	// setup, write and handshake deadlines that ran out
+	TimedOut uint64
+	// circuits closed for idleness or age
+	Expired uint64
 }
 
 func (s *Stats) add(field *uint64) {
@@ -105,6 +148,14 @@ type circuit struct {
 	done     chan struct{}
 	fwd      *pacer
 	bwd      *pacer
+
+	born time.Time
+	// time since born of the last cell either way, on the monotonic clock
+	active atomic.Int64
+	// guards the expiry timer against a reset racing the release that stops it
+	expiryMu  sync.Mutex
+	expiry    *time.Timer
+	unwatched bool
 }
 
 func New(cfg Config) (*Relay, error) {
@@ -120,21 +171,28 @@ func New(cfg Config) (*Relay, error) {
 	if cfg.SetupCache < 0 || cfg.SetupCache > MaxSetupCache {
 		return nil, fmt.Errorf("relay: setup cache of %d entries outside 0..%d", cfg.SetupCache, MaxSetupCache)
 	}
+	lim, err := resolveLimits(cfg)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Relay{
-		cfg:      cfg,
-		setups:   wire.NewSetupCache(cfg.SetupCache),
-		ctx:      ctx,
-		cancel:   cancel,
-		circuits: make(map[uint64]*circuit),
-		owners:   make(map[*link.Conn]uint64),
-		conns:    make(map[net.Conn]struct{}),
+		cfg:       cfg,
+		lim:       lim,
+		setups:    wire.NewSetupCache(cfg.SetupCache),
+		ctx:       ctx,
+		cancel:    cancel,
+		circuits:  make(map[uint64]*circuit),
+		owners:    make(map[*link.Conn]uint64),
+		conns:     make(map[net.Conn]struct{}),
+		sources:   make(map[netip.Addr]*source),
+		sourceCap: maxSources,
 	}, nil
 }
 
-// bounds how long a silent peer can hold a handshake or a dial open, so neither
-// can keep Close from reaching the keys
-const handshakeTimeout = 5 * time.Second
+// bounds how long a silent next hop can hold a dial or a handshake open, so
+// neither can keep Close from reaching the keys
+const onwardTimeout = 5 * time.Second
 
 // tags sit on the heap for the life of the node key, about 36 bytes each with
 // the map overhead, so this keeps the cache near 36 MiB, inside a 128 MiB pod
@@ -152,20 +210,47 @@ var (
 
 func (r *Relay) Stats() *Stats { return &r.stats }
 
+// reports whether some Serve is still accepting, which is what readiness means
+func (r *Relay) Serving() bool { return r.serving.Load() > 0 }
+
+// a temporary accept error, such as running out of descriptors, is waited out
+// the way net/http does; Serve returns on a closed listener or a permanent error,
+// and returns nil only once the relay itself is closed
 func (r *Relay) Serve(ln net.Listener) error {
+	r.serving.Add(1)
+	defer r.serving.Add(-1)
+	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if r.isClosed() {
 				return nil
 			}
-			return err
+			if !temporary(err) {
+				return err
+			}
+			r.stats.add(&r.stats.AcceptRetries)
+			delay = acceptBackoff(delay)
+			wait := time.NewTimer(delay)
+			select {
+			case <-wait.C:
+			case <-r.ctx.Done():
+				wait.Stop()
+				return nil
+			}
+			continue
 		}
-		if !r.hold(conn, true) {
+		delay = 0
+		src := sourceOf(conn.RemoteAddr())
+		switch err := r.admit(conn, src); {
+		case err == nil:
+			go r.handle(conn, src)
+		case errors.Is(err, errRelayClosed):
 			_ = conn.Close()
 			return nil
+		default:
+			_ = conn.Close()
 		}
-		go r.handle(conn)
 	}
 }
 
@@ -199,16 +284,13 @@ func (r *Relay) isClosed() bool {
 	return r.closed
 }
 
-func (r *Relay) hold(conn net.Conn, handler bool) bool {
+func (r *Relay) hold(conn net.Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return false
 	}
 	r.conns[conn] = struct{}{}
-	if handler {
-		r.handlers.Add(1)
-	}
 	return true
 }
 
@@ -218,19 +300,38 @@ func (r *Relay) drop(conn net.Conn) {
 	r.mu.Unlock()
 }
 
-func (r *Relay) handle(conn net.Conn) {
+func (r *Relay) owns(lc *link.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.owners[lc]
+	return ok
+}
+
+func (r *Relay) handle(conn net.Conn, src netip.Addr) {
 	defer r.handlers.Done()
 	defer func() {
-		r.drop(conn)
+		r.leave(conn, src)
 		_ = conn.Close()
 	}()
 
-	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	// an honest initiator sends its hello at once, so a short deadline costs it
+	// nothing and frees the slot of a silent one early
+	if r.lim.handshake > 0 {
+		_ = conn.SetDeadline(time.Now().Add(r.lim.handshake))
+	}
 	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv)
+	r.handshakeDone(src)
 	if err != nil {
+		r.stats.timeout(err)
 		return
 	}
+	lc.SetWriteTimeout(r.lim.write)
 	_ = conn.SetDeadline(time.Time{})
+	// a link is worth its socket only once it carries a circuit
+	awaiting := r.lim.setup > 0
+	if awaiting {
+		_ = conn.SetReadDeadline(time.Now().Add(r.lim.setup))
+	}
 	defer func() {
 		_ = lc.Close()
 		r.teardown(lc)
@@ -239,9 +340,10 @@ func (r *Relay) handle(conn net.Conn) {
 	for {
 		var cell wire.Cell
 		if err := lc.ReadCell(&cell); err != nil {
+			r.stats.timeout(err)
 			return
 		}
-		if err := r.route(&cell, lc); err != nil {
+		if err := r.route(&cell, lc, src); err != nil {
 			if errors.Is(err, errBroken) {
 				r.stats.add(&r.stats.Broken)
 				return
@@ -251,12 +353,16 @@ func (r *Relay) handle(conn net.Conn) {
 				return
 			}
 		}
+		if awaiting && r.owns(lc) {
+			awaiting = false
+			_ = conn.SetReadDeadline(time.Time{})
+		}
 	}
 }
 
 var errFatal = errors.New("relay: connection unusable")
 
-func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
+func (r *Relay) route(cell *wire.Cell, from *link.Conn, src netip.Addr) error {
 	hdr, err := cell.Header()
 	if err != nil {
 		return err
@@ -264,7 +370,7 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	r.stats.add(&r.stats.Accepted)
 
 	if hdr.Kind == wire.KindControl {
-		return r.setup(cell, hdr, from)
+		return r.setup(cell, hdr, from, src)
 	}
 
 	r.mu.Lock()
@@ -285,6 +391,7 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		if !c.fwdSeq.Next(hdr.Counter) {
 			return errOutOfTurn
 		}
+		c.touch()
 		r.stats.add(&r.stats.Delivered)
 		var reply []byte
 		if !cover && r.cfg.Deliver != nil {
@@ -302,6 +409,7 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	if !c.fwdSeq.Next(hdr.Counter) {
 		return errOutOfTurn
 	}
+	c.touch()
 	out.SetCircuit(c.nextID)
 	if c.fwd != nil {
 		if !c.fwd.push(out, true) {
@@ -310,6 +418,7 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		return nil
 	}
 	if err := c.write(out); err != nil {
+		r.stats.timeout(err)
 		return writeFailure(err)
 	}
 	r.stats.add(&r.stats.Forwarded)
@@ -351,6 +460,7 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 		return nil
 	}
 	if err := c.writeBack(cell); err != nil {
+		r.stats.timeout(err)
 		return writeFailure(err)
 	}
 	return nil
@@ -385,6 +495,7 @@ func (r *Relay) teardown(from *link.Conn) {
 }
 
 func (r *Relay) release(c *circuit) {
+	c.unwatch()
 	if c.next != nil {
 		_ = c.next.Close()
 		c.fwd.close()
@@ -420,6 +531,7 @@ func (r *Relay) backward(c *circuit) {
 			r.stats.add(&r.stats.Broken)
 			return
 		}
+		c.touch()
 		if c.bwd != nil {
 			if !c.bwd.push(out, true) {
 				r.stats.add(&r.stats.Broken)
@@ -428,6 +540,7 @@ func (r *Relay) backward(c *circuit) {
 			continue
 		}
 		if err := c.writeBack(out); err != nil {
+			r.stats.timeout(err)
 			if !lostToTeardown(err) {
 				r.stats.add(&r.stats.Broken)
 			}
@@ -437,14 +550,15 @@ func (r *Relay) backward(c *circuit) {
 	}
 }
 
-func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
+func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn, src netip.Addr) error {
 	// a link carries one circuit, so a further setup on it is turned away before
 	// it costs an agreement or a tag: otherwise one link could fill the cache
-	r.mu.Lock()
-	_, owned := r.owners[from]
-	r.mu.Unlock()
-	if owned {
+	if r.owns(from) {
 		return errLinkTaken
+	}
+	if !r.allowSetup(src) {
+		r.stats.add(&r.stats.RefusedSetups)
+		return r.setupFailed(from, errSetupRate)
 	}
 
 	layer, err := wire.OpenSetup(r.cfg.Provider, r.cfg.StaticPriv, cell)
@@ -473,6 +587,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 		in:       from,
 		hopIndex: index,
 		done:     make(chan struct{}),
+		born:     time.Now(),
 	}
 	if c.isExit {
 		c.fwdSeq.Expect(layer.First)
@@ -502,6 +617,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 
 	if c.isExit {
 		c.bwd = r.newPacer(from)
+		r.watch(c)
 		return nil
 	}
 	if err := r.extend(c, layer, index); err != nil {
@@ -512,6 +628,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 		hop.Close()
 		return r.setupFailed(from, err)
 	}
+	r.watch(c)
 	return nil
 }
 
@@ -532,17 +649,18 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 	if err != nil {
 		return err
 	}
-	if !r.hold(raw, false) {
+	if !r.hold(raw) {
 		_ = raw.Close()
 		return errFatal
 	}
 	fail := func(err error) error {
+		r.stats.timeout(err)
 		_ = raw.Close()
 		r.drop(raw)
 		return err
 	}
 
-	_ = raw.SetDeadline(time.Now().Add(handshakeTimeout))
+	_ = raw.SetDeadline(time.Now().Add(onwardTimeout))
 	// the relay does not know the next node's long-term key, so the link to it
 	// is anonymous: it hides headers from a passive observer, the onion layers
 	// keep the content bound to the nodes the client chose
@@ -550,6 +668,7 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 	if err != nil {
 		return fail(err)
 	}
+	conn.SetWriteTimeout(r.lim.write)
 	fwd, err := wire.ForwardSetup(layer, index)
 	if err != nil {
 		_ = conn.Close()
@@ -579,7 +698,7 @@ func (r *Relay) newPacer(out *link.Conn) *pacer {
 }
 
 func (r *Relay) dial(addr string) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, handshakeTimeout)
+	ctx, cancel := context.WithTimeout(r.ctx, onwardTimeout)
 	defer cancel()
 	if r.cfg.Dial != nil {
 		return r.cfg.Dial(ctx, "tcp", addr)
@@ -597,4 +716,62 @@ func (c *circuit) writeBack(cell *wire.Cell) error {
 	c.inMu.Lock()
 	defer c.inMu.Unlock()
 	return c.in.WriteCell(cell)
+}
+
+func (c *circuit) touch() { c.active.Store(int64(time.Since(c.born))) }
+
+// one timer per circuit that sleeps until the nearer of the idle and the age
+// limit; a cell only moves a timestamp, so traffic never resets the timer
+func (r *Relay) watch(c *circuit) {
+	if r.lim.idle <= 0 && r.lim.lifetime <= 0 {
+		return
+	}
+	c.touch()
+	c.expiryMu.Lock()
+	defer c.expiryMu.Unlock()
+	if c.unwatched {
+		return
+	}
+	c.expiry = time.AfterFunc(time.Until(r.expiresAt(c)), func() { r.expire(c) })
+}
+
+func (r *Relay) expiresAt(c *circuit) time.Time {
+	var at time.Time
+	if r.lim.idle > 0 {
+		at = c.born.Add(time.Duration(c.active.Load()) + r.lim.idle)
+	}
+	if r.lim.lifetime > 0 {
+		if end := c.born.Add(r.lim.lifetime); at.IsZero() || end.Before(at) {
+			at = end
+		}
+	}
+	return at
+}
+
+func (r *Relay) expire(c *circuit) {
+	c.expiryMu.Lock()
+	if c.unwatched {
+		c.expiryMu.Unlock()
+		return
+	}
+	if left := time.Until(r.expiresAt(c)); left > 0 {
+		c.expiry.Reset(left)
+		c.expiryMu.Unlock()
+		return
+	}
+	c.unwatched = true
+	c.expiryMu.Unlock()
+	r.stats.add(&r.stats.Expired)
+	// the handler reading this link then tears the circuit down as if the
+	// previous hop had hung up, and the break travels both ways
+	_ = c.in.Close()
+}
+
+func (c *circuit) unwatch() {
+	c.expiryMu.Lock()
+	defer c.expiryMu.Unlock()
+	c.unwatched = true
+	if c.expiry != nil {
+		c.expiry.Stop()
+	}
 }
