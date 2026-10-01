@@ -59,14 +59,14 @@ func TestStatsCarryEveryCounter(t *testing.T) {
 	admin := httptest.NewServer(n.adminMux(func() relay.Counters {
 		return relay.Counters{Accepted: 1, Forwarded: 2, Delivered: 3, Dropped: 4, Padding: 5, Broken: 6,
 			AcceptRetries: 7, RefusedLinks: 8, RefusedBusy: 9, RefusedSource: 10, RefusedRate: 11,
-			RefusedSetups: 12, TimedOut: 13, Expired: 14, RefusedExtend: 15}
+			RefusedSetups: 12, TimedOut: 13, Expired: 14, RefusedExtend: 15, FailedExtend: 16}
 	}))
 	defer admin.Close()
 	_, body := call(t, http.MethodGet, admin.URL+"/stats", nil)
 	for _, want := range []string{
 		`"accepted":1`, `"forwarded":2`, `"delivered":3`, `"dropped":4`, `"padding":5`, `"broken":6`,
 		`"accept_retries":7`, `"refused_links":8`, `"refused_busy":9`, `"refused_source":10`, `"refused_rate":11`,
-		`"refused_setups":12`, `"timed_out":13`, `"expired":14`, `"refused_extend":15`, `"cert":"none"`,
+		`"refused_setups":12`, `"timed_out":13`, `"expired":14`, `"refused_extend":15`, `"failed_extend":16`, `"cert":"none"`,
 		`"roster":0`, `"peers":0`, `"descriptor_requests":0`, `"mirror_requests":0`,
 	} {
 		if !strings.Contains(string(body), want) {

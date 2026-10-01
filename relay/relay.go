@@ -121,6 +121,11 @@ type Counters struct {
 	// setups whose next address Peers did not know, turned away without a
 	// dial; the setup cell is counted in Dropped as well
 	RefusedExtend uint64
+	// setups whose next hop did not finish the link handshake: it holds
+	// another key than the expected one, or answered something else or nothing
+	// in time. The setup is not sent on; it is counted in Dropped as well, and
+	// in TimedOut when the deadline ran out
+	FailedExtend uint64
 	// setup, write and handshake deadlines that ran out; a dial to the next
 	// hop that times out shows in Dropped only
 	TimedOut uint64
@@ -682,11 +687,15 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 	}
 
 	_ = raw.SetDeadline(time.Now().Add(onwardTimeout))
-	// with the next node's link key the frame keys depend on its static key, so
-	// only that node reads the setup; without one the link is anonymous and
-	// hides headers from a passive observer only
+	// with the next node's link key the frame keys depend on its static key, and
+	// the handshake ends only once that node has shown it derived them, so the
+	// setup goes to no other; without a key the link is anonymous and hides
+	// headers from a passive observer only
 	conn, err := link.Dial(raw, r.cfg.Provider, peerLink)
 	if err != nil {
+		if errors.Is(err, link.ErrHandshake) {
+			r.stats.add(&r.stats.FailedExtend)
+		}
 		return fail(err)
 	}
 	conn.SetWriteTimeout(r.lim.write)

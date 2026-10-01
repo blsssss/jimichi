@@ -11,6 +11,7 @@ import (
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/c25519"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/link"
 	"github.com/jimichi-org/jimichi/relay"
 )
 
@@ -81,9 +82,20 @@ func TestPeerWithoutAKeyIsRefused(t *testing.T) {
 	}
 }
 
-// the next node holds another key than the one its peer was given: it derives
-// other frame keys, cannot read the setup and the circuit ends
-func TestExtendWithAWrongLinkKeyEndsTheCircuit(t *testing.T) {
+type writeCounter struct {
+	net.Conn
+	written *atomic.Int64
+}
+
+func (w writeCounter) Write(b []byte) (int, error) {
+	n, err := w.Conn.Write(b)
+	w.written.Add(int64(n))
+	return n, err
+}
+
+// the next node holds another key than the one its peer was given: the link
+// handshake fails, the setup is never written to it and the circuit ends
+func TestSetupIsNotForwardedToANodeWithAnotherKey(t *testing.T) {
 	p := c25519.New()
 	delivered := make(chan []byte, 1)
 	exit := startNode(t, p, func(_ uint64, payload []byte) []byte {
@@ -96,9 +108,16 @@ func TestExtendWithAWrongLinkKeyEndsTheCircuit(t *testing.T) {
 	}
 	priv.Release()
 	var dials atomic.Int32
+	var written atomic.Int64
 	entry := startRelay(t, p, relay.Config{
 		Peers: func(addr string) ([]byte, bool) { return other, addr == exit.addr },
-		Dial:  countDials(&dials),
+		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := countDials(&dials)(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return writeCounter{Conn: conn, written: &written}, nil
+		},
 	})
 
 	cl, err := client.Dial(client.Config{Provider: p, Chain: chainOf(entry, exit)})
@@ -112,6 +131,10 @@ func TestExtendWithAWrongLinkKeyEndsTheCircuit(t *testing.T) {
 	if n := dials.Load(); n != 1 {
 		t.Fatalf("the relay dialled %d times, want 1", n)
 	}
+	hello, _ := link.InitiatorHandshakeSize(p)
+	if n := written.Load(); n != int64(hello) {
+		t.Fatalf("the relay wrote %d bytes to the node with another key, want its hello of %d and no setup", n, hello)
+	}
 	if got := exit.r.Stats().Snapshot().Accepted; got != 0 {
 		t.Fatalf("a node without the expected link key accepted %d cells", got)
 	}
@@ -120,8 +143,10 @@ func TestExtendWithAWrongLinkKeyEndsTheCircuit(t *testing.T) {
 		t.Fatal("a message was delivered over a link with the wrong key")
 	default:
 	}
-	if got := entry.r.Stats().Snapshot().RefusedExtend; got != 0 {
-		t.Fatalf("refused extends = %d, a known address is not a refusal", got)
+	// a failed handshake onwards has a counter of its own and drops the setup cell
+	if got := entry.r.Stats().Snapshot(); got.FailedExtend != 1 || got.Dropped != 1 || got.RefusedExtend != 0 || got.TimedOut != 0 {
+		t.Fatalf("failed extends = %d, dropped = %d, refused extends = %d, timed out = %d, want 1, 1, 0, 0",
+			got.FailedExtend, got.Dropped, got.RefusedExtend, got.TimedOut)
 	}
 }
 
@@ -156,8 +181,8 @@ func TestChainWithPeersDeliversOnEverySuite(t *testing.T) {
 				t.Fatal("no reply came back")
 			}
 			for i, n := range []*node{entry, middle, exit} {
-				if got := n.r.Stats().Snapshot().RefusedExtend; got != 0 {
-					t.Fatalf("hop %d refused %d extends", i, got)
+				if got := n.r.Stats().Snapshot(); got.RefusedExtend != 0 || got.FailedExtend != 0 {
+					t.Fatalf("hop %d refused %d extends and failed %d", i, got.RefusedExtend, got.FailedExtend)
 				}
 			}
 		})

@@ -69,9 +69,15 @@ func InitiatorHandshakeSize(p jcrypto.CryptoProvider) (int, error) {
 	return n + 1, err
 }
 
-// the responder answers with its public key alone, without the mode byte
+// the responder answers with its public key, without the mode byte, and one
+// frame that confirms the keys
 func ResponderHandshakeSize(p jcrypto.CryptoProvider) (int, error) {
-	return pubSize(p)
+	n, err := pubSize(p)
+	if err != nil {
+		return 0, err
+	}
+	frame, err := FrameSize(p)
+	return n + frame, err
 }
 
 // FrameSize is what one cell costs on the wire once the link layer wraps it
@@ -90,7 +96,10 @@ func FrameSize(p jcrypto.CryptoProvider) (int, error) {
 }
 
 // peerStatic authenticates the responder when the initiator knows its key; nil
-// gives an anonymous channel that still hides everything from a passive observer
+// gives an anonymous channel that still hides everything from a passive observer.
+// Dial returns only after the responder's first frame opened under the keys
+// derived here, so nothing is sent to a responder that derived other keys; the
+// caller's deadline on raw bounds the wait
 func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, error) {
 	ephPriv, ephPub, err := p.GenerateEphemeral()
 	if err != nil {
@@ -124,7 +133,20 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 		return nil, err
 	}
 	defer secret.Release()
-	return newConn(raw, p, secret, labelI2R, labelR2I)
+	c, err := newConn(raw, p, secret, labelI2R, labelR2I)
+	if err != nil {
+		return nil, err
+	}
+	var first wire.Cell
+	if err := c.readFrame(&first); err != nil {
+		c.discard()
+		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
+	}
+	if !first.IsPadding() {
+		c.discard()
+		return nil, ErrHandshake
+	}
+	return c, nil
 }
 
 func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer) (*Conn, error) {
@@ -162,7 +184,17 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer) (
 		return nil, err
 	}
 	defer secret.Release()
-	return newConn(raw, p, secret, labelR2I, labelI2R)
+	c, err := newConn(raw, p, secret, labelR2I, labelI2R)
+	if err != nil {
+		return nil, err
+	}
+	// the confirmation: a padding cell as frame 0 of this direction, written in
+	// both modes so that what a responder sends does not depend on the mode
+	if err := c.WriteCell(wire.NewPadding()); err != nil {
+		c.discard()
+		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
+	}
+	return c, nil
 }
 
 // the ephemeral secret gives forward secrecy, the static one binds the channel
@@ -290,6 +322,11 @@ func (c *Conn) FrameSize() int { return c.frame }
 // the socket closes first: a reader blocked on it holds rmu until it returns
 func (c *Conn) Close() error {
 	err := c.raw.Close()
+	c.discard()
+	return err
+}
+
+func (c *Conn) discard() {
 	c.wmu.Lock()
 	if c.send != nil {
 		c.send.Destroy()
@@ -302,5 +339,4 @@ func (c *Conn) Close() error {
 		c.recv = nil
 	}
 	c.rmu.Unlock()
-	return err
 }

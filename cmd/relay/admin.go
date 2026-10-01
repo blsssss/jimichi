@@ -232,6 +232,7 @@ func (n *node) adminMux(counters func() relay.Counters) http.Handler {
 			"refused_rate":        s.RefusedRate,
 			"refused_setups":      s.RefusedSetups,
 			"refused_extend":      s.RefusedExtend,
+			"failed_extend":       s.FailedExtend,
 			"timed_out":           s.TimedOut,
 			"expired":             s.Expired,
 			"cert":                n.certState(),

@@ -300,10 +300,10 @@ func logCounters(r *relay.Relay, n *node, every time.Duration, logger *log.Logge
 		s := r.Stats().Snapshot()
 		roster, held := n.peerState()
 		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d broken=%d"+
-			" accept_retries=%d refused_links=%d refused_busy=%d refused_source=%d refused_rate=%d refused_setups=%d refused_extend=%d timed_out=%d expired=%d"+
+			" accept_retries=%d refused_links=%d refused_busy=%d refused_source=%d refused_rate=%d refused_setups=%d refused_extend=%d failed_extend=%d timed_out=%d expired=%d"+
 			" cert=%s roster=%d peers=%d descriptor_requests=%d mirror_requests=%d",
 			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, s.Broken,
-			s.AcceptRetries, s.RefusedLinks, s.RefusedBusy, s.RefusedSource, s.RefusedRate, s.RefusedSetups, s.RefusedExtend, s.TimedOut, s.Expired,
+			s.AcceptRetries, s.RefusedLinks, s.RefusedBusy, s.RefusedSource, s.RefusedRate, s.RefusedSetups, s.RefusedExtend, s.FailedExtend, s.TimedOut, s.Expired,
 			n.certState(), roster, held, n.descriptorRequests.Load(), n.mirrorRequests.Load())
 	}
 }

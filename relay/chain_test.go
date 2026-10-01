@@ -654,14 +654,14 @@ func TestRepliesDoNotRevealPayload(t *testing.T) {
 		} else if err := cl.SendCover(); err != nil {
 			t.Fatalf("SendCover: %v", err)
 		}
-		hello, _ := link.InitiatorHandshakeSize(p)
-		want := (hello - 1) + 5*frame
+		answer, _ := link.ResponderHandshakeSize(p)
+		want := answer + 5*frame
 		deadline := time.Now().Add(3 * time.Second)
 		for seen.total() < want && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
 		}
 		time.Sleep(50 * time.Millisecond)
-		return (seen.total() - (hello - 1)) / frame
+		return (seen.total() - answer) / frame
 	}
 
 	cover, withMessage := run(false), run(true)
