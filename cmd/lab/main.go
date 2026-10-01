@@ -152,11 +152,32 @@ func main() {
 	binList := flag.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
 	repeats := flag.Int("repeats", 1, "runs per configuration")
 	out := flag.String("out", "artifacts", "directory for the json report")
-	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks")
+	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic")
 	rev := flag.String("rev", "unknown", "code revision recorded in every row")
 	seed := flag.Int64("seed", 1, "base seed; every repeat derives its own from it")
 	suiteName := flag.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
+	nodes := flag.Int("nodes", 5, "paths set: nodes a chain of -hops is drawn from")
+	rogue := flag.Int("rogue", 2, "paths set: how many of -nodes the adversary holds")
+	samples := flag.Int("samples", 100000, "paths set: chains to draw")
 	flag.Parse()
+
+	if *set == "paths" {
+		if *rev == "unknown" {
+			fmt.Fprintln(os.Stderr, "warning: no -rev given, rows cannot be traced to a revision")
+		}
+		res, err := samplePaths(*nodes, *hops, *rogue, *samples, *seed)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		res.Rev = *rev
+		printPaths(os.Stdout, res)
+		if err := write(*out, "paths-"+time.Now().UTC().Format("20060102-150405"), []pathsResult{res}); err != nil {
+			fmt.Fprintf(os.Stderr, "report: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *flows < 2 || *hops < 2 {
 		fmt.Fprintln(os.Stderr, "need at least 2 flows and 2 hops: the attack pairs flows seen before and after a relay")

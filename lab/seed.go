@@ -4,6 +4,7 @@ package lab
 const (
 	streamPhases uint64 = iota + 1
 	streamGaps
+	streamPaths
 )
 
 // Derive mixes the parts into the seed with splitmix64, so neighbouring seeds,
