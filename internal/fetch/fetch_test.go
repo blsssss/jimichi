@@ -283,3 +283,19 @@ func TestStatusTextAndHeaderSizeStayOut(t *testing.T) {
 		t.Fatalf("Bundle = %v, want a 503 that says what is not published", err)
 	}
 }
+
+// the info port may be longer than the cell port, so a host that only just
+// fits an address with a short port must still be reachable
+func TestURLOfAHostNearTheAddressLimit(t *testing.T) {
+	host := strings.Repeat("a", 30) + "." + strings.Repeat("b", 31)
+	if len(host+":1") != 64 {
+		t.Fatalf("test host is %d bytes with its port, want 64", len(host+":1"))
+	}
+	got, err := URL(host+":1", "9100", "/descriptor")
+	if err != nil {
+		t.Fatalf("URL: %v", err)
+	}
+	if want := "http://" + host + ":9100/descriptor"; got != want {
+		t.Fatalf("URL = %q, want %q", got, want)
+	}
+}

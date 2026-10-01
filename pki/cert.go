@@ -138,13 +138,32 @@ func validHost(h string) bool {
 	if ip, err := netip.ParseAddr(h); err == nil {
 		return ip.Zone() == "" && ip.String() == h
 	}
-	for _, label := range strings.Split(h, ".") {
+	labels := strings.Split(h, ".")
+	for _, label := range labels {
 		if !validLabel(label) {
+			return false
+		}
+	}
+	// some resolvers read a name ending in a number, such as 127.1 or
+	// 0x7f000001, as an address: a second spelling of an IP literal
+	return !numeric(labels[len(labels)-1])
+}
+
+func numeric(l string) bool {
+	if strings.HasPrefix(l, "0x") {
+		return true
+	}
+	for i := 0; i < len(l); i++ {
+		if l[i] < '0' || l[i] > '9' {
 			return false
 		}
 	}
 	return true
 }
+
+func ValidHost(h string) bool { return validHost(h) }
+
+func ValidPort(p string) bool { return validPort(p) }
 
 func validLabel(l string) bool {
 	if l == "" || l[0] == '-' || l[len(l)-1] == '-' {

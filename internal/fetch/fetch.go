@@ -68,7 +68,7 @@ func URL(addr, port, path string) (string, error) {
 	hostport := net.JoinHostPort(host, port)
 	u := url.URL{Scheme: "http", Host: hostport, Path: path}
 	back, err := url.Parse(u.String())
-	if !pki.ValidAddr(hostport) || err != nil || back.Hostname() != host || back.Port() != port ||
+	if !pki.ValidHost(host) || !pki.ValidPort(port) || err != nil || back.Hostname() != host || back.Port() != port ||
 		back.Path != path || back.User != nil || back.RawQuery != "" || back.Fragment != "" {
 		return "", fmt.Errorf("fetch: %q with port %q does not name one host and port", addr, port)
 	}
