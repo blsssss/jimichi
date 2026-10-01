@@ -158,7 +158,7 @@ hold. It is reported as a measured boundary, not passed over.
 | Measured | How |
 |---|---|
 | Key agreement | go test -bench, nanoseconds per operation, GOST against X25519 |
-| Setup during the grace period | nanoseconds per setup at a node holding one and two onion keys, GOST against X25519: the second key costs a second agreement |
+| Setup during the grace period | nanoseconds per setup at a node holding one and two onion keys, GOST against X25519: the second key costs a second agreement, paid only during the grace period, 22 minutes of every hour on the testbed |
 | Layer stripping | nanoseconds and allocations per cell |
 | Node throughput | cells per second at saturation, on 1, 2 and 4 cores |
 | Latency by hop count | one, two, three nodes; p50, p95, p99 |

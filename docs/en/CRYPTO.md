@@ -126,7 +126,8 @@ and has no primitives of its own.
   same uid and does nothing against root.
 - In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start and refuses
   to run below 64 KiB, or when locking was asked for and failed. A rotating node holds one locked
-  page per onion key, two at most, and does not take a new onion key whose page is not locked.
+  page per onion key, two at most, and one more that it gives back right before it makes the
+  next key. It does not take a new onion key whose page is not locked.
 - Every measure is switched by configuration, so its contribution can be measured:
 
 | Flag | What it turns on |

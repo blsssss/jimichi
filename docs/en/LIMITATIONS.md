@@ -34,7 +34,7 @@ English | [Русский](../ru/LIMITATIONS.md)
   them, which is a denial of service, and it sees when a client prepares a circuit: the request
   for the descriptors precedes the setup.
 - A node keeps a peer's descriptor until it expires. After a peer restarts, the mirror serves its
-  previous bundle for up to the descriptor lifetime (1 h), and circuits through that peer fail
+  previous bundle for up to the descriptor lifetime (20 min), and circuits through that peer fail
   at setup: the new process holds another link key and does not pass the link handshake. A
   rotation of the peer's onion key has no such effect: the peer holds the replaced key until
   that bundle has expired.
@@ -59,25 +59,39 @@ English | [Русский](../ru/LIMITATIONS.md)
   built for: at most the rotation period plus the descriptor lifetime plus the clock allowance
   (Skew, 2 min) after that key was first published. The rotation period is -onion-rotate, or the
   descriptor lifetime plus the allowance when that is longer, since a rotation waits for the
-  release of the replaced key. On the testbed (-onion-rotate 1 h, -descriptor-ttl 1 h) that is
-  1 h 2 min + 1 h + 2 min = 2 h 4 min. The node reads the clock once a second, so the rotation
-  and the release can each come up to a second late. Node memory taken after the release does
-  not open the cell. A wire capture cannot be read without the links' ephemeral keys.
+  release of the replaced key. On the testbed (-onion-rotate 1 h, -descriptor-ttl 20 min) that
+  is 1 h + 20 min + 2 min = 1 h 22 min; with the defaults of the binary (1 h and 1 h) it is
+  1 h 2 min + 1 h + 2 min = 2 h 4 min. Node memory taken after the release does not open the
+  cell. A wire capture cannot be read without the links' ephemeral keys.
+- The window is counted on two clocks, the wall clock and the running time of the host, and each
+  of its two steps, the rotation and the release, happens as soon as either clock says so. The
+  node reads them once a second, so each step can come up to a second late. A host that sleeps
+  does not extend the window beyond its waking: the first reading after it goes by the wall
+  clock. A wall clock set back does not extend it: the running time ends the period. A wall
+  clock set forwards ends it early, and clients holding the replaced key are refused. The window
+  is exceeded while the node cannot act: a sleeping host and a frozen process keep their memory
+  until they run again, and a machine paused and resumed with neither clock moved forward keeps
+  a key longer by the length of the pause.
+- The window holds only while rotations succeed. A node that cannot make its next key, or cannot
+  lock its page, keeps the published key, tries again every second and counts the attempts
+  (onion_rotate_failed); until one succeeds that key has no bound.
 - Onion key rotation does not cover: the hop keys of circuits that are alive when memory is
   taken, which open the cells of those circuits, recorded ones included, for as long as the
   circuit lives (24 h at most by default); the link key, which lives as long as the process and
   lets whoever holds it answer links in place of the node, though it opens no layer and no
-  recorded link; the copies of a released onion key that the libraries left on the heap (CRYPTO,
-  known gaps), the X25519 scalar on c25519 and math/big numbers on GOST.
-- Without -onion-rotate, which is the default of the binary and the way the lab harness runs its
-  nodes, the link key is the onion key as well and lives until the node restarts: a neighbour
-  that kept the setup cells can, once the key is stolen, open that node's layers for the time it
-  ran.
+  recorded link; the copies of a released onion key that the libraries left on the heap, the
+  X25519 scalar on c25519 and math/big numbers on GOST; heap copies of the secret a setup was
+  opened with and of hop keys, those of circuits already torn down included, which stay until
+  that memory is reused and open the recorded cells of their circuit without any onion key
+  (CRYPTO, known gaps).
+- With -onion-rotate 0, the measurement baseline and the way the lab harness runs its nodes, the
+  link key is the onion key as well and lives until the node restarts: a neighbour that kept the
+  setup cells can, once the key is stolen, open that node's layers for the time it ran.
 - Rotation is the node's own doing and a client cannot check it: the epoch in a descriptor shows
   that the published key changed, not that the replaced one was released. The property holds for
   a node that ran the published code and was compromised later.
 - During the grace period every setup costs the node two key agreements instead of one, two VKO
-  on the GOST suite (EXPERIMENT, block 6).
+  on the GOST suite (EXPERIMENT, block 6). On the testbed that is 22 minutes of every hour.
 - Without node authentication a descriptor carries no lifetime, so nothing bounds how long a
   client or a mirror holds one. A setup built from an unsigned descriptor that is older than the
   grace period is refused, and the client has to fetch the descriptors again.
@@ -88,7 +102,7 @@ English | [Русский](../ru/LIMITATIONS.md)
   builds circuits can fill the cache, each tag costing a TCP connection and a link handshake.
   This is a denial of service. At the default setup rate of 0.2 per second one address needs
   about 91 hours to fill the default 65536 tags, n addresses 91/n hours; within one rotation
-  period of the testbed that takes about 87 addresses. This estimate is for the entry. On the
+  period of the testbed that takes about 90 addresses. This estimate is for the entry. On the
   testbed a forwarding node takes cells only from the previous relay where the cluster's network
   plugin enforces network policies (in CI the e2e fails without it), so every setup that reaches
   it has first spent a token at the entry; a node without per-address limits that anyone can
