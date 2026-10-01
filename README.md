@@ -69,12 +69,13 @@ Threat modelling follows the FSTEC methodology of 2021-02-05; scenarios are name
 
 ## Results
 
-Preliminary series: ten flows, three relays, c25519 suite, five 30 s runs per configuration, each
-client starting its schedule at a random phase. Every number is the median across the five runs.
-Rows with the client alone come from the series over client rates, rows with relay clocks from
-the series over relay periods, whose own client-only runs agree (AUC 0.947 at 70 ms, 0.950 at
-35 ms). With five runs per point no difference is claimed as significant; the full series of
-thirty runs per point is still to come ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
+Preliminary series on revision 71e1ad8: ten flows, three relays, c25519 suite, five 30 s runs per
+configuration, each client starting its schedule at a random phase. Every number is the median
+across the five runs. Rows with the client alone come from the series over client rates, rows with
+relay clocks from the series over relay periods, whose own client-only runs agree (AUC 0.951 at
+70 ms and at 35 ms). With five runs per point no difference is claimed as significant; the full
+series of thirty runs per point is still to come
+([#23](https://github.com/jimichi-org/jimichi/issues/23)).
 The lab harness starts the relays and the clients in one process on loopback, not on the kind
 testbed described below, so there is no network delay; network emulation is planned
 ([#46](https://github.com/jimichi-org/jimichi/issues/46)).
@@ -91,40 +92,43 @@ better one for the observer. Chance is AUC 0.5 and top-1 10%.
 
 | Protection | Bandwidth between relays | Median round trip | AUC, 10 ms | AUC, 100 ms | Top-1, 10 ms |
 |---|---|---|---|---|---|
-| none | x1.00 | 0.15 ms | 1.000 | 1.000 | 100% |
-| cover on top, +2x | x2.99 | 0.13 ms | 1.000 | 1.000 | 100% |
-| constant rate at the client, 70 ms | x2.85 | 47 ms | 0.948 | 0.952 | 60% |
-| constant rate at the client, 35 ms | x5.69 | 21 ms | 0.951 | 0.942 | 70% |
-| relays on their own clocks, 66.5 ms | x3.00 | 182 ms | 0.485 | 0.483 | 0% |
-| relays on their own clocks, 33.25 ms | x5.99 | 89 ms | 0.528 | 0.550 | 10% |
-| both, client 70 ms, relays 66.5 ms | x2.99 | 216 ms | 0.506 | 0.526 | 15% |
-| both, client 35 ms, relays 33.25 ms | x5.99 | 108 ms | 0.596 | 0.486 | 10% |
+| none | x1.00 | 0.198 ms | 1.000 | 1.000 | 100% |
+| cover on top, +2x | x2.99 | 0.155 ms | 1.000 | 1.000 | 100% |
+| constant rate at the client, 70 ms | x2.85 | 49 ms | 0.951 | 0.951 | 70% |
+| constant rate at the client, 35 ms | x5.69 | 20 ms | 0.971 | 0.971 | 80% |
+| relays on their own clocks, 66.5 ms | x3.00 | 185 ms | 0.523 | 0.551 | 10% |
+| relays on their own clocks, 33.25 ms | x5.99 | 87 ms | 0.641 | 0.498 | 15% |
+| both, client 70 ms, relays 66.5 ms | x3.00 | 212 ms | 0.604 | 0.586 | 14% |
+| both, client 35 ms, relays 33.25 ms | x5.99 | 113 ms | 0.482 | 0.463 | 0% |
 
 - Cover traffic added on top of real messages does not help at all: even at three times the
   bandwidth every flow is linked.
 - A constant rate at the client does not hide a flow either. Each client ticks with its own phase,
   the phase crosses a chain of relays that forward at once, and with a 10 ms window the attack links
-  flows at every rate. A 100 ms window looks safe only where the period divides it: almost every
-  window then holds the same number of cells and nearly all scores tie (AUC 0.50-0.55), which says
-  nothing about protection. In this series the last client to start ticked in step with the
-  observer's windows, a harness effect since removed.
+  flows at every rate (AUC 0.91-0.99). A 100 ms window looks safe only where the period divides it:
+  almost every window then holds the same number of cells and nearly all scores tie (AUC
+  0.50-0.55), which says nothing about protection.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/window-en-dark.png">
   <img alt="Attack AUC against the client's cell period for a 10 ms and a 100 ms window" src="docs/img/window-en-light.png">
 </picture>
 
-- Relays sending on their own clocks bring this attack, which counts cells only, down to chance.
-  The price is a constant stream on every link a relay sends on and about 2.5 to 2.7 node periods
-  added to a round trip (182 ms at 66.5 ms, 89 ms at 33.25 ms). The relay period is 5% shorter
-  than the client's, so a missed tick is caught up. The moments the connections of a circuit open
-  and close match along the chain and are not part of the attack yet
+- Relays sending on their own clocks bring this attack, which counts cells only, close to chance:
+  the medians lie between 0.46 and 0.64, and the 95% interval of a single run includes 0.5 in 34 of
+  40 cases (of the other six, four lie above and two below). Five runs of ten flows cannot tell a
+  small remaining leak from none; the full series is to settle it. The price is a constant stream
+  on every link a relay sends on and about 2.6 to 2.8 node periods added to a round trip (185 ms
+  at 66.5 ms, 87 ms at 33.25 ms). The relay period is 5% shorter than the client's, so a missed
+  tick is caught up. The moments the connections of a circuit open and close match along the
+  chain and are not part of the attack yet
   ([#43](https://github.com/jimichi-org/jimichi/issues/43)).
 - The client's constant rate still matters with relay clocks on: it hides the conversation from
   the entry node itself, which the observer here does not model.
 
 Series are run on an idle host; every report row records the host load, the seeds and the code
-revision.
+revision. The round trip without relay clocks is below a millisecond and differs between series
+by about 0.05 ms (0.14 to 0.20 ms without protection), so its last digits carry no meaning.
 
 ## Cryptography
 

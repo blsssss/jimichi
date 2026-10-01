@@ -326,8 +326,8 @@ comparison will be made: the conditions differ, and that will be stated.
    dashboard ([#21](https://github.com/jimichi-org/jimichi/issues/21)).
 2. The observer: the linking attack runs without protection and with each measure in turn. Cover
    traffic on top of the payload is not expected to lower its AUC: in the preliminary series only
-   nodes sending on their own clocks brought it to chance ([README](../../README.md)). A live
-   view of the attack result is planned with the dashboard
+   nodes sending on their own clocks brought it close to chance ([README](../../README.md)). A
+   live view of the attack result is planned with the dashboard
    ([#21](https://github.com/jimichi-org/jimichi/issues/21)).
 3. The bandwidth multiplier against AUC curve. The published figure has no intervals; confidence
    intervals across runs are planned with the full series
