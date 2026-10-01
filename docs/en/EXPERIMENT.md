@@ -74,7 +74,7 @@ indistinguishability, not on the secrecy of the implementation.
 |---|---|
 | Extraction success rate | in what fraction of N attempts the key is found in a dump |
 | Key lifetime window | time from the end of a session until the key no longer appears in memory |
-| Decrypted fraction after a long-term key theft | forward secrecy check: zero for a wire capture (links run on ephemeral keys); for a neighbour that kept the setup cells, the node's layers are expected to open for the time it ran |
+| Decrypted fraction after a node key theft | forward secrecy check: zero for a wire capture (links run on ephemeral keys); for a neighbour that kept the setup cells, the fraction of them whose layer opens with the keys in node memory, by the age of the cell at the moment of the theft. With onion key rotation it is expected to be one while the key of the cell is held and zero past the rotation period plus the descriptor lifetime plus the clock allowance; without rotation one for the whole time the node ran |
 
 ### Client container
 
@@ -137,7 +137,7 @@ whether that matches the theoretical probability of picking a compromised chain.
 | Memory dump during a session | extraction success rate, build without measures against build with mlock and dumps disabled |
 | Dump after the session | key lifetime window in seconds |
 | Search on disk and in the image | found or not |
-| Long-term node key theft | fraction decrypted from recorded traffic |
+| Node key theft at a given age of the recorded setup cells | fraction of recorded setups whose layer opens, against the time from the recording to the theft, with and without onion key rotation |
 | Client | whether the volume key is still in memory after the container is closed |
 
 ### Block 5. Client container, adversaries A5 and A6
@@ -158,6 +158,7 @@ hold. It is reported as a measured boundary, not passed over.
 | Measured | How |
 |---|---|
 | Key agreement | go test -bench, nanoseconds per operation, GOST against X25519 |
+| Setup during the grace period | nanoseconds per setup at a node holding one and two onion keys, GOST against X25519: the second key costs a second agreement |
 | Layer stripping | nanoseconds and allocations per cell |
 | Node throughput | cells per second at saturation, on 1, 2 and 4 cores |
 | Latency by hop count | one, two, three nodes; p50, p95, p99 |

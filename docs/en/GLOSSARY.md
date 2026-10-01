@@ -21,10 +21,11 @@ English | [Русский](../ru/GLOSSARY.md)
 | Trust anchor | the CA public key the client trusts in advance, as the string `<suite>:<base64>` |
 | Node certificate | a CA-signed record binding a node's name, address and signing key for a validity period |
 | Node signing key | the node's long-term signing pair (identity key): it signs the certificate request and the descriptor and takes no part in key agreement |
-| Onion key | the node key the client agrees a layer secret with during circuit setup |
+| Onion key | the node key the client agrees a layer secret with during circuit setup; with rotation a node replaces it by epochs |
 | Link key | the node public key (LinkPub in the descriptor) the initiator of a link to that node mixes into the handshake: the client for its entry, a node for the next node of a circuit |
 | Node descriptor | a record signed by the node signing key: certificate hash, link key, onion key, epoch and a short validity |
-| Epoch | the number of the link and onion key set in a descriptor: it counts the node's changes of those keys, 0 for the first set |
+| Onion key epoch | the number of the node's onion key in its descriptor: 0 for the first key of a process, one more after every rotation; the link key does not change with it |
+| Grace period | the time a node still holds a replaced onion key: the descriptor lifetime plus the clock allowance after the rotation |
 | Node bundle | the node certificate and descriptor in one JSON object, which the node serves to clients |
 | Operator roster | the list of node names and addresses the operator allows certificates for |
 | Node roster | the anchor with the names and addresses of the nodes of one issuance, sent to each of them; a node extends circuits only to roster nodes |

@@ -207,23 +207,57 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
 - A node with a roster forwards the control cell only to a roster node, over a link authenticated
   with that node's link key (section "Link encryption"). A setup that names another address, or
   whose next node fails the link handshake, ends at this node, and the link it arrived on closes.
-- A node remembers a tag of every control cell it opened for as long as its key lives, and drops a
-  copy, including after the original circuit has closed. Otherwise the copy would create the hop
-  key again and the counters would restart from zero under the same key. The tag is derived from
-  the shared secret under a KDF label of its own rather than read off the wire: keys that differ
-  by a point of small order (8 points on X25519, 4 on GOST) and an X25519 encoding with the top
-  bit set give one secret.
-- The number of tags is bounded (-setup-cache); a full node refuses new circuits rather than
-  forget tags. A control cell on a link that already carries a circuit is dropped before the key
-  agreement and takes no tag.
-- The cache protects only while the layer agreement key dies with the process: a restart clears
-  the tags. The agreement key therefore lives only in process memory and never reaches a disk;
-  the node signing key only signs the descriptor that carries it and takes no part in the layer
-  agreement itself.
+- A node remembers a tag of every control cell it opened for as long as it holds the onion key
+  that opened it, and drops a copy, including after the original circuit has closed. Otherwise
+  the copy would create the hop key again and the counters would restart from zero under the same
+  key. The tag is derived from the shared secret under a KDF label of its own rather than read
+  off the wire: keys that differ by a point of small order (8 points on X25519, 4 on GOST) and an
+  X25519 encoding with the top bit set give one secret.
+- Every onion key has a tag cache of its own, bounded by -setup-cache. A full cache refuses new
+  setups under its key rather than forget tags, and under that key only: the refusal ends when
+  the node publishes its next onion key. A control cell on a link that already carries a circuit
+  is dropped before the key agreement and takes no tag.
+- The cache protects only because the tags and the onion key go together: a released key takes
+  its tags with it, and a restart clears both. The onion key therefore lives only in process
+  memory and never reaches a disk; the node signing key only signs the descriptor that carries it
+  and takes no part in the layer agreement itself.
 
 An empty next address marks the exit node. The exit has no next link, so the field for its
 identifier in the exit's layer carries the counter of the first forward cell, and the setup cell
 does not grow.
+
+Onion key epochs:
+
+- With -onion-rotate (1 h on the testbed) a node opens setup layers with an onion key of its own,
+  separate from the link key, and replaces it every period: it generates a new pair in a secmem
+  buffer, raises the epoch by one and signs a descriptor with the new key at once, without
+  waiting for the signing timer. The link key stays the same for the life of the process.
+- The replaced key is held for a grace period after the rotation: the descriptor lifetime plus
+  the clock allowance (-descriptor-ttl + Skew, 1 h 2 min on the testbed). By then every
+  descriptor that names it has expired, also for a verifier whose clock is behind by the
+  allowance and in the mirror of a node that could not fetch again. The key is then released, its
+  buffer is zeroed and its tags are forgotten: a setup cell recorded for it no longer opens with
+  anything the node holds.
+- A node holds at most two onion keys, and a rotation waits until the replaced key is released.
+  The time between rotations is therefore -onion-rotate, or the grace period when that is
+  longer: 1 h 2 min on the testbed. -onion-rotate must not be shorter than -descriptor-ttl.
+- While two keys are held the node tries both on every setup, in one order and to the end: two
+  agreements and two attempts to open the layer whichever key the client used, so the time a
+  setup takes does not show the epoch. At most one key opens the layer, and the tag goes into the
+  cache of that key.
+- No key is released while a setup is being opened: the release waits for it.
+- The rotation and the release go by the wall clock, which the node reads once a second: its
+  timer runs on the monotonic clock, which stands still while the host sleeps. After a sleep the
+  first reading releases a key whose grace has ended and then rotates once. A descriptor is
+  always signed for the key that is current at that moment.
+- A circuit that is already built does not notice a rotation: its cell keys come from its setup
+  and live until the circuit is torn down.
+- -onion-rotate 0, the default of the binary, is the measurement baseline: the link key opens the
+  setup layers as well, for the life of the process, under epoch 0. The lab harness runs its
+  nodes this way.
+- Without node authentication a descriptor carries no lifetime. After a rotation the node serves
+  an unsigned bundle with the new key and epoch, the other nodes fetch it again within a minute,
+  and the replaced key is held for the same grace period.
 
 Circuit teardown:
 
@@ -266,11 +300,14 @@ shared cap is off, unless it is set to -1 itself.
 | open inbound links, -max-links | 512 | the memory of their circuits stays inside a 128 MiB pod |
 | links from one address, -max-links-per-source | 32 | one peer cannot take every slot; a client needs a handful of circuits |
 | new links from one address, -source-link-rate, -source-link-burst | 10 per second, bursts of up to 50 | every link costs a key pair and an agreement |
-| setups from one address, -source-setup-rate, -source-setup-burst | 0.2 per second, bursts of up to 10 | every setup costs an agreement with the node key, a dial onwards and a tag kept until restart |
+| setups from one address, -source-setup-rate, -source-setup-burst | 0.2 per second, bursts of up to 10 | every setup costs an agreement with each onion key the node holds, a dial onwards and a tag kept as long as its key |
 
 - A connection is admitted or refused when it is accepted, before any key agreement. A control
-  cell is checked after the link handshake and before the agreement with the node key. A refused
-  connection is closed without an answer.
+  cell is checked after the link handshake and before the agreement with the onion keys. A
+  refused connection is closed without an answer.
+- A full tag cache (-setup-cache) refuses setups only under the onion key it belongs to. With
+  rotation the refusal ends when the next key is published, one period later at most; without
+  rotation it ends at a restart.
 - Every connection costs its address a token of the link rate, admitted or refused, and the limits
   of one address are checked before the shared ones: retrying against a full node spends the
   address's own allowance and leaves the shared slots to others.
@@ -312,9 +349,9 @@ layer agreement.
 - The address in the certificate is exactly the host:port the client dials or writes as the next
   node's address.
 - The onion key goes into circuit setup, the link key into the link that leads to the node: from
-  the client to the entry, from a node to the next node. For now a node publishes its static
-  agreement key in both fields. The descriptor carries both fields so the onion key can change
-  independently of the link key.
+  the client to the entry, from a node to the next node. With -onion-rotate the onion key is a
+  pair of its own that changes by epochs while the link key stays (section "Circuit setup",
+  onion key epochs). Without it a node publishes one agreement key in both fields.
 - The request is used only for issuance and is never shown to clients. It proves possession of the
   signing key, and the nonce chosen by the CA proves freshness. Request.Check accepts a request
   only if the nonce matches and the name and address match the operator roster.
@@ -522,6 +559,9 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
   bundles of its roster peers. It is encoded when the cache is refreshed and when the node signs
   its own descriptor; a request copies ready bytes. The answer is 503 until the node holds a
   valid bundle of every roster node, and again from the moment one of them expires.
+- A cached bundle may name an onion key its node has already replaced. The node holds that key
+  until the bundle has expired (section "Circuit setup", onion key epochs), so a client that
+  takes the bundle from the mirror still builds its circuit.
 - The mirror makes the entry the only node a client contacts. The client trusts the entry with
   nothing: it verifies every bundle against its own anchor, so the entry can withhold bundles but
   cannot alter them.
@@ -542,7 +582,8 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
 | CA key | `jimichi enroll`, pki.NewCA, after every request has passed | secmem of the enroll process | the issuance only; Close releases it on every exit path |
 | Anchor | the same process | stdout, ConfigMap, client environment | until the next issuance, public |
 | Node signing key | cmd/relay at start, before any port opens | secmem; a node told to lock memory does not start without the lock | until the process ends |
-| Static node agreement key (onion and link) | cmd/relay, GenerateEphemeral | secmem | until the process ends |
+| Link key | cmd/relay at start, GenerateEphemeral | secmem | until the process ends; without -onion-rotate it is the onion key as well |
+| Onion key | cmd/relay at start and at every rotation, GenerateEphemeral | secmem; with memory locking on, a key that is not locked is not taken | with -onion-rotate one period as the published key and the grace period after it, 2 h 4 min at most on the testbed; released at the end of the grace period and when the process ends |
 | Certificate, descriptor | CA, node | node heap, public; the bundle is kept encoded | certificate until not_after or the node restarts; descriptor 1 h (-descriptor-ttl) |
 | Roster, peer descriptors | enroll, the other nodes | node heap, public | the roster until the node restarts; a peer descriptor until its expires |
 
@@ -556,8 +597,9 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
   previous CA die when the nodes restart with new identities and the clients with the new anchor:
   revocation by forgetting. There is no other revocation.
 - The certificate lifetime comes from -cert-ttl: 72 h on the testbed, 1 h in CI.
-- The descriptor is signed when the certificate is installed and after that only by the timer; a
-  /descriptor request serves the ready bundle and never triggers a signature. The timer fires
+- The descriptor is signed when the certificate is installed, at every rotation of the onion key
+  and otherwise only by the timer; a /descriptor request serves the ready bundle and never
+  triggers a signature. The timer fires
   every min(ttl/4, 1 min) and signs again once the descriptor's wall-clock age reaches half its
   lifetime or the certificate state changes. The wall clock matters because the timer runs on
   the monotonic clock, which stands still while the host sleeps.
@@ -576,7 +618,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 | Source | Data |
 |---|---|
 | client | send and receive timestamps per cell, losses, flow identifier; at start the fingerprint and validity of every verified node |
-| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests). No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
+| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests), the epoch of the onion key (onion_epoch). No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, on every rotation of the onion key a line with the new epoch and no key material, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
 | network | traffic captures at the entry and the exit for the correlation attack |
 | memory | dumps of the relay process in the key extraction scenario |
 
@@ -631,6 +673,7 @@ on the system, not the other way round.
 - Nodes are deployed with the Recreate strategy, so each Deployment has exactly one live pod and
   issuance finds exactly that one. The -name and -advertise flags set the name and address in the
   certificate, and the address is the one the client knows.
+- The relays run with -onion-rotate 1h, and -descriptor-ttl keeps its default of 1 h.
 - deploy/base/network.yaml: a network policy lets each cell port take connections only from the
   hop before it; the info port stays open to the namespace, and the port-forward that issuance
   and the counters use does not pass through it.
