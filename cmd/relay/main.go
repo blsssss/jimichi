@@ -84,6 +84,8 @@ func main() {
 		if err := checkAuthFlags(cfg.stats, cfg.name, cfg.advertise, cfg.descriptorTTL); err != nil {
 			logger.Fatal(err)
 		}
+	} else if err := checkTTL(cfg.descriptorTTL); err != nil {
+		logger.Fatal(err)
 	}
 	if err := checkPeerFlags(cfg.auth, cfg.advertise, cfg.peerInfoPort, cfg.peers); err != nil {
 		logger.Fatal(err)
@@ -138,18 +140,11 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		return errors.New("key memory is not locked, refusing to start")
 	}
 
-	web := fetch.NewClient()
 	n := &node{
 		p: provider, name: cfg.name, addr: cfg.advertise,
 		ttl: cfg.descriptorTTL, now: time.Now, logger: logger,
-		wake: make(chan struct{}),
-		fetchPeer: func(addr string) ([]byte, error) {
-			url, err := fetch.URL(addr, cfg.peerInfoPort, "/descriptor")
-			if err != nil {
-				return nil, err
-			}
-			return fetch.Bundle(web, url, 1, 0)
-		},
+		wake:      make(chan struct{}),
+		fetchPeer: peerFetcher(fetch.NewClient(), cfg.peerInfoPort),
 	}
 	if cfg.auth {
 		id, err := pki.NewIdentity(provider, cfg.name, cfg.advertise)
@@ -201,7 +196,7 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 	if n.id != nil {
 		go n.keepFresh()
 	}
-	go n.keepPeers()
+	go n.keepPeers(nil)
 	if cfg.logEvery > 0 {
 		go logCounters(r, n, cfg.logEvery, logger)
 	}

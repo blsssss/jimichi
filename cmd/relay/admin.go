@@ -21,8 +21,10 @@ import (
 )
 
 const (
-	maxAdminBody  = 4 << 10
+	// the roster is the largest body the admin port takes
+	maxAdminBody  = pki.MaxRoster
 	maxCheckEvery = time.Minute
+	minCheckEvery = time.Second
 )
 
 const (
@@ -61,6 +63,8 @@ type node struct {
 	serving func() bool
 	// one GET of another node's /descriptor, strictly parsed
 	fetchPeer func(addr string) ([]byte, error)
+	// pause before a missing or due peer is asked again; zero picks peerRetry
+	peerRetry time.Duration
 
 	// nil until the roster arrives, or from the start without -auth
 	peers atomic.Pointer[peerCache]
@@ -100,6 +104,10 @@ func checkAuthFlags(stats, name, advertise string, ttl time.Duration) error {
 	if !pki.ValidAddr(advertise) {
 		return fmt.Errorf("-advertise %q: want host:port in printable ASCII, lower case, at most %d bytes", advertise, wire.AddrSize)
 	}
+	return checkTTL(ttl)
+}
+
+func checkTTL(ttl time.Duration) error {
 	if ttl < time.Minute || ttl > pki.MaxDescriptorLife {
 		return fmt.Errorf("-descriptor-ttl %v: want between 1m and %v", ttl, pki.MaxDescriptorLife)
 	}
@@ -195,11 +203,16 @@ func (n *node) infoMux() http.Handler {
 	// its entry alone; the bytes are ready before the request comes
 	mux.HandleFunc("GET /descriptors", func(w http.ResponseWriter, _ *http.Request) {
 		n.mirrorRequests.Add(1)
-		var b []byte
-		ok := false
-		if c := n.peers.Load(); c != nil {
-			b, ok = c.descriptors()
+		c := n.peers.Load()
+		if c == nil {
+			missing := "no descriptors: the node has no roster"
+			if n.id == nil {
+				missing = "no descriptors: without -auth the node lists itself only under -advertise, and the other nodes from -peers"
+			}
+			http.Error(w, missing, http.StatusServiceUnavailable)
+			return
 		}
+		b, ok := c.descriptors()
 		if !ok {
 			http.Error(w, "no valid descriptor of every roster node", http.StatusServiceUnavailable)
 			return
@@ -389,9 +402,10 @@ func (n *node) keepFresh() {
 }
 
 // a quarter of the lifetime keeps a re-signing due at half of it from
-// slipping past the expiry, even for the shortest lifetime of a minute
+// slipping past the expiry, even for the shortest lifetime of a minute; the
+// lower bound keeps a ticker valid whatever lifetime it is given
 func checkEvery(ttl time.Duration) time.Duration {
-	return min(ttl/4, maxCheckEvery)
+	return max(min(ttl/4, maxCheckEvery), minCheckEvery)
 }
 
 func (n *node) refreshIfDue() {

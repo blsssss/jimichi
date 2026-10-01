@@ -748,3 +748,51 @@ func TestRetryAfterALostRosterAnswerSucceeds(t *testing.T) {
 		t.Fatalf("stdout %q: %v", stdout.String(), err)
 	}
 }
+
+// a roster no relay would take is found before any certificate exists: the
+// relays keep their one installation for a run that can succeed
+func TestOversizedRosterStopsTheRunBeforeTheCA(t *testing.T) {
+	made := countCAs(t)
+	s := jcrypto.SuiteC25519
+	p := provider(t, s)
+	fits := func(relays []*fakeRelay) bool {
+		r := pki.Roster{Anchor: pki.Anchor{Suite: s, Pub: make([]byte, 32)}}
+		for _, relay := range relays {
+			r.Nodes = append(r.Nodes, pki.RosterNode{Name: relay.name, Addr: addrOf(relay.name)})
+		}
+		return len(r.Marshal()) <= pki.MaxRoster
+	}
+	var relays []*fakeRelay
+	for i := 1; fits(relays); i++ {
+		relays = append(relays, honestRelay(t, p, fmt.Sprintf("relay-%026d", i)))
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runEnroll(enrollArgs(s, relays...), &stdout, &stderr)
+	want := fmt.Sprintf("roster of %d nodes takes", len(relays))
+	if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "at most 4096") {
+		t.Fatalf("enroll = %v, want the roster refused for its size", err)
+	}
+	if stdout.Len() != 0 || made.Load() != 0 || strings.Contains(stderr.String(), "discarded CA") {
+		t.Fatalf("an oversized roster got as far as a CA: stdout %q, %d CA keys, log %q", stdout.String(), made.Load(), stderr.String())
+	}
+	for _, r := range relays {
+		if r.puts.Load() != 0 || r.rosterPuts.Load() != 0 {
+			t.Fatalf("%s was sent a certificate or a roster", r.name)
+		}
+	}
+
+	// one node fewer fits, and every relay takes that roster
+	relays = relays[:len(relays)-1]
+	for _, r := range relays {
+		r.requests.Store(0)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runEnroll(enrollArgs(s, relays...), &stdout, &stderr); err != nil {
+		t.Fatalf("enroll with the largest roster that fits: %v\n%s", err, stderr.String())
+	}
+	if got := len(relays[0].heldRoster()); got == 0 || got > pki.MaxRoster {
+		t.Fatalf("relay holds a roster of %d bytes", got)
+	}
+}

@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -357,12 +361,12 @@ func TestPeerBundleMustVerifyAtItsAddress(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		url  string
-		want error
+		want string
 	}{
-		{"the bundle of another roster node", n3.info.URL, pki.ErrWrongAddr},
-		{"a bundle under another CA", foreign.info.URL, pki.ErrUnknownCA},
-		{"an unsigned bundle", plain.info.URL, pki.ErrFormat},
-		{"nobody there", "", errors.New("no node at " + n2.n.addr)},
+		{"the bundle of another roster node", n3.info.URL, pki.ErrWrongAddr.Error()},
+		{"a bundle under another CA", foreign.info.URL, pki.ErrUnknownCA.Error()},
+		{"an unsigned bundle", plain.info.URL, pki.ErrFormat.Error()},
+		{"nobody there", "", "no answer"},
 	} {
 		c.route(n2.n.addr, tc.url)
 		if cache.refresh() {
@@ -371,7 +375,7 @@ func TestPeerBundleMustVerifyAtItsAddress(t *testing.T) {
 		if _, ok := n1.n.peerKey(n2.n.addr); ok {
 			t.Fatalf("%s: taken as the descriptor of relay-2", tc.name)
 		}
-		if !strings.Contains(n1.log.String(), "peer "+n2.n.addr+": descriptor: "+tc.want.Error()) {
+		if !strings.Contains(n1.log.String(), "peer "+n2.n.addr+": descriptor: "+tc.want+"\n") {
 			t.Fatalf("%s: no line with %q in the log: %q", tc.name, tc.want, n1.log.String())
 		}
 		if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
@@ -536,15 +540,20 @@ func TestUnsignedNodeMirrorsItsPeersUnverified(t *testing.T) {
 		t.Fatalf("Unverified = %v, %v", nodes, err)
 	}
 
-	// an unsigned bundle carries no times: it is asked for on every refresh and
-	// stays until then
+	// an unsigned bundle carries no times: it is asked for again a minute later
+	// and stays until then
+	c.clock.advance(59 * time.Second)
+	cache.refresh()
+	if got := n2.n.descriptorRequests.Load(); got != 1 {
+		t.Fatalf("relay-2 was asked %d times within a minute, want 1", got)
+	}
 	c.clock.advance(1000 * time.Hour)
 	if code, _ := n1.descriptors(t); code != http.StatusOK {
 		t.Fatalf("GET /descriptors much later = %d, want 200", code)
 	}
 	cache.refresh()
 	if got := n2.n.descriptorRequests.Load(); got != 2 {
-		t.Fatalf("relay-2 was asked %d times over two refreshes, want 2", got)
+		t.Fatalf("relay-2 was asked %d times over two refreshes a minute apart, want 2", got)
 	}
 }
 
@@ -580,5 +589,361 @@ func TestPeerFlags(t *testing.T) {
 	}
 	if got := splitList(" a:1, b:2 ,,"); len(got) != 2 || got[0] != "a:1" || got[1] != "b:2" {
 		t.Errorf("splitList = %q", got)
+	}
+}
+
+// a listener that answers every request with the given bytes, whatever was asked
+func rawPeer(t *testing.T, answer func(n int) []byte) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var asked atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n := int(asked.Add(1))
+			go func() {
+				defer conn.Close()
+				_, _ = conn.Read(make([]byte, 4096))
+				_, _ = conn.Write(answer(n))
+			}()
+		}
+	}()
+	return "http://" + ln.Addr().String()
+}
+
+// what a peer puts on its status line reaches neither the log nor the cache:
+// the cause is one of a fixed set, and a peer that fails the same way in other
+// words is still one line
+func TestPeerFailureIsLoggedAsABoundedClass(t *testing.T) {
+	c := three(t, jcrypto.SuiteC25519)
+	n1, n2 := c.nodes[0], c.nodes[1]
+	cache := n1.takeRoster(t, c.roster())
+	base := len(n1.log.String())
+	clean := func(what string) string {
+		t.Helper()
+		added := n1.log.String()[base:]
+		if len(added) > 400 || strings.ContainsAny(added, "\x1b\x07\x00") || strings.Contains(added, "AAAA") {
+			t.Fatalf("%s: the log took %d bytes from the peer: %.120q", what, len(added), added)
+		}
+		for addr, class := range cache.failed {
+			if len(class) > 64 {
+				t.Fatalf("%s: the cache keeps %d bytes about %s", what, len(class), addr)
+			}
+		}
+		return added
+	}
+
+	c.route(n2.n.addr, rawPeer(t, func(n int) []byte {
+		line := fmt.Sprintf("HTTP/1.1 404 try %d \x1b[2J\x07 %s\r\nContent-Length: 0\r\n\r\n", n, strings.Repeat("AAAA", 64))
+		return []byte(line)
+	}))
+	for range 3 {
+		cache.refresh()
+	}
+	added := clean("a status line with control bytes that changes every time")
+	if want := "peer " + n2.n.addr + ": descriptor: answered status 404\n"; strings.Count(added, want) != 1 || strings.Count(added, "peer "+n2.n.addr) != 1 {
+		t.Fatalf("three answers with status 404 gave %q, want once %q", added, want)
+	}
+
+	c.route(n2.n.addr, rawPeer(t, func(int) []byte {
+		line := append([]byte("HTTP/1.1 404 "), bytes.Repeat([]byte("AAAA\x1b"), 1<<18)...)
+		return append(line, "\r\nContent-Length: 0\r\n\r\n"...)
+	}))
+	for range 2 {
+		cache.refresh()
+	}
+	added = clean("a status line of more than a megabyte")
+	if want := "peer " + n2.n.addr + ": descriptor: no answer\n"; strings.Count(added, want) != 1 || strings.Count(added, "peer "+n2.n.addr) != 2 {
+		t.Fatalf("an oversized status line gave %q, want one more line %q", added, want)
+	}
+
+	c.route(n2.n.addr, rawPeer(t, func(int) []byte {
+		return append([]byte("HTTP/1.1 200 OK\r\n\r\n"), bytes.Repeat([]byte("AAAA"), fetch.MaxBundle)...)
+	}))
+	cache.refresh()
+	added = clean("a body over the size limit")
+	if !strings.HasSuffix(added, "descriptor: "+fetch.ErrTooLarge.Error()+"\n") {
+		t.Fatalf("an oversized body gave %q", added)
+	}
+	if _, ok := n1.n.peerKey(n2.n.addr); ok {
+		t.Fatal("a peer that never served a bundle is held")
+	}
+}
+
+func TestFailureClass(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("node x: %w", pki.ErrDescSignature), pki.ErrDescSignature.Error()},
+		{pki.ErrFormat, pki.ErrFormat.Error()},
+		{&fetch.StatusError{Code: 503}, "answered status 503"},
+		{fmt.Errorf("%w of 16384 bytes", fetch.ErrTooLarge), fetch.ErrTooLarge.Error()},
+		{errors.New("dial tcp 10.0.0.7:51324->10.0.0.9:9100: connection refused"), "elsewhere"},
+		{errors.New("malformed HTTP response \"\\x1b[2J\""), "elsewhere"},
+	} {
+		if got := failureClass(c.err, "elsewhere"); got != c.want {
+			t.Errorf("failureClass(%v) = %q, want %q", c.err, got, c.want)
+		}
+	}
+}
+
+// the fetch a running node makes: one GET of /descriptor on the info port of
+// the host in the roster address
+func TestPeerFetcherAsksTheInfoPortOfThePeer(t *testing.T) {
+	c := three(t, jcrypto.SuiteC25519)
+	n2 := c.nodes[1]
+	var dialled []string
+	web := fetch.NewClient()
+	web.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialled = append(dialled, addr)
+		var d net.Dialer
+		return d.DialContext(ctx, network, strings.TrimPrefix(n2.info.URL, "http://"))
+	}
+	get := peerFetcher(web, "9100")
+
+	bundle, err := get(n2.n.addr)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if _, own := n2.descriptor(t); !bytes.Equal(bundle, own) {
+		t.Fatal("the fetch returned something else than the peer's bundle")
+	}
+	if len(dialled) != 1 || dialled[0] != "relay-2.jimichi.svc.cluster.local:9100" {
+		t.Fatalf("dialled %v, want the info port of the roster host once", dialled)
+	}
+	if got := n2.n.descriptorRequests.Load(); got != 2 {
+		t.Fatalf("the peer answered %d requests for its descriptor, want this fetch and the test's own", got)
+	}
+	if got := n2.n.mirrorRequests.Load(); got != 0 {
+		t.Fatalf("the fetch asked for the mirror %d times", got)
+	}
+	for _, addr := range []string{"relay-2", "relay-2/x:9000", "user@relay-2:9000"} {
+		if _, err := get(addr); err == nil {
+			t.Errorf("fetch from %q succeeded", addr)
+		}
+	}
+	if len(dialled) != 1 {
+		t.Fatalf("a refused address was dialled: %v", dialled)
+	}
+}
+
+// the timer of a running node: nothing before the roster, then every peer, and
+// a peer that answers late is taken on a retry without waiting a whole period
+func TestKeepPeersStartsWithTheRosterAndRetriesAMissingPeer(t *testing.T) {
+	c := three(t, jcrypto.SuiteC25519)
+	n1, n2, n3 := c.nodes[0], c.nodes[1], c.nodes[2]
+	c.route(n3.n.addr, "")
+	n1.n.wake = make(chan struct{})
+	n1.n.peerRetry = 5 * time.Millisecond
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		n1.n.keepPeers(stop)
+		close(done)
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	eventually := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: %s", what, n1.log.String())
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	if got := n2.n.descriptorRequests.Load(); got != 0 {
+		t.Fatalf("a peer was asked %d times before the roster", got)
+	}
+	n1.takeRoster(t, c.roster())
+	eventually("relay-2 was not taken after the roster", func() bool {
+		_, ok := n1.n.peerKey(n2.n.addr)
+		return ok
+	})
+	if _, ok := n1.n.peerKey(n3.n.addr); ok {
+		t.Fatal("an unreachable peer is held")
+	}
+	if got := n2.n.descriptorRequests.Load(); got != 1 {
+		t.Fatalf("relay-2 was asked %d times while relay-3 was retried, want once: it is held and not due", got)
+	}
+
+	c.route(n3.n.addr, n3.info.URL)
+	eventually("relay-3 was not taken once it answered", func() bool {
+		_, ok := n1.n.peerKey(n3.n.addr)
+		return ok
+	})
+	eventually("no mirror with every peer held", func() bool {
+		code, _ := n1.descriptors(t)
+		return code == http.StatusOK
+	})
+	asked := n2.n.descriptorRequests.Load() + n3.n.descriptorRequests.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := n2.n.descriptorRequests.Load() + n3.n.descriptorRequests.Load(); got != asked {
+		t.Fatalf("held peers were asked %d more times before any was due", got-asked)
+	}
+}
+
+func TestKeepPeersEndsBeforeTheRoster(t *testing.T) {
+	c := three(t, jcrypto.SuiteC25519)
+	n := c.nodes[0].n
+	n.wake = make(chan struct{})
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		n.keepPeers(stop)
+		close(done)
+	}()
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("keepPeers did not end")
+	}
+}
+
+func TestPeerWaitFollowsTheNearestDueTime(t *testing.T) {
+	c := three(t, jcrypto.SuiteC25519)
+	n1, n2, n3 := c.nodes[0], c.nodes[1], c.nodes[2]
+	c.route(n3.n.addr, "")
+	cache := n1.takeRoster(t, c.roster())
+	if got := cache.wait(); got != peerRetry {
+		t.Fatalf("wait with no peer held = %v, want the retry pause %v", got, peerRetry)
+	}
+	cache.refresh()
+	if got := cache.wait(); got != peerRetry {
+		t.Fatalf("wait with a peer missing = %v, want %v", got, peerRetry)
+	}
+	c.route(n3.n.addr, n3.info.URL)
+	cache.refresh()
+
+	// both descriptors are due at half of their hour
+	for _, tc := range []struct {
+		at   time.Duration
+		want time.Duration
+	}{
+		{0, time.Minute},
+		{28 * time.Minute, time.Minute},
+		{29*time.Minute + 20*time.Second, 40 * time.Second},
+		{29*time.Minute + 58*time.Second, peerRetry},
+		{30 * time.Minute, peerRetry},
+		{59 * time.Minute, peerRetry},
+		{61 * time.Minute, peerRetry},
+	} {
+		c.clock.mu.Lock()
+		c.clock.now = t0.Add(tc.at)
+		c.clock.mu.Unlock()
+		if got := cache.wait(); got != tc.want {
+			t.Errorf("wait %v after the descriptors were signed = %v, want %v", tc.at, got, tc.want)
+		}
+	}
+
+	// one peer signed again, the other is still due
+	c.clock.mu.Lock()
+	c.clock.now = t0.Add(30 * time.Minute)
+	c.clock.mu.Unlock()
+	n2.n.refreshIfDue()
+	cache.refresh()
+	if got := cache.wait(); got != peerRetry {
+		t.Fatalf("wait with one peer still due = %v, want %v", got, peerRetry)
+	}
+	n3.n.refreshIfDue()
+	cache.refresh()
+	if got := cache.wait(); got != time.Minute {
+		t.Fatalf("wait with both peers fresh = %v, want %v", got, time.Minute)
+	}
+}
+
+func TestFailedRefetchKeepsTheEntryUntilItExpires(t *testing.T) {
+	c := three(t, jcrypto.SuiteC25519)
+	n1, n2 := c.nodes[0], c.nodes[1]
+	cache := n1.takeRoster(t, c.roster())
+	if !cache.refresh() {
+		t.Fatalf("refresh: %s", n1.log.String())
+	}
+	held := func() bool {
+		key, ok := n1.n.peerKey(n2.n.addr)
+		return ok && bytes.Equal(key, n2.pub)
+	}
+
+	c.clock.advance(40 * time.Minute)
+	n1.n.refreshIfDue()
+	c.nodes[2].n.refreshIfDue()
+	c.route(n2.n.addr, "")
+	if !cache.refresh() {
+		t.Fatal("a failed re-fetch dropped an entry that has not expired")
+	}
+	if !held() {
+		t.Fatal("relay-2 is no peer after a failed re-fetch, 20 minutes before its descriptor expires")
+	}
+	if code, _ := n1.descriptors(t); code != http.StatusOK {
+		t.Fatalf("GET /descriptors after a failed re-fetch = %d, want 200 with the bundle still valid", code)
+	}
+	if !strings.Contains(n1.log.String(), "peer "+n2.n.addr+": descriptor: no answer") {
+		t.Fatalf("the failed re-fetch is not in the log: %q", n1.log.String())
+	}
+
+	c.clock.advance(20 * time.Minute)
+	if held() {
+		t.Fatal("relay-2 is still a peer at the expiry of its descriptor")
+	}
+	if cache.refresh() {
+		t.Fatal("refresh reports every peer held after the entry expired")
+	}
+	if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /descriptors after the entry expired = %d, want 503", code)
+	}
+}
+
+func TestDescriptorsSayWhatIsMissing(t *testing.T) {
+	c := three(t, jcrypto.SuiteC25519)
+	if code, body := c.nodes[0].descriptors(t); code != http.StatusServiceUnavailable || !strings.Contains(string(body), "no roster") {
+		t.Fatalf("GET /descriptors before the roster = %d %q", code, body)
+	}
+	p := c.p
+	_, pub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned, err := pki.Unsigned(p, pub, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := &fixture{p: p, n: &node{p: p, unsigned: unsigned, ttl: time.Hour, now: time.Now, logger: log.New(io.Discard, "", 0)}}
+	plain.serve(t)
+	code, body := plain.descriptors(t)
+	if code != http.StatusServiceUnavailable || !strings.Contains(string(body), "-advertise") || !strings.Contains(string(body), "-peers") {
+		t.Fatalf("GET /descriptors of a node without -auth and -advertise = %d %q, want 503 naming both flags", code, body)
+	}
+}
+
+func TestDescriptorTTLIsCheckedInEveryMode(t *testing.T) {
+	for _, c := range []struct {
+		ttl time.Duration
+		ok  bool
+	}{
+		{time.Hour, true}, {time.Minute, true}, {24 * time.Hour, true},
+		{0, false}, {-time.Second, false}, {59 * time.Second, false}, {25 * time.Hour, false},
+	} {
+		if err := checkTTL(c.ttl); (err == nil) != c.ok {
+			t.Errorf("checkTTL(%v) = %v, want ok %v", c.ttl, err, c.ok)
+		}
+	}
+	for _, ttl := range []time.Duration{0, -time.Hour, time.Nanosecond, 3 * time.Second} {
+		if got := checkEvery(ttl); got < minCheckEvery {
+			t.Errorf("checkEvery(%v) = %v, a ticker needs at least %v", ttl, got, minCheckEvery)
+		}
 	}
 }

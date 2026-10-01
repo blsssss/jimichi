@@ -6,6 +6,10 @@ import (
 	"sort"
 )
 
+// the longest roster a node takes; an issuance checks its roster against this
+// before it issues anything
+const MaxRoster = 4 << 10
+
 type RosterNode struct {
 	Name string `json:"name"`
 	Addr string `json:"addr"`
@@ -37,6 +41,9 @@ func (r Roster) Marshal() []byte {
 
 // accepts only the spelling Marshal writes, so equal rosters are equal bytes
 func ParseRoster(raw []byte) (*Roster, error) {
+	if len(raw) > MaxRoster {
+		return nil, ErrFormat
+	}
 	var e rosterEnvelope
 	if err := json.Unmarshal(raw, &e); err != nil {
 		return nil, ErrFormat

@@ -2,6 +2,8 @@ package pki
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -57,9 +59,27 @@ func TestRosterHasOneSpelling(t *testing.T) {
 		{"address without a port", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"relay-1"}]}`, ErrFormat},
 		{"repeated name", `{"anchor":"` + anchor + `","nodes":[` + node("relay-1") + `,{"name":"relay-1","addr":"` + addrOf("relay-2") + `"}]}`, ErrDuplicate},
 		{"repeated address", `{"anchor":"` + anchor + `","nodes":[` + node("relay-1") + `,{"name":"relay-2","addr":"` + addrOf("relay-1") + `"}]}`, ErrDuplicate},
+		{"host with a path", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"relay-1/x:9000"}]}`, ErrFormat},
+		{"host with user information", `{"anchor":"` + anchor + `","nodes":[{"name":"relay-1","addr":"a@relay-1:9000"}]}`, ErrFormat},
 	} {
 		_, err := ParseRoster([]byte(c.raw))
 		wantErr(t, c.name, err, c.want)
+	}
+}
+
+func TestRosterHasASizeLimit(t *testing.T) {
+	r := Roster{Anchor: newEnv(t, c25519Provider(t)).pol.Anchor}
+	for i := 0; len(r.Marshal()) <= MaxRoster; i++ {
+		name := fmt.Sprintf("relay-%d", i)
+		if raw := r.Marshal(); i > 0 {
+			if _, err := ParseRoster(raw); err != nil {
+				t.Fatalf("ParseRoster of %d bytes: %v", len(raw), err)
+			}
+		}
+		r.Nodes = append(r.Nodes, RosterNode{Name: name, Addr: addrOf(name)})
+	}
+	if _, err := ParseRoster(r.Marshal()); !errors.Is(err, ErrFormat) {
+		t.Fatalf("ParseRoster of %d bytes = %v, want %v over %d", len(r.Marshal()), err, ErrFormat, MaxRoster)
 	}
 }
 

@@ -319,6 +319,13 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 		}
 	}
 
+	// an anchor is as long as a node's signing key, so the size of the roster is
+	// known before there is a CA: a roster no relay would take must not cost
+	// every relay its one certificate
+	if size := len(e.roster(pki.Anchor{Suite: e.p.Suite(), Pub: make([]byte, len(reqs[0].Identity))})); size > pki.MaxRoster {
+		return pki.Anchor{}, fmt.Errorf("roster of %d nodes takes %d bytes, a relay accepts at most %d", len(e.nodes), size, pki.MaxRoster)
+	}
+
 	ca, err := newCA(e.p)
 	if err != nil {
 		return pki.Anchor{}, err
@@ -379,11 +386,7 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 
 	// every relay gets the same bytes; a relay keeps the one roster it takes
 	// until it restarts, like its certificate
-	roster := pki.Roster{Anchor: anchor}
-	for _, n := range e.nodes {
-		roster.Nodes = append(roster.Nodes, pki.RosterNode{Name: n.name, Addr: n.addr})
-	}
-	raw := roster.Marshal()
+	raw := e.roster(anchor)
 	for _, n := range e.nodes {
 		_, err := e.call(ctx, http.MethodPut, "http://"+n.admin+"/roster", raw, http.StatusNoContent)
 		if err == nil {
@@ -397,6 +400,14 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 	}
 	fmt.Fprintf(e.log, "roster of %d nodes installed on every relay\n", len(e.nodes))
 	return anchor, nil
+}
+
+func (e *enrollment) roster(anchor pki.Anchor) []byte {
+	roster := pki.Roster{Anchor: anchor}
+	for _, n := range e.nodes {
+		roster.Nodes = append(roster.Nodes, pki.RosterNode{Name: n.name, Addr: n.addr})
+	}
+	return roster.Marshal()
 }
 
 // kubectl port-forward refuses connections until it is up, so a failed

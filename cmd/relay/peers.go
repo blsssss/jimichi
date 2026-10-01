@@ -12,12 +12,49 @@ import (
 	"time"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
+	"github.com/jimichi-org/jimichi/internal/fetch"
 	"github.com/jimichi-org/jimichi/pki"
 )
 
-// a missing peer is asked again this soon, so one that answers late does not
-// keep the node from extending for a whole refresh period
+// a peer that is missing or due is asked again this soon and no sooner, so one
+// that answers late does not keep the node from extending for a whole refresh
+// period, and no state of the cache makes the node ask without a pause
 const peerRetry = 5 * time.Second
+
+// what a failed check of a peer's bundle is reported as
+var pkiFailures = []error{
+	pki.ErrFormat, pki.ErrVersion, pki.ErrSuite, pki.ErrUnknownCA, pki.ErrCertSignature, pki.ErrCertTime,
+	pki.ErrWrongAddr, pki.ErrCertMismatch, pki.ErrDescSignature, pki.ErrDescTime, pki.ErrKeySize, pki.ErrDuplicate,
+}
+
+// why a peer's descriptor was not taken, as one of a fixed set of texts: the
+// cause goes to the log and stays in the cache, and an error itself may carry
+// bytes the peer chose or the ports of one connection
+func failureClass(err error, otherwise string) string {
+	var status *fetch.StatusError
+	switch {
+	case errors.As(err, &status):
+		return fmt.Sprintf("answered status %d", status.Code)
+	case errors.Is(err, fetch.ErrTooLarge):
+		return fetch.ErrTooLarge.Error()
+	}
+	for _, known := range pkiFailures {
+		if errors.Is(err, known) {
+			return known.Error()
+		}
+	}
+	return otherwise
+}
+
+func peerFetcher(web *http.Client, infoPort string) func(addr string) ([]byte, error) {
+	return func(addr string) ([]byte, error) {
+		url, err := fetch.URL(addr, infoPort, "/descriptor")
+		if err != nil {
+			return nil, err
+		}
+		return fetch.Bundle(web, url, 1, 0)
+	}
+}
 
 var (
 	errRosterEarly = errors.New("no certificate installed: the roster follows the certificate")
@@ -52,17 +89,23 @@ type peerCache struct {
 	fetch  func(addr string) ([]byte, error)
 	read   func(addr string, bundle []byte, now time.Time) (*peerEntry, error)
 	now    func() time.Time
+	retry  time.Duration
 	logger *log.Logger
 
 	mu      sync.Mutex
 	entries map[string]*peerEntry
-	// the last failure logged per peer, so a peer that stays down is one line
+	// the class of the last failure per peer, so a peer that stays down for one
+	// reason is one line
 	failed map[string]string
 
 	mirror atomic.Pointer[mirror]
 }
 
 func newPeerCache(n *node, addrs []string, read func(string, []byte, time.Time) (*peerEntry, error)) *peerCache {
+	retry := n.peerRetry
+	if retry <= 0 {
+		retry = peerRetry
+	}
 	return &peerCache{
 		self:    n.addr,
 		addrs:   addrs,
@@ -70,6 +113,7 @@ func newPeerCache(n *node, addrs []string, read func(string, []byte, time.Time) 
 		fetch:   n.fetchPeer,
 		read:    read,
 		now:     n.now,
+		retry:   retry,
 		logger:  n.logger,
 		entries: make(map[string]*peerEntry, len(addrs)),
 		failed:  make(map[string]string),
@@ -93,14 +137,14 @@ func verifiedPeer(p jcrypto.CryptoProvider, anchor pki.Anchor) func(string, []by
 }
 
 // the baseline without node authentication: an unsigned bundle carries no
-// times, so it is fetched again on every refresh and never runs out
+// times, so it is fetched again every minute and never runs out
 func unverifiedPeer(p jcrypto.CryptoProvider) func(string, []byte, time.Time) (*peerEntry, error) {
-	return func(addr string, bundle []byte, _ time.Time) (*peerEntry, error) {
+	return func(addr string, bundle []byte, now time.Time) (*peerEntry, error) {
 		nodes, err := pki.Unverified(p, []string{addr}, [][]byte{bundle})
 		if err != nil {
 			return nil, err
 		}
-		return &peerEntry{bundle: bundle, linkPub: nodes[0].LinkPub, expires: math.MaxInt64}, nil
+		return &peerEntry{bundle: bundle, linkPub: nodes[0].LinkPub, due: now.Add(maxCheckEvery).Unix(), expires: math.MaxInt64}, nil
 	}
 }
 
@@ -115,16 +159,19 @@ func (c *peerCache) refresh() bool {
 		if e != nil && now.Unix() < e.due {
 			continue
 		}
-		bundle, err := c.fetch(addr)
 		var fresh *peerEntry
-		if err == nil {
-			fresh, err = c.read(addr, bundle, now)
+		cause := ""
+		if bundle, err := c.fetch(addr); err != nil {
+			cause = failureClass(err, "no answer")
+		} else if fresh, err = c.read(addr, bundle, now); err != nil {
+			cause = failureClass(err, "not verified")
 		}
 		c.mu.Lock()
-		if err != nil {
-			if c.failed[addr] != err.Error() {
-				c.failed[addr] = err.Error()
-				c.logger.Printf("peer %s: descriptor: %v", addr, err)
+		if cause != "" {
+			// the entry held so far stays until it runs out
+			if c.failed[addr] != cause {
+				c.failed[addr] = cause
+				c.logger.Printf("peer %s: descriptor: %s", addr, cause)
 			}
 		} else {
 			delete(c.failed, addr)
@@ -165,6 +212,27 @@ func (c *peerCache) publish() {
 		return
 	}
 	c.mirror.Store(&mirror{body: body, until: until})
+}
+
+// until the next refresh: the nearest moment an entry is due, at most a minute
+// because the timer runs on the monotonic clock while ages are read off the
+// wall clock, and never less than the retry pause, which is also the wait while
+// a peer is missing
+func (c *peerCache) wait() time.Duration {
+	now := c.now().Unix()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	wait := maxCheckEvery
+	for _, addr := range c.addrs {
+		e := c.entries[addr]
+		if e == nil || now >= e.expires || e.due <= now {
+			return c.retry
+		}
+		if left := e.due - now; left < int64(wait/time.Second) {
+			wait = time.Duration(left) * time.Second
+		}
+	}
+	return max(wait, c.retry)
 }
 
 func (c *peerCache) linkKey(addr string) ([]byte, bool) {
@@ -226,16 +294,23 @@ func (n *node) setPeers(addrs []string, read func(string, []byte, time.Time) (*p
 }
 
 // peers are fetched on this timer and never because someone asked for the
-// descriptors; ages are read off the wall clock as in keepFresh
-func (n *node) keepPeers() {
-	<-n.wake
+// descriptors; it starts once the node has peers and ends with stop
+func (n *node) keepPeers(stop <-chan struct{}) {
+	select {
+	case <-n.wake:
+	case <-stop:
+		return
+	}
 	c := n.peers.Load()
 	for {
-		wait := checkEvery(n.ttl)
-		if !c.refresh() {
-			wait = min(wait, peerRetry)
+		c.refresh()
+		t := time.NewTimer(c.wait())
+		select {
+		case <-t.C:
+		case <-stop:
+			t.Stop()
+			return
 		}
-		time.Sleep(wait)
 	}
 }
 

@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -95,7 +96,7 @@ func TestBundle(t *testing.T) {
 			if err == nil || n.Load() != 1 {
 				t.Fatalf("Bundle = %v after %d requests, want one request and an error", err, n.Load())
 			}
-			if c.name == "over the size limit" && !strings.Contains(err.Error(), "answer over 16384 bytes") {
+			if c.name == "over the size limit" && !strings.Contains(err.Error(), "answer over the size limit of 16384 bytes") {
 				t.Fatalf("Bundle = %v, want the size limit named", err)
 			}
 		})
@@ -156,7 +157,7 @@ func TestMirror(t *testing.T) {
 			if err == nil || n.Load() != 1 {
 				t.Fatalf("Mirror = %v after %d requests, want one request and an error", err, n.Load())
 			}
-			if c.name == "over the size limit" && !strings.Contains(err.Error(), "answer over 262144 bytes") {
+			if c.name == "over the size limit" && !strings.Contains(err.Error(), "answer over the size limit of 262144 bytes") {
 				t.Fatalf("Mirror = %v, want the size limit named", err)
 			}
 		})
@@ -210,5 +211,75 @@ func TestURL(t *testing.T) {
 	}
 	if _, err := URL("relay-1", "9100", "/descriptor"); err == nil {
 		t.Error("URL accepted an address without a port")
+	}
+	for _, c := range []struct{ addr, port string }{
+		{"relay-1/x:9000", "9100"},
+		{"relay-1?x=1:9000", "9100"},
+		{"relay-1#x:9000", "9100"},
+		{"user@relay-1:9000", "9100"},
+		{"user:pass@relay-1:9000", "9100"},
+		{"relay-1%2fx:9000", "9100"},
+		{"relay 1:9000", "9100"},
+		{"relay-1:9000", "9100/x"},
+		{"relay-1:9000", "9100?x"},
+		{"relay-1:9000", "9100#x"},
+		{"relay-1:9000", "80@elsewhere"},
+		{"relay-1:9000", ""},
+	} {
+		if got, err := URL(c.addr, c.port, "/descriptor"); err == nil {
+			t.Errorf("URL(%q, %q) = %q, want it refused", c.addr, c.port, got)
+		}
+	}
+}
+
+// the text of a status line is the other side's to choose, so only the code
+// reaches the error, and an answer cannot make the client read headers
+// without end
+func TestStatusTextAndHeaderSizeStayOut(t *testing.T) {
+	answer := func(t *testing.T, raw []byte) string {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go func() {
+					defer conn.Close()
+					_, _ = conn.Read(make([]byte, 4096))
+					_, _ = conn.Write(raw)
+				}()
+			}
+		}()
+		return "http://" + ln.Addr().String() + "/descriptor"
+	}
+	web := NewClient()
+	if got := web.Transport.(*http.Transport).MaxResponseHeaderBytes; got != MaxHeader {
+		t.Fatalf("header limit %d, want %d", got, MaxHeader)
+	}
+
+	url := answer(t, []byte("HTTP/1.1 404 gone \x1b[2J\x07 for good\r\nContent-Length: 0\r\n\r\n"))
+	_, err := Bundle(web, url, 3, 0)
+	var status *StatusError
+	if !errors.As(err, &status) || status.Code != http.StatusNotFound || err.Error() != "request answered status 404" {
+		t.Fatalf("Bundle = %q, want the status code alone", err)
+	}
+
+	long := append([]byte("HTTP/1.1 404 "), bytes.Repeat([]byte("A\x1b"), 1<<20)...)
+	url = answer(t, append(long, "\r\nContent-Length: 0\r\n\r\n"...))
+	_, err = Bundle(web, url, 1, 0)
+	if err == nil || errors.As(err, &status) || len(err.Error()) > 512 {
+		t.Fatalf("Bundle after a status line of 2 MiB = %.80q (%d bytes), want a short transport error", err, len(err.Error()))
+	}
+
+	url = answer(t, []byte("HTTP/1.1 503 later\r\nContent-Length: 0\r\n\r\n"))
+	_, err = Bundle(web, url, 2, 0)
+	if !errors.As(err, &status) || status.Code != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "no descriptor published") {
+		t.Fatalf("Bundle = %v, want a 503 that says what is not published", err)
 	}
 }
