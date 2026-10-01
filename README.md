@@ -5,7 +5,8 @@
 <h1 align="center">jimichi</h1>
 
 <p align="center">
-  Confidential messaging that hides who talks to whom, and the measurements that prove it.
+  Confidential messaging that hides who talks to whom, and the measurements of what that
+  protection is worth.
   <br>
   <a href="https://jimichi.org">jimichi.org</a> · English | <a href="README.ru.md">Русский</a>
 </p>
@@ -21,10 +22,18 @@ that protection is worth.
 
 Messages travel through a chain of three relay nodes under nested encryption: the client draws
 the chain at random from the nodes it lists, every hop strips exactly one layer and learns only
-its neighbours. Session keys are ephemeral, the buffers that hold them sit in mlocked memory
-outside the Go heap and are zeroed after use, and nothing reaches disk. Copies that the crypto
-libraries keep on the heap are not covered, see [LIMITATIONS](docs/en/LIMITATIONS.md). Every cell
-is the same size, so the length of a message says nothing about it.
+its neighbours. The recipient client and the end-to-end encryption layer are planned
+([#18](https://github.com/jimichi-org/jimichi/issues/18)): today the last node of the chain reads
+the message and echoes it back.
+
+Session keys are ephemeral, the buffers that hold them sit in mlocked memory outside the Go heap
+and are zeroed after use, and a node writes nothing to disk itself. Only these buffers are locked
+against swap; locking all process memory is planned
+([#36](https://github.com/jimichi-org/jimichi/issues/36)). Copies that the crypto libraries keep
+on the heap are not covered, see [LIMITATIONS](docs/en/LIMITATIONS.md). Every cell is the same
+size, so a message that fits in one cell does not show its length on the wire. A longer message
+is refused with an error and not sent: fragmentation and size classes are planned
+([#68](https://github.com/jimichi-org/jimichi/issues/68)).
 
 Protecting content is the easy part. What this work measures is the harder question: how much
 an observer who sees only timings and volumes can still learn, and what it costs to take that
@@ -32,16 +41,29 @@ away. The repository therefore contains both the system and the attack against i
 
 ## What is measured
 
-- **Key material.** Memory dumps of a live relay are searched for known key bytes, with and
-  without memory locking and dump prevention; the same search runs against the container image
-  and volumes.
-- **Forward secrecy.** Recorded traffic is attacked with the node's long-term key in hand.
-- **Metadata.** A traffic correlation attack links senders to receivers from timings and volumes
-  alone; its ROC and AUC are reported against cover traffic rate, cell size policy and delays.
-- **Partial compromise.** One and two nodes of three are compromised, including a node holding a
-  valid certificate from a compromised CA; residual leakage is measured, and so is how often a
-  randomly drawn chain meets rogue nodes.
-- **Cost.** Latency per hop, throughput, CPU, padding overhead, GOST versus X25519.
+- **Key material.** Planned ([#24](https://github.com/jimichi-org/jimichi/issues/24)): memory
+  dumps of a live relay will be searched for known key bytes, with and without memory locking and
+  dump prevention, and the same search will run against the container image and the node's files.
+  The switches that start a node without each measure exist today (`-keymem`, `-harden`).
+- **Forward secrecy.** Planned ([#24](https://github.com/jimichi-org/jimichi/issues/24)): setup
+  cells recorded by a neighbour will be attacked with the keys taken from node memory, by the age
+  of the recording. Today unit tests check that a setup cell stops opening once the node releases
+  the onion key it was built for.
+- **Metadata.** A traffic correlation attack links the flows on the entry link to the flows on
+  the last link between relays from cell timings and counts alone; AUC, top-1 accuracy and TPR at
+  FPR 0.01 are reported against cover traffic rate, a constant client rate and relays sending on
+  their own clocks. Node delay levels ([#45](https://github.com/jimichi-org/jimichi/issues/45)),
+  message size classes ([#68](https://github.com/jimichi-org/jimichi/issues/68)) and the path to a
+  recipient ([#47](https://github.com/jimichi-org/jimichi/issues/47)) are planned.
+- **Partial compromise.** How often a randomly drawn chain meets rogue nodes is computed and
+  sampled with the client's own choice (`cmd/lab -set paths`). What one or two compromised nodes
+  of three learn, including a node holding a valid certificate from a compromised CA, is planned
+  ([#117](https://github.com/jimichi-org/jimichi/issues/117)).
+- **Cost.** Round-trip latency through the chain, the bandwidth multiplier of cover and padding,
+  and benchmarks of key agreement, signing and sealing a cell, GOST versus X25519. Node throughput
+  at saturation, goodput per client, the cost of a setup while a node holds two onion keys, the
+  latency of a one-node chain and the cost of memory locking are planned
+  ([#118](https://github.com/jimichi-org/jimichi/issues/118)).
 
 Threat modelling follows the FSTEC methodology of 2021-02-05; scenarios are named in plain words.
 
@@ -52,7 +74,10 @@ client starting its schedule at a random phase. Every number is the median acros
 Rows with the client alone come from the series over client rates, rows with relay clocks from
 the series over relay periods, whose own client-only runs agree (AUC 0.947 at 70 ms, 0.950 at
 35 ms). With five runs per point no difference is claimed as significant; the full series of
-thirty runs per point is still to come.
+thirty runs per point is still to come ([#23](https://github.com/jimichi-org/jimichi/issues/23)).
+The lab harness starts the relays and the clients in one process on loopback, not on the kind
+testbed described below, so there is no network delay; network emulation is planned
+([#46](https://github.com/jimichi-org/jimichi/issues/46)).
 
 A passive observer sees only when frames cross the entry link and the last link between relays. It
 counts frames per time window for every flow and correlates every entry flow with every exit flow.
@@ -89,10 +114,12 @@ better one for the observer. Chance is AUC 0.5 and top-1 10%.
   <img alt="Attack AUC against the client's cell period for a 10 ms and a 100 ms window" src="docs/img/window-en-light.png">
 </picture>
 
-- Relays sending on their own clocks bring the attack down to chance. The price is a constant
-  stream on every link a relay sends on and about 2.5 to 2.7 node periods added to a round trip
-  (182 ms at 66.5 ms, 89 ms at 33.25 ms). The relay period is 5% shorter than the client's, so a
-  missed tick is caught up.
+- Relays sending on their own clocks bring this attack, which counts cells only, down to chance.
+  The price is a constant stream on every link a relay sends on and about 2.5 to 2.7 node periods
+  added to a round trip (182 ms at 66.5 ms, 89 ms at 33.25 ms). The relay period is 5% shorter
+  than the client's, so a missed tick is caught up. The moments the connections of a circuit open
+  and close match along the chain and are not part of the attack yet
+  ([#43](https://github.com/jimichi-org/jimichi/issues/43)).
 - The client's constant rate still matters with relay clocks on: it hides the conversation from
   the entry node itself, which the observer here does not model.
 
@@ -122,10 +149,10 @@ wire/         fixed-size cells, nested layers, counter order
 link/         link encryption between neighbours, frames of one size
 pki/          node certificates, descriptors and requests, issuing and checking
 relay/        relay node
-client/       choice of the chain, sender, receiver, cover traffic
-vault/        client container with two volumes
-lab/          scenario/, metrics/, report/
-web/          testbed dashboard
+client/       choice of the chain, sending, replies from the exit, cover traffic
+vault/        client container with two volumes, planned (#20), a placeholder package today
+lab/          run harness and observer, metrics/; scenario/ and report/ are placeholders
+web/          testbed dashboard, planned (#21), a placeholder package today
 deploy/       kind/ cluster configurations and base/ manifests of the testbed
 docs/         documentation, en/ and ru/
 ```
@@ -157,14 +184,18 @@ namespace. A relay creates its signing key in memory at start and waits for enro
 every relay through a port-forward under a CA that exists only for that run, gives each relay the
 roster of the certified nodes and stores the CA public key, the anchor, in ConfigMap `jimichi-ca`.
 The relay then publishes a signed descriptor on port 9100, keeps the verified descriptors of the
-other roster nodes and extends circuits only to them over authenticated links. A restarted relay
-needs `make enroll` again.
+other roster nodes and extends circuits only to them over authenticated links. After a relay
+restarts, every relay has to be restarted and enrolled again, since a process takes one
+certificate and one roster: `kubectl -n jimichi rollout restart deployment -l app=relay`, then
+`make enroll`.
 
 The client lists all five relays and builds a chain of three (`-hops`). At every start it draws
-its entry at random, obtains the signed bundles of every listed node from that entry, verifies
-them against the anchor and only then draws the other two hops. It does not log the chain, and
-after any failure it exits and draws a new one at its next start. `-fixed-chain` keeps the listed
-order for measurements that need a known path.
+its entry at random, asks that entry for the signed bundles of every listed node, verifies each
+bundle it gets against the anchor and only then draws the other two hops among the verified nodes.
+The entry may leave out one listed node (`-missing`, 1 by default), which lets a rogue entry narrow
+the choice ([LIMITATIONS](docs/en/LIMITATIONS.md)). The client does not log the chain, and after
+any failure it exits and draws a new one at its next start. `-fixed-chain` keeps the listed order
+for measurements that need a known path.
 
 Aggregated counters go to stdout once a minute and to port 9101 on loopback only, read through a
 port-forward:
@@ -176,9 +207,11 @@ curl -s localhost:9101/stats
 
 ## Requirements
 
-Go 1.27. Memory locking, dump prevention and the key-extraction scenarios are Linux-only; other
+Go 1.27. Memory locking and dump prevention are Linux-only, and so will be the planned
+key-extraction scenarios ([#24](https://github.com/jimichi-org/jimichi/issues/24)); other
 platforms build against stubs that report memory as unlocked, so a node refuses to start there.
-Docker and kind for the testbed; there is no Compose setup.
+Docker and kind for the testbed; a Compose setup for development is planned
+([#22](https://github.com/jimichi-org/jimichi/issues/22)).
 
 ## License
 
