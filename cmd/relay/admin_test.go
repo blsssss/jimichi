@@ -68,6 +68,8 @@ type fixture struct {
 	info  *httptest.Server
 	admin *httptest.Server
 	log   *logBuffer
+	// the static key the node publishes as its link and onion key
+	pub []byte
 }
 
 func newFixture(t *testing.T, s jcrypto.Suite) *fixture {
@@ -76,7 +78,14 @@ func newFixture(t *testing.T, s jcrypto.Suite) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := pki.NewIdentity(p, testName, testAddr)
+	return newNode(t, p, newCA(t, p), &clock{now: t0}, testName)
+}
+
+func addrOf(name string) string { return name + ".jimichi.svc.cluster.local:9000" }
+
+func newNode(t *testing.T, p jcrypto.CryptoProvider, ca *pki.CA, clock *clock, name string) *fixture {
+	t.Helper()
+	id, err := pki.NewIdentity(p, name, addrOf(name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,8 +95,12 @@ func newFixture(t *testing.T, s jcrypto.Suite) *fixture {
 		t.Fatal(err)
 	}
 	id.SetKeys(pub, pub, 0)
-	f := &fixture{p: p, ca: newCA(t, p), clock: &clock{now: t0}, log: &logBuffer{}}
-	f.n = &node{id: id, ttl: time.Hour, now: f.clock.Now, logger: log.New(f.log, "", 0)}
+	f := &fixture{p: p, ca: ca, clock: clock, log: &logBuffer{}, pub: pub}
+	f.n = &node{
+		p: p, name: name, addr: addrOf(name),
+		id: id, ttl: time.Hour, now: clock.Now, logger: log.New(f.log, "", 0),
+		fetchPeer: func(addr string) ([]byte, error) { return nil, errors.New("no node at " + addr) },
+	}
 	f.serve(t)
 	return f
 }
@@ -149,7 +162,7 @@ func (f *fixture) request(t *testing.T) *pki.Request {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := req.Check(f.p, n, testName, testAddr); err != nil {
+	if err := req.Check(f.p, n, f.n.name, f.n.addr); err != nil {
 		t.Fatalf("Check: %v", err)
 	}
 	return req
@@ -189,7 +202,7 @@ func (f *fixture) verify(t *testing.T) *pki.Verified {
 	if code != http.StatusOK {
 		t.Fatalf("GET /descriptor = %d %s", code, bundle)
 	}
-	v, err := pki.Verify(f.p, pki.Policy{Anchor: f.ca.Anchor(), Skew: pki.Skew}, testAddr, bundle, f.clock.Now())
+	v, err := pki.Verify(f.p, pki.Policy{Anchor: f.ca.Anchor(), Skew: pki.Skew}, f.n.addr, bundle, f.clock.Now())
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -569,7 +582,7 @@ func TestUnsignedNodeServesTheBaselineAndNoEnrollment(t *testing.T) {
 	if _, err := pki.Verify(p, pki.Policy{Anchor: ca.Anchor()}, testAddr, bundle, time.Now()); !errors.Is(err, pki.ErrFormat) {
 		t.Fatalf("Verify of the unsigned bundle = %v, want %v", err, pki.ErrFormat)
 	}
-	for _, path := range []string{"/csr", "/cert"} {
+	for _, path := range []string{"/csr", "/cert", "/roster"} {
 		if code, _ := call(t, http.MethodPost, f.admin.URL+path, make([]byte, pki.NonceSize)); code != http.StatusNotFound {
 			t.Errorf("%s without -auth = %d, want 404", path, code)
 		}

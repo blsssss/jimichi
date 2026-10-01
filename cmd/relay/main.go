@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/internal/fetch"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 	"github.com/jimichi-org/jimichi/wire"
@@ -30,6 +32,8 @@ type config struct {
 	auth                bool
 	name, advertise     string
 	descriptorTTL       time.Duration
+	peerInfoPort        string
+	peers               []string
 	// refuse to run with keys in memory that could not be locked
 	lock bool
 	// for the startup line only
@@ -52,10 +56,12 @@ func main() {
 	flag.DurationVar(&cfg.period, "period", 0, "send one frame per circuit and direction every period, padding when idle; 0 forwards at once")
 	flag.IntVar(&cfg.queue, "queue", 64, "cells a circuit may queue per direction when -period is set")
 	flag.IntVar(&cfg.setupCache, "setup-cache", wire.DefaultSetupCache, fmt.Sprintf("setups remembered to refuse a replay, 0 for the default, at most %d; when full the node refuses new circuits until restart", relay.MaxSetupCache))
-	flag.BoolVar(&cfg.auth, "auth", true, "serve a descriptor signed under a certificate from jimichi enroll; false serves it unsigned")
+	flag.BoolVar(&cfg.auth, "auth", true, "serve a descriptor signed under a certificate from jimichi enroll and extend only to the roster nodes it names, over authenticated links; false serves it unsigned and extends to any address over anonymous links")
 	flag.StringVar(&cfg.name, "name", "", "node name for its certificate, required with -auth")
-	flag.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth", wire.AddrSize))
+	flag.StringVar(&cfg.advertise, "advertise", "", fmt.Sprintf("host:port clients dial, bound into the certificate, at most %d bytes, required with -auth; without -auth the address this node lists itself under in /descriptors", wire.AddrSize))
 	flag.DurationVar(&cfg.descriptorTTL, "descriptor-ttl", time.Hour, "lifetime of a signed descriptor, re-signed once half of it has passed")
+	flag.StringVar(&cfg.peerInfoPort, "peer-info-port", "9100", "port where the other nodes publish their descriptors")
+	peers := flag.String("peers", "", "without -auth only: comma separated host:port of the other nodes, whose unsigned descriptors this node serves in /descriptors; with -auth they come from the roster")
 	flag.DurationVar(&cfg.limits.HandshakeTimeout, "handshake-timeout", relay.DefaultHandshakeTimeout, "close a connection whose link handshake has not finished this long after it was accepted; an initiator sends its hello at once; negative turns it off")
 	flag.DurationVar(&cfg.limits.SetupTimeout, "setup-timeout", relay.DefaultSetupTimeout, "close a link that has opened no circuit this long after its handshake; clients and relays send the setup at once; negative turns it off")
 	flag.DurationVar(&cfg.limits.WriteTimeout, "write-timeout", 0, "longest one frame may wait to be written before its circuit is torn down, so a peer that stops reading cannot hold a sender; 0 picks 4 periods and at least 1s, or 5s without -period; negative turns it off")
@@ -70,6 +76,7 @@ func main() {
 	flag.Float64Var(&cfg.limits.SourceSetupRate, "source-setup-rate", relay.DefaultSourceSetupRate, "circuit setups per second from one address, checked after the link handshake and before the agreement with the node key, each costing that agreement, a dial onwards and a tag held until restart; at the default one address needs about 91 hours to fill -setup-cache; negative turns it off")
 	flag.IntVar(&cfg.limits.SourceSetupBurst, "source-setup-burst", relay.DefaultSourceSetupBurst, "setups one address may send at once before -source-setup-rate applies; 0 for the default, a negative -source-setup-rate turns the limit off")
 	flag.Parse()
+	cfg.peers = splitList(*peers)
 
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
 
@@ -77,6 +84,11 @@ func main() {
 		if err := checkAuthFlags(cfg.stats, cfg.name, cfg.advertise, cfg.descriptorTTL); err != nil {
 			logger.Fatal(err)
 		}
+	} else if err := checkTTL(cfg.descriptorTTL); err != nil {
+		logger.Fatal(err)
+	}
+	if err := checkPeerFlags(cfg.auth, cfg.advertise, cfg.peerInfoPort, cfg.peers); err != nil {
+		logger.Fatal(err)
 	}
 
 	policy, err := secmem.ParsePolicy(cfg.keymem)
@@ -128,7 +140,12 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		return errors.New("key memory is not locked, refusing to start")
 	}
 
-	n := &node{ttl: cfg.descriptorTTL, now: time.Now, logger: logger}
+	n := &node{
+		p: provider, name: cfg.name, addr: cfg.advertise,
+		ttl: cfg.descriptorTTL, now: time.Now, logger: logger,
+		wake:      make(chan struct{}),
+		fetchPeer: peerFetcher(fetch.NewClient(), cfg.peerInfoPort),
+	}
 	if cfg.auth {
 		id, err := pki.NewIdentity(provider, cfg.name, cfg.advertise)
 		if err != nil {
@@ -148,7 +165,61 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		return fmt.Errorf("descriptor: %w", err)
 	}
 
-	r, err := relay.New(relay.Config{
+	if !cfg.auth && cfg.advertise != "" {
+		n.setPeers(cfg.peers, unverifiedPeer(provider))
+	}
+
+	r, err := relay.New(relayConfig(provider, staticPriv, cfg, n))
+	if err != nil {
+		return fmt.Errorf("relay: %w", err)
+	}
+	defer r.Close()
+
+	// bound here rather than inside the serving goroutines: a node whose
+	// enrollment port is taken would otherwise run on and never get a certificate
+	var lns [3]net.Listener
+	for i, addr := range []string{cfg.listen, cfg.info, cfg.stats} {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("listen: %w", err)
+		}
+		defer ln.Close()
+		lns[i] = ln
+	}
+	cells, infoLn, adminLn := lns[0], lns[1], lns[2]
+
+	served := make(chan error, 1)
+	go func() { served <- r.Serve(cells) }()
+	n.serving = r.Serving
+	go serve(infoLn, n.infoMux(), logger)
+	go serve(adminLn, n.adminMux(r.Stats().Snapshot), logger)
+	if n.id != nil {
+		go n.keepFresh()
+	}
+	go n.keepPeers(nil)
+	if cfg.logEvery > 0 {
+		go logCounters(r, n, cfg.logEvery, logger)
+	}
+
+	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v",
+		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth)
+	return untilStopped(stop, served, logger)
+}
+
+// a node that no longer accepts must not stay up looking ready: the error makes
+// the process exit, and the orchestrator starts a fresh one
+func untilStopped(stop <-chan os.Signal, served <-chan error, logger *log.Logger) error {
+	select {
+	case <-stop:
+		logger.Print("shutting down")
+		return nil
+	case err := <-served:
+		return fmt.Errorf("serve stopped: %v", err)
+	}
+}
+
+func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cfg config, n *node) relay.Config {
+	rc := relay.Config{
 		Provider:   provider,
 		StaticPriv: staticPriv,
 		// the payload is never logged: that would hand out exactly the metadata
@@ -176,52 +247,22 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		SourceLinkBurst:        cfg.limits.SourceLinkBurst,
 		SourceSetupRate:        cfg.limits.SourceSetupRate,
 		SourceSetupBurst:       cfg.limits.SourceSetupBurst,
-	})
-	if err != nil {
-		return fmt.Errorf("relay: %w", err)
 	}
-	defer r.Close()
-
-	// bound here rather than inside the serving goroutines: a node whose
-	// enrollment port is taken would otherwise run on and never get a certificate
-	var lns [3]net.Listener
-	for i, addr := range []string{cfg.listen, cfg.info, cfg.stats} {
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			return fmt.Errorf("listen: %w", err)
-		}
-		defer ln.Close()
-		lns[i] = ln
+	// set from the start, so until a roster arrives the node extends nowhere
+	if cfg.auth {
+		rc.Peers = n.peerKey
 	}
-	cells, infoLn, adminLn := lns[0], lns[1], lns[2]
-
-	served := make(chan error, 1)
-	go func() { served <- r.Serve(cells) }()
-	n.serving = r.Serving
-	go serve(infoLn, n.infoMux(), logger)
-	go serve(adminLn, n.adminMux(r.Stats().Snapshot), logger)
-	if n.id != nil {
-		go n.keepFresh()
-	}
-	if cfg.logEvery > 0 {
-		go logCounters(r, n, cfg.logEvery, logger)
-	}
-
-	logger.Printf("relay listening on %s, info on %s, suite=%s, keymem=%s, locked=%v, harden=%v, period=%v, auth=%v",
-		cells.Addr(), infoLn.Addr(), provider.Suite(), cfg.keymem, staticPriv.Locked(), cfg.harden, cfg.period, cfg.auth)
-	return untilStopped(stop, served, logger)
+	return rc
 }
 
-// a node that no longer accepts must not stay up looking ready: the error makes
-// the process exit, and the orchestrator starts a fresh one
-func untilStopped(stop <-chan os.Signal, served <-chan error, logger *log.Logger) error {
-	select {
-	case <-stop:
-		logger.Print("shutting down")
-		return nil
-	case err := <-served:
-		return fmt.Errorf("serve stopped: %v", err)
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
 	}
+	return out
 }
 
 // a setup holds a handful of key pages at once, the static and identity keys
@@ -252,10 +293,13 @@ func logCounters(r *relay.Relay, n *node, every time.Duration, logger *log.Logge
 	defer t.Stop()
 	for range t.C {
 		s := r.Stats().Snapshot()
+		roster, held := n.peerState()
 		logger.Printf("counters accepted=%d forwarded=%d delivered=%d dropped=%d padding=%d broken=%d"+
-			" accept_retries=%d refused_links=%d refused_busy=%d refused_source=%d refused_rate=%d refused_setups=%d timed_out=%d expired=%d cert=%s",
+			" accept_retries=%d refused_links=%d refused_busy=%d refused_source=%d refused_rate=%d refused_setups=%d refused_extend=%d failed_extend=%d timed_out=%d expired=%d"+
+			" cert=%s roster=%d peers=%d descriptor_requests=%d mirror_requests=%d",
 			s.Accepted, s.Forwarded, s.Delivered, s.Dropped, s.Padding, s.Broken,
-			s.AcceptRetries, s.RefusedLinks, s.RefusedBusy, s.RefusedSource, s.RefusedRate, s.RefusedSetups, s.TimedOut, s.Expired, n.certState())
+			s.AcceptRetries, s.RefusedLinks, s.RefusedBusy, s.RefusedSource, s.RefusedRate, s.RefusedSetups, s.RefusedExtend, s.FailedExtend, s.TimedOut, s.Expired,
+			n.certState(), roster, held, n.descriptorRequests.Load(), n.mirrorRequests.Load())
 	}
 }
 

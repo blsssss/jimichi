@@ -4,9 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -16,19 +14,20 @@ import (
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/internal/fetch"
 	"github.com/jimichi-org/jimichi/pki"
 )
 
 const (
-	maxBundle     = 16 << 10
 	fetchAttempts = 30
 	fetchPause    = time.Second
-	fetchTimeout  = 5 * time.Second
 )
+
+var errNoBundle = errors.New("the entry holds no bundle for it")
 
 func main() {
 	nodes := flag.String("nodes", "", "comma separated host:port of the chain, in order")
-	infoPort := flag.String("info-port", "9100", "port where a node publishes its descriptor")
+	infoPort := flag.String("info-port", "9100", "port where the entry, the first of -nodes, publishes the descriptors of the chain")
 	message := flag.String("message", "hello from the chain", "payload to send")
 	count := flag.Int("count", 1, "how many messages to send, 0 for endless")
 	interval := flag.Duration("interval", time.Second, "pause between messages")
@@ -93,21 +92,9 @@ func main() {
 		logger.Print("WARNING: -auth=false, node keys are taken unverified from whoever answers the descriptor request")
 	}
 
-	web := &http.Client{
-		Timeout: fetchTimeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	bundles := make([][]byte, len(addrs))
-	for i, addr := range addrs {
-		url, err := descriptorURL(addr, *infoPort)
-		if err == nil {
-			bundles[i], err = fetchBundle(web, url, fetchAttempts, fetchPause)
-		}
-		if err != nil {
-			logger.Fatalf("refusing to build the circuit: node %s: %v", addr, err)
-		}
+	bundles, err := chainBundles(fetch.NewClient(), addrs, *infoPort, fetchAttempts, fetchPause)
+	if err != nil {
+		logger.Fatalf("refusing to build the circuit: %v", err)
 	}
 	verified, err := resolve(provider, *auth, trust, addrs, bundles, time.Now())
 	if err != nil {
@@ -201,58 +188,31 @@ func trustPolicy(auth bool, ca string, s jcrypto.Suite, skew time.Duration) (pki
 	return pki.Policy{Anchor: anchor, Skew: skew}, nil
 }
 
-func descriptorURL(addr, infoPort string) (string, error) {
-	host, _, err := net.SplitHostPort(addr)
+// every bundle comes from the entry, the one node the client connects to
+// anyway; each is verified afterwards, so the entry can withhold a bundle but
+// not alter one
+func chainBundles(web *http.Client, addrs []string, infoPort string, attempts int, pause time.Duration) ([][]byte, error) {
+	url, err := fetch.URL(addrs[0], infoPort, "/descriptors")
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("node %s: %w", addrs[0], err)
 	}
-	return "http://" + net.JoinHostPort(host, infoPort) + "/descriptor", nil
-}
-
-// only a failed connection or a node still waiting for its certificate is
-// worth another try; anything else it answered stays wrong on the next one
-func fetchBundle(web *http.Client, url string, attempts int, pause time.Duration) ([]byte, error) {
-	var lastErr error
-	for i := 0; i < attempts; i++ {
-		if i > 0 {
-			time.Sleep(pause)
-		}
-		body, retry, err := getBundle(web, url)
-		if err == nil {
-			return body, nil
-		}
-		if !retry {
-			return nil, err
-		}
-		lastErr = err
-	}
-	return nil, lastErr
-}
-
-func getBundle(web *http.Client, url string) (body []byte, retry bool, err error) {
-	resp, err := web.Get(url)
+	entries, err := fetch.Mirror(web, url, attempts, pause)
 	if err != nil {
-		return nil, true, err
+		return nil, fmt.Errorf("node %s: %w", addrs[0], err)
 	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusServiceUnavailable:
-		return nil, true, errors.New("no descriptor published, the node has no valid certificate")
-	default:
-		return nil, false, fmt.Errorf("descriptor request answered %s", resp.Status)
+	held := make(map[string][]byte, len(entries))
+	for _, e := range entries {
+		held[e.Addr] = e.Bundle
 	}
-	body, err = io.ReadAll(io.LimitReader(resp.Body, maxBundle+1))
-	if err != nil {
-		return nil, true, err
+	bundles := make([][]byte, len(addrs))
+	for i, addr := range addrs {
+		b, ok := held[addr]
+		if !ok {
+			return nil, fmt.Errorf("node %s: %w", addr, errNoBundle)
+		}
+		bundles[i] = b
 	}
-	if len(body) > maxBundle {
-		return nil, false, fmt.Errorf("descriptor over %d bytes", maxBundle)
-	}
-	if _, err := pki.ParseBundle(body); err != nil {
-		return nil, false, err
-	}
-	return body, false, nil
+	return bundles, nil
 }
 
 func resolve(p jcrypto.CryptoProvider, auth bool, trust pki.Policy, addrs []string, bundles [][]byte, now time.Time) ([]pki.Verified, error) {

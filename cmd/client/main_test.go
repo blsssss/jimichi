@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +16,7 @@ import (
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/internal/fetch"
 	"github.com/jimichi-org/jimichi/pki"
 )
 
@@ -189,96 +193,244 @@ func TestResolveRefusesWhatDoesNotVerify(t *testing.T) {
 	}
 }
 
-func TestFetchBundle(t *testing.T) {
-	p := provider(t, jcrypto.SuiteC25519)
-	_, good := enrolled(t, p, newCA(t, p), "relay-1", t0.Add(time.Hour))
+// the info port of one node: its own bundle and whatever mirror the test gives
+// it, with every request counted
+type infoServer struct {
+	requests atomic.Int32
+	mirror   atomic.Pointer[[]byte]
+	// answers 503 to this many mirror requests first
+	unready atomic.Int32
+}
 
-	serve := func(t *testing.T, answer func(n int32, w http.ResponseWriter)) (string, *atomic.Int32) {
-		t.Helper()
-		var n atomic.Int32
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/descriptor" {
-				http.NotFound(w, r)
-				return
-			}
-			answer(n.Add(1), w)
-		}))
-		t.Cleanup(srv.Close)
-		return srv.URL + "/descriptor", &n
+func serveInfo(t *testing.T, own []byte) (*infoServer, string) {
+	t.Helper()
+	s := &infoServer{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /descriptor", func(w http.ResponseWriter, _ *http.Request) {
+		s.requests.Add(1)
+		_, _ = w.Write(own)
+	})
+	mux.HandleFunc("GET /descriptors", func(w http.ResponseWriter, _ *http.Request) {
+		s.requests.Add(1)
+		m := s.mirror.Load()
+		if m == nil || s.unready.Add(-1) >= 0 {
+			http.Error(w, "incomplete", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write(*m)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return s, strings.TrimPrefix(srv.URL, "http://")
+}
+
+func mirrorOf(t *testing.T, addrs []string, bundles [][]byte) []byte {
+	t.Helper()
+	entries := make([]pki.MirrorEntry, len(addrs))
+	for i := range addrs {
+		entries[i] = pki.MirrorEntry{Addr: addrs[i], Bundle: bundles[i]}
 	}
-	web := &http.Client{Timeout: time.Second}
+	raw, err := pki.MarshalMirror(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
 
-	t.Run("published after enrollment", func(t *testing.T) {
-		url, n := serve(t, func(n int32, w http.ResponseWriter) {
-			if n < 3 {
-				http.Error(w, "no valid certificate", http.StatusServiceUnavailable)
-				return
+type testbed struct {
+	p       jcrypto.CryptoProvider
+	trust   pki.Policy
+	keys    []relayKeys
+	addrs   []string
+	bundles [][]byte
+	info    []*infoServer
+	web     *http.Client
+}
+
+// three enrolled nodes whose info ports the client reaches by the names in
+// their certificates
+func newTestbed(t *testing.T, s jcrypto.Suite) *testbed {
+	t.Helper()
+	p := provider(t, s)
+	ca := newCA(t, p)
+	tb := &testbed{p: p, trust: pki.Policy{Anchor: ca.Anchor(), Skew: pki.Skew}}
+	routes := make(map[string]string)
+	for _, name := range []string{"relay-1", "relay-2", "relay-3"} {
+		k, b := enrolled(t, p, ca, name, t0.Add(72*time.Hour))
+		srv, at := serveInfo(t, b)
+		host, _, err := net.SplitHostPort(k.addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes[net.JoinHostPort(host, "9100")] = at
+		tb.keys = append(tb.keys, k)
+		tb.addrs = append(tb.addrs, k.addr)
+		tb.bundles = append(tb.bundles, b)
+		tb.info = append(tb.info, srv)
+	}
+	tb.web = fetch.NewClient()
+	tb.web.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		to, ok := routes[addr]
+		if !ok {
+			return nil, fmt.Errorf("no node at %s", addr)
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, to)
+	}
+	return tb
+}
+
+func (tb *testbed) publish(t *testing.T, bundles [][]byte) {
+	t.Helper()
+	m := mirrorOf(t, tb.addrs, bundles)
+	for _, srv := range tb.info {
+		srv.mirror.Store(&m)
+	}
+}
+
+func (tb *testbed) requests() [3]int32 {
+	return [3]int32{tb.info[0].requests.Load(), tb.info[1].requests.Load(), tb.info[2].requests.Load()}
+}
+
+func TestBundlesComeFromTheEntryOnly(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			tb := newTestbed(t, s)
+			tb.publish(t, tb.bundles)
+			tb.info[0].unready.Store(2)
+
+			bundles, err := chainBundles(tb.web, tb.addrs, "9100", 5, time.Millisecond)
+			if err != nil {
+				t.Fatalf("chainBundles: %v", err)
 			}
-			_, _ = w.Write(good)
-		})
-		b, err := fetchBundle(web, url, 5, time.Millisecond)
-		if err != nil || !bytes.Equal(b, good) || n.Load() != 3 {
-			t.Fatalf("fetchBundle = %d bytes, %v after %d requests", len(b), err, n.Load())
-		}
-	})
+			nodes, err := resolve(tb.p, true, tb.trust, tb.addrs, bundles, t0)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			for i, k := range tb.keys {
+				if nodes[i].Addr != k.addr || !bytes.Equal(nodes[i].OnionPub, k.onion) || !bytes.Equal(nodes[i].LinkPub, k.link) {
+					t.Fatalf("hop %d: %+v, want the keys of %s", i, nodes[i], k.addr)
+				}
+			}
+			if got := tb.requests(); got != [3]int32{3, 0, 0} {
+				t.Fatalf("requests per node %v, want two retries and the answer at the entry and none elsewhere", got)
+			}
 
-	t.Run("never enrolled", func(t *testing.T) {
-		url, n := serve(t, func(_ int32, w http.ResponseWriter) {
-			http.Error(w, "no valid certificate", http.StatusServiceUnavailable)
+			// a shorter chain through the same entry takes its nodes from the same mirror
+			two := []string{tb.addrs[0], tb.addrs[2]}
+			bundles, err = chainBundles(tb.web, two, "9100", 1, 0)
+			if err != nil {
+				t.Fatalf("chainBundles: %v", err)
+			}
+			if !bytes.Equal(bundles[1], tb.bundles[2]) {
+				t.Fatal("the second hop got another node's bundle")
+			}
+			if _, err := resolve(tb.p, true, tb.trust, two, bundles, t0); err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
 		})
-		if _, err := fetchBundle(web, url, 4, time.Millisecond); err == nil || n.Load() != 4 {
-			t.Fatalf("fetchBundle = %v after %d requests, want an error after 4", err, n.Load())
-		}
-	})
+	}
+}
+
+func TestEntryIsTheFirstNodeOfTheChain(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519)
+	tb.publish(t, tb.bundles)
+	reversed := []string{tb.addrs[2], tb.addrs[1], tb.addrs[0]}
+	if _, err := chainBundles(tb.web, reversed, "9100", 1, 0); err != nil {
+		t.Fatalf("chainBundles: %v", err)
+	}
+	if got := tb.requests(); got != [3]int32{0, 0, 1} {
+		t.Fatalf("requests per node %v, want one at the first node of the chain", got)
+	}
+}
+
+func TestMissingNodeRefusesTheChain(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519)
+	m := mirrorOf(t, tb.addrs[:2], tb.bundles[:2])
+	tb.info[0].mirror.Store(&m)
+
+	_, err := chainBundles(tb.web, tb.addrs, "9100", 3, time.Millisecond)
+	if !errors.Is(err, errNoBundle) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[2]+": ") {
+		t.Fatalf("chainBundles = %v, want node %s: %v", err, tb.addrs[2], errNoBundle)
+	}
+	if got := tb.requests(); got != [3]int32{1, 0, 0} {
+		t.Fatalf("requests per node %v, want one at the entry: a missing node is not asked itself", got)
+	}
+}
+
+func TestEntryWithoutDescriptorsRefusesTheChain(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519)
+	_, err := chainBundles(tb.web, tb.addrs, "9100", 3, time.Millisecond)
+	if err == nil || !strings.HasPrefix(err.Error(), "node "+tb.addrs[0]+": ") {
+		t.Fatalf("chainBundles = %v, want an error naming the entry", err)
+	}
+	if got := tb.requests(); got != [3]int32{3, 0, 0} {
+		t.Fatalf("requests per node %v, want three tries at the entry", got)
+	}
+	if _, err := chainBundles(tb.web, []string{"relay-1"}, "9100", 1, 0); err == nil {
+		t.Fatal("chainBundles accepted an entry address without a port")
+	}
+}
+
+func TestTamperedMirrorRefusesTheChain(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519)
+	_, foreign := enrolled(t, tb.p, newCA(t, tb.p), "relay-2", t0.Add(72*time.Hour))
+	unsigned, err := pki.Unsigned(tb.p, tb.keys[1].link, tb.keys[1].onion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := pki.ParseBundle(tb.bundles[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Descriptor[len(b.Descriptor)-1] ^= 1
+	altered := b.Marshal()
 
 	for _, c := range []struct {
 		name   string
-		answer func(w http.ResponseWriter)
+		second []byte
+		want   error
 	}{
-		{"not found", func(w http.ResponseWriter) { http.Error(w, "gone", http.StatusNotFound) }},
-		{"redirect", func(w http.ResponseWriter) {
-			w.Header().Set("Location", "http://elsewhere.invalid/descriptor")
-			w.WriteHeader(http.StatusFound)
-		}},
-		{"over the size limit", func(w http.ResponseWriter) { _, _ = w.Write(bytes.Repeat([]byte("a"), maxBundle+1)) }},
-		{"loose json", func(w http.ResponseWriter) { _, _ = w.Write(append(good, '\n')) }},
-		{"not json", func(w http.ResponseWriter) { _, _ = w.Write([]byte("pub=abc")) }},
+		{"node certified by another CA", foreign, pki.ErrUnknownCA},
+		{"bundle of another node", tb.bundles[2], pki.ErrWrongAddr},
+		{"unsigned bundle", unsigned, pki.ErrFormat},
+		{"descriptor signature altered", altered, pki.ErrDescSignature},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			url, n := serve(t, func(_ int32, w http.ResponseWriter) { c.answer(w) })
-			noRedirect := &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			}}
-			if _, err := fetchBundle(noRedirect, url, 5, time.Millisecond); err == nil || n.Load() != 1 {
-				t.Fatalf("fetchBundle = %v after %d requests, want one request and an error", err, n.Load())
-			}
-		})
+		tb.publish(t, [][]byte{tb.bundles[0], c.second, tb.bundles[2]})
+		bundles, err := chainBundles(tb.web, tb.addrs, "9100", 1, 0)
+		if err != nil {
+			t.Fatalf("%s: chainBundles: %v", c.name, err)
+		}
+		_, err = resolve(tb.p, true, tb.trust, tb.addrs, bundles, t0)
+		if !errors.Is(err, c.want) || !strings.HasPrefix(err.Error(), "node "+tb.addrs[1]+": ") {
+			t.Errorf("%s: resolve = %v, want node %s: %v", c.name, err, tb.addrs[1], c.want)
+		}
 	}
-
-	t.Run("nobody listening", func(t *testing.T) {
-		srv := httptest.NewServer(http.NotFoundHandler())
-		url := srv.URL + "/descriptor"
-		srv.Close()
-		start := time.Now()
-		if _, err := fetchBundle(web, url, 3, 20*time.Millisecond); err == nil {
-			t.Fatal("fetchBundle from a closed port succeeded")
-		}
-		if time.Since(start) < 40*time.Millisecond {
-			t.Fatal("a connection error was not retried")
-		}
-	})
+	if got := tb.requests(); got[1] != 0 || got[2] != 0 {
+		t.Fatalf("requests per node %v, want none beyond the entry", got)
+	}
 }
 
-func TestDescriptorURL(t *testing.T) {
-	for _, c := range []struct{ addr, want string }{
-		{"relay-1.jimichi.svc.cluster.local:9000", "http://relay-1.jimichi.svc.cluster.local:9100/descriptor"},
-		{"[::1]:9000", "http://[::1]:9100/descriptor"},
-	} {
-		if got, err := descriptorURL(c.addr, "9100"); err != nil || got != c.want {
-			t.Errorf("descriptorURL(%q) = %q, %v, want %q", c.addr, got, err, c.want)
+func TestUnverifiedChainUsesTheSameMirror(t *testing.T) {
+	tb := newTestbed(t, jcrypto.SuiteC25519)
+	unsigned := make([][]byte, 3)
+	for i, k := range tb.keys {
+		b, err := pki.Unsigned(tb.p, k.link, k.onion)
+		if err != nil {
+			t.Fatal(err)
 		}
+		unsigned[i] = b
 	}
-	if _, err := descriptorURL("relay-1", "9100"); err == nil {
-		t.Error("descriptorURL accepted an address without a port")
+	tb.publish(t, unsigned)
+	bundles, err := chainBundles(tb.web, tb.addrs, "9100", 1, 0)
+	if err != nil {
+		t.Fatalf("chainBundles: %v", err)
+	}
+	nodes, err := resolve(tb.p, false, pki.Policy{}, tb.addrs, bundles, t0)
+	if err != nil || !bytes.Equal(nodes[2].OnionPub, tb.keys[2].onion) {
+		t.Fatalf("resolve without auth = %v, %v", nodes, err)
+	}
+	if got := tb.requests(); got != [3]int32{1, 0, 0} {
+		t.Fatalf("requests per node %v, want one at the entry", got)
 	}
 }

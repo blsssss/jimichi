@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -13,14 +14,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 	"github.com/jimichi-org/jimichi/wire"
 )
 
 const (
-	maxAdminBody  = 4 << 10
+	// the roster is the largest body the admin port takes
+	maxAdminBody  = pki.MaxRoster
 	maxCheckEvery = time.Minute
+	minCheckEvery = time.Second
 )
 
 const (
@@ -47,6 +51,9 @@ type served struct {
 // what the node publishes about itself; without -auth there is no identity and
 // the descriptor goes out unsigned
 type node struct {
+	p        jcrypto.CryptoProvider
+	name     string
+	addr     string
 	id       *pki.Identity
 	unsigned []byte
 	ttl      time.Duration
@@ -54,6 +61,18 @@ type node struct {
 	logger   *log.Logger
 	// whether the relay still accepts cells; nil counts as serving
 	serving func() bool
+	// one GET of another node's /descriptor, strictly parsed
+	fetchPeer func(addr string) ([]byte, error)
+	// pause before a missing or due peer is asked again; zero picks peerRetry
+	peerRetry time.Duration
+
+	// nil until the roster arrives, or from the start without -auth
+	peers atomic.Pointer[peerCache]
+	// closed once peers is set; nil where nothing waits for it
+	wake chan struct{}
+
+	descriptorRequests atomic.Uint64
+	mirrorRequests     atomic.Uint64
 
 	// replaced only by a signing that succeeded, so a failed re-signing leaves
 	// the last good bundle in service until it expires
@@ -65,6 +84,9 @@ type node struct {
 	requestAt time.Time
 	// the one certificate this process takes, nil until then
 	installed   []byte
+	installedAt time.Time
+	// the one roster this process takes, nil until then
+	roster      []byte
 	signedState string
 }
 
@@ -82,8 +104,45 @@ func checkAuthFlags(stats, name, advertise string, ttl time.Duration) error {
 	if !pki.ValidAddr(advertise) {
 		return fmt.Errorf("-advertise %q: want host:port in printable ASCII, lower case, at most %d bytes", advertise, wire.AddrSize)
 	}
+	return checkTTL(ttl)
+}
+
+func checkTTL(ttl time.Duration) error {
 	if ttl < time.Minute || ttl > pki.MaxDescriptorLife {
 		return fmt.Errorf("-descriptor-ttl %v: want between 1m and %v", ttl, pki.MaxDescriptorLife)
+	}
+	return nil
+}
+
+// with -auth the peers come from the roster; without it -peers names them and
+// -advertise is this node's own entry among the descriptors it serves
+func checkPeerFlags(auth bool, advertise, peerInfoPort string, peers []string) error {
+	if !pki.ValidAddr("node:" + peerInfoPort) {
+		return fmt.Errorf("-peer-info-port %q: want a port number", peerInfoPort)
+	}
+	if auth {
+		if len(peers) > 0 {
+			return errors.New("-peers is for -auth=false only: with -auth the peers come from the roster")
+		}
+		return nil
+	}
+	if advertise == "" {
+		if len(peers) > 0 {
+			return errors.New("-peers needs -advertise, the address this node itself is listed under")
+		}
+		return nil
+	}
+	seen := map[string]bool{advertise: true}
+	for _, addr := range append([]string{advertise}, peers...) {
+		if !pki.ValidAddr(addr) {
+			return fmt.Errorf("%q: want host:port in printable ASCII, lower case, at most %d bytes", addr, wire.AddrSize)
+		}
+	}
+	for _, addr := range peers {
+		if seen[addr] {
+			return fmt.Errorf("-peers: %s repeated or equal to -advertise", addr)
+		}
+		seen[addr] = true
 	}
 	return nil
 }
@@ -100,18 +159,25 @@ func (n *node) certState() string {
 	}
 }
 
-func (n *node) descriptor() ([]byte, bool) {
+// the bundle in service and the unix second it runs out
+func (n *node) current() ([]byte, int64, bool) {
 	if n.id == nil {
-		return n.unsigned, n.unsigned != nil
+		return n.unsigned, math.MaxInt64, n.unsigned != nil
 	}
 	s := n.out.Load()
 	if s == nil {
-		return nil, false
+		return nil, 0, false
 	}
-	if now := n.now().Unix(); now >= s.notAfter || now >= s.expires {
-		return nil, false
+	until := min(s.notAfter, s.expires)
+	if n.now().Unix() >= until {
+		return nil, 0, false
 	}
-	return s.bundle, true
+	return s.bundle, until, true
+}
+
+func (n *node) descriptor() ([]byte, bool) {
+	b, _, ok := n.current()
+	return b, ok
 }
 
 func (n *node) infoMux() http.Handler {
@@ -124,9 +190,31 @@ func (n *node) infoMux() http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("GET /descriptor", func(w http.ResponseWriter, _ *http.Request) {
+		n.descriptorRequests.Add(1)
 		b, ok := n.descriptor()
 		if !ok {
 			http.Error(w, "no valid descriptor", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
+	})
+	// this node's bundle and the bundles of its roster peers, so a client asks
+	// its entry alone; the bytes are ready before the request comes
+	mux.HandleFunc("GET /descriptors", func(w http.ResponseWriter, _ *http.Request) {
+		n.mirrorRequests.Add(1)
+		c := n.peers.Load()
+		if c == nil {
+			missing := "no descriptors: the node has no roster"
+			if n.id == nil {
+				missing = "no descriptors: without -auth the node lists itself only under -advertise, and the other nodes from -peers"
+			}
+			http.Error(w, missing, http.StatusServiceUnavailable)
+			return
+		}
+		b, ok := c.descriptors()
+		if !ok {
+			http.Error(w, "no valid descriptor of every roster node", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -142,27 +230,35 @@ func (n *node) adminMux(counters func() relay.Counters) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		s := counters()
+		roster, held := n.peerState()
 		writeJSON(w, map[string]any{
-			"accepted":       s.Accepted,
-			"forwarded":      s.Forwarded,
-			"delivered":      s.Delivered,
-			"dropped":        s.Dropped,
-			"padding":        s.Padding,
-			"broken":         s.Broken,
-			"accept_retries": s.AcceptRetries,
-			"refused_links":  s.RefusedLinks,
-			"refused_busy":   s.RefusedBusy,
-			"refused_source": s.RefusedSource,
-			"refused_rate":   s.RefusedRate,
-			"refused_setups": s.RefusedSetups,
-			"timed_out":      s.TimedOut,
-			"expired":        s.Expired,
-			"cert":           n.certState(),
+			"accepted":            s.Accepted,
+			"forwarded":           s.Forwarded,
+			"delivered":           s.Delivered,
+			"dropped":             s.Dropped,
+			"padding":             s.Padding,
+			"broken":              s.Broken,
+			"accept_retries":      s.AcceptRetries,
+			"refused_links":       s.RefusedLinks,
+			"refused_busy":        s.RefusedBusy,
+			"refused_source":      s.RefusedSource,
+			"refused_rate":        s.RefusedRate,
+			"refused_setups":      s.RefusedSetups,
+			"refused_extend":      s.RefusedExtend,
+			"failed_extend":       s.FailedExtend,
+			"timed_out":           s.TimedOut,
+			"expired":             s.Expired,
+			"cert":                n.certState(),
+			"roster":              roster,
+			"peers":               held,
+			"descriptor_requests": n.descriptorRequests.Load(),
+			"mirror_requests":     n.mirrorRequests.Load(),
 		})
 	})
 	if n.id != nil {
 		mux.HandleFunc("POST /csr", n.handleRequest)
 		mux.HandleFunc("PUT /cert", n.handleCert)
+		mux.HandleFunc("PUT /roster", n.handleRoster)
 	}
 	return mux
 }
@@ -232,6 +328,7 @@ func (n *node) handleCert(w http.ResponseWriter, r *http.Request) {
 	}
 	n.requestAt = time.Time{}
 	n.installed = raw
+	n.installedAt = now
 	n.notAfter.Store(cert.NotAfter)
 	n.logger.Printf("certificate installed serial=%x not_after=%s",
 		cert.Serial, time.Unix(cert.NotAfter, 0).UTC().Format(time.RFC3339))
@@ -270,6 +367,9 @@ func (n *node) sign(now time.Time) error {
 		return err
 	}
 	n.out.Store(s)
+	if c := n.peers.Load(); c != nil {
+		c.publish()
+	}
 	return nil
 }
 
@@ -302,9 +402,10 @@ func (n *node) keepFresh() {
 }
 
 // a quarter of the lifetime keeps a re-signing due at half of it from
-// slipping past the expiry, even for the shortest lifetime of a minute
+// slipping past the expiry, even for the shortest lifetime of a minute; the
+// lower bound keeps a ticker valid whatever lifetime it is given
 func checkEvery(ttl time.Duration) time.Duration {
-	return min(ttl/4, maxCheckEvery)
+	return max(min(ttl/4, maxCheckEvery), minCheckEvery)
 }
 
 func (n *node) refreshIfDue() {

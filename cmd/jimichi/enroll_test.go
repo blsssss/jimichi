@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,6 +35,11 @@ type fakeRelay struct {
 	requests atomic.Int32
 	puts     atomic.Int32
 	installs atomic.Int32
+	// roster uploads, taken or not
+	rosterPuts atomic.Int32
+
+	mu    sync.Mutex
+	taken []byte
 
 	request    func(nonce [pki.NonceSize]byte) ([]byte, error)
 	refuseCert bool
@@ -47,6 +53,14 @@ type fakeRelay struct {
 	// installs every certificate it gets and never answers
 	dropEveryPut bool
 	descriptor   func() ([]byte, bool)
+
+	refuseRoster bool
+	// fails the roster with 500 after taking it
+	failAfterRoster bool
+	// takes the first roster, then drops the connection unanswered
+	dropFirstRoster bool
+	// takes every roster it gets and never answers
+	dropEveryRoster bool
 }
 
 const installedText = "certificate already installed: a new one needs a relay restart, which gives a fresh identity"
@@ -112,6 +126,26 @@ func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr s
 		case r.failAfterInstall:
 			http.Error(w, "signing failed", http.StatusInternalServerError)
 		case r.dropEveryPut, r.dropFirstPut && n == 1:
+			panic(http.ErrAbortHandler)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	admin.HandleFunc("PUT /roster", func(w http.ResponseWriter, req *http.Request) {
+		n := r.rosterPuts.Add(1)
+		raw, _ := io.ReadAll(req.Body)
+		if r.refuseRoster {
+			http.Error(w, "roster does not list this node under its name and address", http.StatusBadRequest)
+			return
+		}
+		if err := r.takeRoster(raw); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		switch {
+		case r.failAfterRoster:
+			http.Error(w, "out of memory", http.StatusInternalServerError)
+		case r.dropEveryRoster, r.dropFirstRoster && n == 1:
 			panic(http.ErrAbortHandler)
 		default:
 			w.WriteHeader(http.StatusNoContent)
@@ -338,6 +372,14 @@ func TestEnrollIsAllOrNothing(t *testing.T) {
 				t.Fatalf("a failed enrollment printed %q", stdout.String())
 			}
 			log := stderr.String()
+			for _, r := range relays {
+				if n := r.rosterPuts.Load(); n != 0 {
+					t.Fatalf("%s was sent a roster although the enrollment failed before it", r.name)
+				}
+			}
+			if strings.Contains(log, "roster") {
+				t.Fatalf("a roster is mentioned although none was sent: %q", log)
+			}
 			if c.installed != "" {
 				if !strings.Contains(log, c.installed+" certificates of a discarded CA") || !strings.Contains(log, "rollout restart deployment/relay-1") {
 					t.Fatalf("no notice %q with a restart hint in %q", c.installed, log)
@@ -554,5 +596,203 @@ func TestCommandLine(t *testing.T) {
 		if code := run(c.args, io.Discard, io.Discard); code != c.code {
 			t.Errorf("jimichi %v: exit %d, want %d", c.args, code, c.code)
 		}
+	}
+}
+
+// what a relay checks before it takes a roster: a certificate installed, the
+// roster naming it, its own bundle verifying under the roster's anchor, and one
+// roster per process with the same bytes welcome again
+func (r *fakeRelay) takeRoster(raw []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.taken != nil {
+		if bytes.Equal(raw, r.taken) {
+			return nil
+		}
+		return errors.New("roster already installed")
+	}
+	roster, err := pki.ParseRoster(raw)
+	if err != nil {
+		return err
+	}
+	bundle, ok := r.id.Bundle()
+	if !ok {
+		return errors.New("no certificate installed")
+	}
+	if !roster.Has(r.name, addrOf(r.name)) {
+		return errors.New("roster does not list this node")
+	}
+	if _, err := pki.Verify(r.p, pki.Policy{Anchor: roster.Anchor, Skew: pki.Skew}, addrOf(r.name), bundle, time.Now()); err != nil {
+		return err
+	}
+	r.taken = raw
+	return nil
+}
+
+func (r *fakeRelay) heldRoster() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.taken
+}
+
+func TestEveryRelayGetsTheRosterBeforeTheAnchorIsPrinted(t *testing.T) {
+	s := jcrypto.SuiteC25519
+	p := provider(t, s)
+	relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), honestRelay(t, p, "relay-3")}
+	var stdout, stderr bytes.Buffer
+	if err := runEnroll(enrollArgs(s, relays...), &stdout, &stderr); err != nil {
+		t.Fatalf("enroll: %v\n%s", err, stderr.String())
+	}
+	anchor := strings.TrimSuffix(stdout.String(), "\n")
+	for _, r := range relays {
+		if n := r.rosterPuts.Load(); n != 1 {
+			t.Fatalf("%s got %d rosters, want 1", r.name, n)
+		}
+		roster, err := pki.ParseRoster(r.heldRoster())
+		if err != nil {
+			t.Fatalf("%s holds no roster: %v", r.name, err)
+		}
+		if roster.Anchor.String() != anchor {
+			t.Fatalf("%s holds a roster under %s, the printed anchor is %s", r.name, roster.Anchor, anchor)
+		}
+		if len(roster.Nodes) != 3 {
+			t.Fatalf("%s holds a roster of %d nodes", r.name, len(roster.Nodes))
+		}
+		for i, want := range relays {
+			if roster.Nodes[i] != (pki.RosterNode{Name: want.name, Addr: addrOf(want.name)}) {
+				t.Fatalf("%s: roster entry %d is %+v", r.name, i, roster.Nodes[i])
+			}
+		}
+		if !bytes.Equal(r.heldRoster(), relays[0].heldRoster()) {
+			t.Fatalf("%s got other bytes than relay-1", r.name)
+		}
+	}
+	if !strings.Contains(stderr.String(), "roster of 3 nodes installed on every relay") {
+		t.Fatalf("no roster line in %q", stderr.String())
+	}
+}
+
+func TestRosterFailureIsReported(t *testing.T) {
+	s := jcrypto.SuiteC25519
+	p := provider(t, s)
+	const certs = "relays relay-1, relay-2, relay-3 now hold certificates of a discarded CA; clients refuse them, restart them with kubectl -n jimichi rollout restart deployment/relay-1 deployment/relay-2 deployment/relay-3, then run enroll again"
+	const tail = " a roster of a discarded CA; they extend only to nodes it certified, restart them with kubectl -n jimichi rollout restart "
+
+	for _, c := range []struct {
+		name    string
+		bend    func(relays []*fakeRelay)
+		failing string
+		timeout string
+		// the notice about relays left with a roster of the discarded CA
+		roster string
+		// roster uploads per relay; -1 for at least two
+		puts [3]int32
+	}{
+		{"first relay refuses", func(r []*fakeRelay) { r[0].refuseRoster = true }, "relay-1", "5s",
+			"", [3]int32{1, 0, 0}},
+		{"second relay refuses", func(r []*fakeRelay) { r[1].refuseRoster = true }, "relay-2", "5s",
+			"relays relay-1 now hold" + tail + "deployment/relay-1, then run enroll again", [3]int32{1, 1, 0}},
+		{"second relay fails after taking it", func(r []*fakeRelay) { r[1].failAfterRoster = true }, "relay-2", "5s",
+			"relays relay-1 now hold and relay-2 may hold" + tail + "deployment/relay-1 deployment/relay-2, then run enroll again", [3]int32{1, 1, 0}},
+		{"last relay never answers", func(r []*fakeRelay) { r[2].dropEveryRoster = true }, "relay-3", "1s",
+			"relays relay-1, relay-2 now hold and relay-3 may hold" + tail + "deployment/relay-1 deployment/relay-2 deployment/relay-3, then run enroll again", [3]int32{1, 1, -1}},
+		{"first relay never answers", func(r []*fakeRelay) { r[0].dropEveryRoster = true }, "relay-1", "1s",
+			"relays relay-1 may hold" + tail + "deployment/relay-1, then run enroll again", [3]int32{-1, 0, 0}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), honestRelay(t, p, "relay-3")}
+			c.bend(relays)
+			args := enrollArgs(s, relays...)
+			args[5] = c.timeout
+			var stdout, stderr bytes.Buffer
+			err := runEnroll(args, &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), "node "+c.failing+": installing the roster") {
+				t.Fatalf("enroll = %v, want the roster of %s to fail", err, c.failing)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("the anchor was printed although a relay has no roster: %q", stdout.String())
+			}
+			log := stderr.String()
+			if !strings.Contains(log, certs) {
+				t.Fatalf("no notice about the certificates in %q", log)
+			}
+			if c.roster == "" && strings.Contains(log, "a roster of a discarded CA") {
+				t.Fatalf("notice about a roster although no relay took one: %q", log)
+			}
+			if !strings.Contains(log, c.roster) {
+				t.Fatalf("no notice %q in %q", c.roster, log)
+			}
+			for i, r := range relays {
+				got := r.rosterPuts.Load()
+				if c.puts[i] == -1 && got < 2 || c.puts[i] != -1 && got != c.puts[i] {
+					t.Fatalf("%s got %d roster uploads, want %d", r.name, got, c.puts[i])
+				}
+			}
+		})
+	}
+}
+
+func TestRetryAfterALostRosterAnswerSucceeds(t *testing.T) {
+	s := jcrypto.SuiteC25519
+	p := provider(t, s)
+	relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2")}
+	relays[1].dropFirstRoster = true
+	var stdout, stderr bytes.Buffer
+	if err := runEnroll(enrollArgs(s, relays...), &stdout, &stderr); err != nil {
+		t.Fatalf("enroll: %v\n%s", err, stderr.String())
+	}
+	if n := relays[1].rosterPuts.Load(); n != 2 {
+		t.Fatalf("relay-2 got %d roster uploads, want the lost one and its retry", n)
+	}
+	if _, err := pki.ParseAnchor(strings.TrimSpace(stdout.String())); err != nil {
+		t.Fatalf("stdout %q: %v", stdout.String(), err)
+	}
+}
+
+// a roster no relay would take is found before any certificate exists: the
+// relays keep their one installation for a run that can succeed
+func TestOversizedRosterStopsTheRunBeforeTheCA(t *testing.T) {
+	made := countCAs(t)
+	s := jcrypto.SuiteC25519
+	p := provider(t, s)
+	fits := func(relays []*fakeRelay) bool {
+		r := pki.Roster{Anchor: pki.Anchor{Suite: s, Pub: make([]byte, 32)}}
+		for _, relay := range relays {
+			r.Nodes = append(r.Nodes, pki.RosterNode{Name: relay.name, Addr: addrOf(relay.name)})
+		}
+		return len(r.Marshal()) <= pki.MaxRoster
+	}
+	var relays []*fakeRelay
+	for i := 1; fits(relays); i++ {
+		relays = append(relays, honestRelay(t, p, fmt.Sprintf("relay-%026d", i)))
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runEnroll(enrollArgs(s, relays...), &stdout, &stderr)
+	want := fmt.Sprintf("roster of %d nodes takes", len(relays))
+	if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "at most 4096") {
+		t.Fatalf("enroll = %v, want the roster refused for its size", err)
+	}
+	if stdout.Len() != 0 || made.Load() != 0 || strings.Contains(stderr.String(), "discarded CA") {
+		t.Fatalf("an oversized roster got as far as a CA: stdout %q, %d CA keys, log %q", stdout.String(), made.Load(), stderr.String())
+	}
+	for _, r := range relays {
+		if r.puts.Load() != 0 || r.rosterPuts.Load() != 0 {
+			t.Fatalf("%s was sent a certificate or a roster", r.name)
+		}
+	}
+
+	// one node fewer fits, and every relay takes that roster
+	relays = relays[:len(relays)-1]
+	for _, r := range relays {
+		r.requests.Store(0)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runEnroll(enrollArgs(s, relays...), &stdout, &stderr); err != nil {
+		t.Fatalf("enroll with the largest roster that fits: %v\n%s", err, stderr.String())
+	}
+	if got := len(relays[0].heldRoster()); got == 0 || got > pki.MaxRoster {
+		t.Fatalf("relay holds a roster of %d bytes", got)
 	}
 }
