@@ -29,9 +29,7 @@ kind-load: images
 
 deploy:
 	kubectl apply -f deploy/base/relay.yaml -f deploy/base/network.yaml
-	kubectl rollout status -n $(NAMESPACE) deployment/relay-1
-	kubectl rollout status -n $(NAMESPACE) deployment/relay-2
-	kubectl rollout status -n $(NAMESPACE) deployment/relay-3
+	kubectl rollout status -n $(NAMESPACE) deployment -l app=relay
 	bash scripts/enroll.sh
 	kubectl apply -f deploy/base/client.yaml
 
@@ -46,9 +44,7 @@ redeploy:
 start:
 	docker start $(CLUSTER)-control-plane $(CLUSTER)-worker $(CLUSTER)-worker2
 	kubectl wait --for=condition=Ready nodes --all --timeout=180s
-	kubectl -n $(NAMESPACE) rollout status deployment/relay-1 --timeout=180s
-	kubectl -n $(NAMESPACE) rollout status deployment/relay-2 --timeout=180s
-	kubectl -n $(NAMESPACE) rollout status deployment/relay-3 --timeout=180s
+	kubectl -n $(NAMESPACE) rollout status deployment -l app=relay --timeout=180s
 	bash scripts/enroll.sh
 	kubectl -n $(NAMESPACE) rollout status deployment/client-a --timeout=180s
 

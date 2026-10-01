@@ -3,6 +3,22 @@ NAMESPACE="${NAMESPACE:-jimichi}"
 # Git Bash rewrites arguments that look like paths, and a base64 anchor can
 export MSYS_NO_PATHCONV=1
 
+# the relay deployments, found by label and printed in the order of their
+# names: the scripts take the relays from here, however many the testbed runs
+relays() {
+  local names
+  names=$(kubectl -n "$NAMESPACE" get deployment -l app=relay \
+    -o go-template='{{range .items}}{{.metadata.name}}{{"\n"}}{{end}}' | sort -V)
+  [ -n "$names" ] || { echo "no relay deployment in namespace $NAMESPACE" >&2; return 1; }
+  printf '%s\n' "$names"
+}
+
+# the address a relay advertises and its certificate carries; a relay is named
+# after its deployment and its service
+relay_addr() {
+  printf '%s.%s.svc.cluster.local:9000\n' "$1" "$NAMESPACE"
+}
+
 # prints the one running pod of the newest rollout of a deployment; right after a
 # restart the old pods still exist, and kubectl would happily read their logs
 current_pod() {

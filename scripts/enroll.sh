@@ -8,6 +8,8 @@ set -euo pipefail
 
 SUITE="${SUITE:-c25519}"
 CERT_TTL="${CERT_TTL:-72h}"
+# a relay takes the local port base + its place in the list; the bases are
+# 100 apart, so the ranges of up to 99 relays do not meet
 ADMIN_PORT_BASE="${ADMIN_PORT_BASE:-19200}"
 INFO_PORT_BASE="${INFO_PORT_BASE:-19300}"
 
@@ -67,20 +69,30 @@ identity_of() {
   return 1
 }
 
+relay_list=$(relays)
+if [ "$(printf '%s\n' "$relay_list" | wc -l)" -gt 99 ]; then
+  echo "more than 99 relays: their local ports would run into the next port base" >&2
+  exit 1
+fi
+
+# the roster is every relay of the namespace, each under the name of its
+# deployment and the address of its service
 args=(-suite "$SUITE" -cert-ttl "$CERT_TTL" -namespace "$NAMESPACE")
-for h in 1 2 3; do
-  pod=$(current_pod "relay-$h")
+place=0
+for relay in $relay_list; do
+  place=$((place + 1))
+  pod=$(current_pod "$relay")
   kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=120s >/dev/null
   identity=$(identity_of "$pod")
-  admin=$((ADMIN_PORT_BASE + h))
-  info=$((INFO_PORT_BASE + h))
-  log="$logs/relay-$h.log"
+  admin=$((ADMIN_PORT_BASE + place))
+  info=$((INFO_PORT_BASE + place))
+  log="$logs/$relay.log"
   # the admin port listens on loopback inside the pod, so only a port-forward
   # through the kube API reaches it
   kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "pod/$pod" "$admin:9101" "$info:9100" >"$log" 2>&1 &
   forwards+=("$!")
   wait_forward "$!" "$log" "$admin" "$info"
-  args+=(-node "relay-$h=relay-$h.$NAMESPACE.svc.cluster.local:9000,admin=127.0.0.1:$admin,info=127.0.0.1:$info,identity=$identity")
+  args+=(-node "$relay=$(relay_addr "$relay"),admin=127.0.0.1:$admin,info=127.0.0.1:$info,identity=$identity")
 done
 for pid in "${forwards[@]}"; do
   kill -0 "$pid" 2>/dev/null || { echo "a port-forward exited before enrollment" >&2; exit 1; }
@@ -96,7 +108,7 @@ esac
 # that holds one, from this run or an earlier one, must restart first
 if ! anchor=$("$jimichi" enroll "${args[@]}"); then
   echo "enrollment failed; a relay that has taken a certificate takes a new one only after a restart:" >&2
-  echo "  kubectl -n $NAMESPACE rollout restart deployment/relay-1 deployment/relay-2 deployment/relay-3" >&2
+  echo "  kubectl -n $NAMESPACE rollout restart deployment -l app=relay" >&2
   echo "then run scripts/enroll.sh again" >&2
   exit 1
 fi
