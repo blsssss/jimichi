@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -262,9 +263,25 @@ func (e *enrollment) restartHint(names []string) string {
 	return fmt.Sprintf("kubectl -n %s rollout restart %s", e.namespace, strings.Join(deployments, " "))
 }
 
+// relays left holding something of a CA whose anchor nobody will get
+func (e *enrollment) reportDiscarded(what, effect string, hold, mayHold []string) {
+	if len(hold)+len(mayHold) == 0 {
+		return
+	}
+	held := "relays " + strings.Join(hold, ", ") + " now hold"
+	switch {
+	case len(hold) == 0:
+		held = "relays " + strings.Join(mayHold, ", ") + " may hold"
+	case len(mayHold) > 0:
+		held += " and " + strings.Join(mayHold, ", ") + " may hold"
+	}
+	fmt.Fprintf(e.log, "%s %s of a discarded CA; %s, restart them with %s, then run enroll again\n",
+		held, what, effect, e.restartHint(slices.Concat(hold, mayHold)))
+}
+
 // nothing is issued until every request has passed, and the anchor is returned
 // only once every relay serves a descriptor that verifies against it the way
-// a client checks it
+// a client checks it and has taken the roster of the nodes it may extend to
 func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 	reqs := make([]*pki.Request, len(e.nodes))
 	for i, n := range e.nodes {
@@ -320,20 +337,13 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 	// installing is not atomic across relays: once one has taken a certificate
 	// of this CA, a failure leaves it serving under an anchor nobody will get,
 	// and it keeps that certificate until it restarts
-	var installed, mayHold []string
+	var installed, mayHold, rostered, mayRoster []string
 	defer func() {
-		if err == nil || len(installed)+len(mayHold) == 0 {
+		if err == nil {
 			return
 		}
-		held := "relays " + strings.Join(installed, ", ") + " now hold"
-		switch {
-		case len(installed) == 0:
-			held = "relays " + strings.Join(mayHold, ", ") + " may hold"
-		case len(mayHold) > 0:
-			held += " and " + strings.Join(mayHold, ", ") + " may hold"
-		}
-		fmt.Fprintf(e.log, "%s certificates of a discarded CA; clients refuse them, restart them with %s, then run enroll again\n",
-			held, e.restartHint(append(installed, mayHold...)))
+		e.reportDiscarded("certificates", "clients refuse them", installed, mayHold)
+		e.reportDiscarded("a roster", "they extend only to nodes it certified", rostered, mayRoster)
 	}()
 	for i, n := range e.nodes {
 		_, err := e.call(ctx, http.MethodPut, "http://"+n.admin+"/cert", certs[i].Marshal(), http.StatusNoContent)
@@ -366,6 +376,26 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 		fmt.Fprintf(e.log, "enrolled %s identity=%s serial=%x certificate until %s\n",
 			v.Name, pki.Fingerprint(e.p, v.Identity), certs[i].Serial, v.CertUntil.UTC().Format(time.RFC3339))
 	}
+
+	// every relay gets the same bytes; a relay keeps the one roster it takes
+	// until it restarts, like its certificate
+	roster := pki.Roster{Anchor: anchor}
+	for _, n := range e.nodes {
+		roster.Nodes = append(roster.Nodes, pki.RosterNode{Name: n.name, Addr: n.addr})
+	}
+	raw := roster.Marshal()
+	for _, n := range e.nodes {
+		_, err := e.call(ctx, http.MethodPut, "http://"+n.admin+"/roster", raw, http.StatusNoContent)
+		if err == nil {
+			rostered = append(rostered, n.name)
+			continue
+		}
+		if ambiguous(err) {
+			mayRoster = append(mayRoster, n.name)
+		}
+		return pki.Anchor{}, fmt.Errorf("node %s: installing the roster: %w", n.name, err)
+	}
+	fmt.Fprintf(e.log, "roster of %d nodes installed on every relay\n", len(e.nodes))
 	return anchor, nil
 }
 

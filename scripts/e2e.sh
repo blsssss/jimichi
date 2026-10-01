@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # deploy the testbed into the current cluster and pass only if a message makes
 # the full round trip through the enrolled chain, a client holding a foreign
-# anchor refuses to build one and no other pod reaches a cell port
+# anchor refuses to build one, both asked the entry alone for descriptors and
+# no other pod reaches a cell port
 set -euo pipefail
 
 . "$(dirname "$0")/lib.sh"
@@ -26,6 +27,31 @@ if ! bash scripts/enroll.sh; then
   kubectl -n "$NAMESPACE" logs -l app=relay --prefix --tail=20 >&2 || true
   exit 1
 fi
+
+# one counter of one relay out of the lines scripts/stats.sh prints
+counter() {
+  printf '%s\n' "$1" | sed -n "s/^relay-$2 .*\"$3\":\([0-9][0-9]*\).*/\1/p"
+}
+
+# a relay fetches the descriptor of each roster peer once and again only at
+# half of its life, so once every relay holds both peers the requests relay-2
+# and relay-3 have answered stay as they are unless a client asks them
+stats=""
+for _ in $(seq 1 30); do
+  stats=$(bash scripts/stats.sh 2>/dev/null || true)
+  [ "$(counter "$stats" 1 peers)$(counter "$stats" 2 peers)$(counter "$stats" 3 peers)" = "222" ] && break
+  stats=""
+  sleep 2
+done
+if [ -z "$stats" ]; then
+  echo "the relays did not get the descriptors of their roster peers" >&2
+  bash scripts/stats.sh >&2 || true
+  kubectl -n "$NAMESPACE" logs -l app=relay --prefix --tail=20 >&2 || true
+  exit 1
+fi
+asked_2=$(counter "$stats" 2 descriptor_requests)
+asked_3=$(counter "$stats" 3 descriptor_requests)
+
 kubectl apply -f deploy/base/client.yaml
 kubectl -n "$NAMESPACE" rollout status deployment/client-a --timeout=180s
 
@@ -87,6 +113,31 @@ if [ -z "$refusal" ]; then
   exit 1
 fi
 echo "foreign anchor: $refusal"
+
+# client-a and the refused client took every bundle from relay-1: it answered
+# requests for the descriptors of the chain, relay-2 and relay-3 answered none
+# and no request for their own descriptor since the count above
+stats=""
+for _ in $(seq 1 10); do
+  stats=$(bash scripts/stats.sh 2>/dev/null || true)
+  [ -n "$(counter "$stats" 1 mirror_requests)" ] && [ -n "$(counter "$stats" 2 mirror_requests)" ] && [ -n "$(counter "$stats" 3 mirror_requests)" ] && break
+  stats=""
+  sleep 2
+done
+entry_only=yes
+[ -n "$stats" ] || entry_only=""
+[ "$(counter "$stats" 1 mirror_requests)" -ge 2 ] 2>/dev/null || entry_only=""
+[ "$(counter "$stats" 2 mirror_requests)" = "0" ] || entry_only=""
+[ "$(counter "$stats" 3 mirror_requests)" = "0" ] || entry_only=""
+[ "$(counter "$stats" 2 descriptor_requests)" = "$asked_2" ] || entry_only=""
+[ "$(counter "$stats" 3 descriptor_requests)" = "$asked_3" ] || entry_only=""
+if [ -z "$entry_only" ]; then
+  echo "a client asked a node other than its entry for descriptors, or the entry was not asked" >&2
+  echo "descriptor requests before the clients: relay-2 $asked_2, relay-3 $asked_3" >&2
+  printf '%s\n' "$stats" >&2
+  exit 1
+fi
+echo "entry only: relay-1 answered $(counter "$stats" 1 mirror_requests) requests for the descriptors, relay-2 and relay-3 none"
 
 # a hardened pod that is neither a client nor a relay must not reach any cell
 # port; reaching every info port shows that a refusal comes from the policy and

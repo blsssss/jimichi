@@ -20,7 +20,8 @@ const (
 	labelI2R = "jimichi/link/i2r"
 	labelR2I = "jimichi/link/r2i"
 
-	// the initiator knows the responder's long-term key only on the first hop
+	// the initiator has the responder's long-term key only where it comes from a
+	// verified descriptor
 	modeAnonymous     = 0
 	modeAuthenticated = 1
 )

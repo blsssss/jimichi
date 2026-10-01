@@ -59,6 +59,11 @@ type Config struct {
 	SourceLinkBurst  int
 	SourceSetupRate  float64
 	SourceSetupBurst int
+
+	// the nodes this one extends to and the link key each must prove; nil
+	// extends to any address over an anonymous link, which is the baseline
+	// without node authentication
+	Peers func(addr string) (linkPub []byte, ok bool)
 }
 
 type Relay struct {
@@ -113,6 +118,9 @@ type Counters struct {
 	RefusedSource uint64
 	RefusedRate   uint64
 	RefusedSetups uint64
+	// setups whose next address Peers did not know, turned away without a
+	// dial; the setup cell is counted in Dropped as well
+	RefusedExtend uint64
 	// setup, write and handshake deadlines that ran out; a dial to the next
 	// hop that times out shows in Dropped only
 	TimedOut uint64
@@ -207,6 +215,7 @@ var (
 	errBroken    = errors.New("relay: circuit broken")
 	errOutOfTurn = fmt.Errorf("%w: counter out of turn", errBroken)
 	errQueueFull = fmt.Errorf("%w: send queue full", errBroken)
+	errNotPeer   = errors.New("relay: next address is not a known node")
 )
 
 func (r *Relay) Stats() *Stats { return &r.stats }
@@ -646,6 +655,17 @@ func (r *Relay) setupFailed(from *link.Conn, err error) error {
 }
 
 func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
+	var peerLink []byte
+	if r.cfg.Peers != nil {
+		key, ok := r.cfg.Peers(layer.NextAddr)
+		// link.Dial reads a missing key as an anonymous link, so an empty one
+		// counts as unknown
+		if !ok || len(key) == 0 {
+			r.stats.add(&r.stats.RefusedExtend)
+			return errNotPeer
+		}
+		peerLink = key
+	}
 	raw, err := r.dial(layer.NextAddr)
 	if err != nil {
 		return err
@@ -662,10 +682,10 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 	}
 
 	_ = raw.SetDeadline(time.Now().Add(onwardTimeout))
-	// the relay does not know the next node's long-term key, so the link to it
-	// is anonymous: it hides headers from a passive observer, the onion layers
-	// keep the content bound to the nodes the client chose
-	conn, err := link.Dial(raw, r.cfg.Provider, nil)
+	// with the next node's link key the frame keys depend on its static key, so
+	// only that node reads the setup; without one the link is anonymous and
+	// hides headers from a passive observer only
+	conn, err := link.Dial(raw, r.cfg.Provider, peerLink)
 	if err != nil {
 		return fail(err)
 	}

@@ -1,5 +1,6 @@
 # the testbed chain is fixed, so each cell port takes connections only from the
-# hop before it; info stays open to the namespace, where clients fetch keys
+# hop before it; info stays open to the namespace: a client asks its entry
+# there for the descriptors, and every node asks the other nodes for theirs
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

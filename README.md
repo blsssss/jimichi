@@ -153,11 +153,13 @@ kubectl apply -f deploy/base/client.yaml
 `make deploy` runs the last four steps. Three relays and a client appear in the `jimichi`
 namespace. A relay creates its signing key in memory at start and waits for enrollment:
 `scripts/enroll.sh` builds `cmd/jimichi` and runs `jimichi enroll` on the host, which certifies
-every relay through a port-forward under a CA that exists only for that run and stores the CA
-public key, the anchor, in ConfigMap `jimichi-ca`. The relay then publishes a signed descriptor on
-port 9100, and the client obtains the signed bundles of the chain nodes and verifies them
-against the anchor before it builds the circuit. A restarted relay needs `make enroll` again. Aggregated counters go to stdout once a
-minute and to port 9101 on loopback only, read through a port-forward:
+every relay through a port-forward under a CA that exists only for that run, gives each relay the
+roster of the certified nodes and stores the CA public key, the anchor, in ConfigMap `jimichi-ca`.
+The relay then publishes a signed descriptor on port 9100, keeps the verified descriptors of the
+other roster nodes and extends circuits only to them over authenticated links. The client obtains
+the signed bundles of the chain nodes from its entry node and verifies them against the anchor
+before it builds the circuit. A restarted relay needs `make enroll` again. Aggregated counters go
+to stdout once a minute and to port 9101 on loopback only, read through a port-forward:
 
 ```
 kubectl -n jimichi port-forward deployment/relay-3 9101:9101

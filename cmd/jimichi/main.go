@@ -13,8 +13,9 @@ import (
 
 const usage = `usage:
   jimichi enroll -suite c25519 -node name=host:port,admin=host:port,info=host:port,identity=hash [-node ...]
-      certify every listed relay under a CA that lives for this run only and
-      print its anchor, or print nothing and exit 1
+      certify every listed relay under a CA that lives for this run only, give
+      each the roster of the listed relays and print the anchor, or print
+      nothing and exit 1
   jimichi keygen-ca -suite c25519
       print the anchor of a CA key that is thrown away at once
 `
