@@ -33,8 +33,9 @@ func CompromiseFraction(paths [][]int, rogue map[int]bool) (ends, touched float6
 // uniformly among N nodes, k of them rogue: k(k-1)/(N(N-1)) for both ends, k/N
 // when the path is one node, and 1 - C(N-k, h)/C(N, h) for any node. The ratio
 // of the binomials is the product of (N-k-i)/(N-i) over the h positions, the
-// chance that every draw without replacement misses the rogue nodes. NaN when
-// there is no such choice
+// chance that every draw without replacement misses the rogue nodes; with
+// fewer than h honest nodes a factor is zero before any turns negative. NaN
+// when there is no such choice
 func CompromiseProbability(nodes, hops, rogue int) (ends, touched float64) {
 	if hops < 1 || hops > nodes || rogue < 0 || rogue > nodes {
 		return math.NaN(), math.NaN()
@@ -46,7 +47,7 @@ func CompromiseProbability(nodes, hops, rogue int) (ends, touched float64) {
 	}
 	clean := 1.0
 	for i := 0; i < hops; i++ {
-		clean *= max(n-k-float64(i), 0) / (n - float64(i))
+		clean *= (n - k - float64(i)) / (n - float64(i))
 	}
 	return ends, 1 - clean
 }
