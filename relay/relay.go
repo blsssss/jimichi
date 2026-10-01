@@ -113,7 +113,8 @@ type Counters struct {
 	RefusedSource uint64
 	RefusedRate   uint64
 	RefusedSetups uint64
-	// setup, write and handshake deadlines that ran out
+	// setup, write and handshake deadlines that ran out; a dial to the next
+	// hop that times out shows in Dropped only
 	TimedOut uint64
 	// circuits closed for idleness or age
 	Expired uint64

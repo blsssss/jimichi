@@ -71,8 +71,8 @@ nothing at all, so the property is not needed there.
 - Denial of service beyond the node limits: a node gives one address at most its share of links,
   handshakes and setups and bounds the life of circuits (ARCHITECTURE, node limits; the numbers
   are in LIMITATIONS). Forwarding nodes rely on the global caps; on the testbed they take cells only
-  from the previous relay, so their setups pass the per-address rate of the entry. Load from
-  enough addresses to fill the global caps, filling the setup-tag cache over time (about 91 hours
-  from one address, at the entry and behind it), and stopping a node are neither prevented nor
-  measured.
+  from the previous relay (where the network plugin enforces network policies), so their setups
+  pass the per-address rate of the entry. Load from enough addresses to fill the global caps,
+  filling the setup-tag cache over time (about 91 hours from one address at the entry), and
+  stopping a node are neither prevented nor measured.
 - Analysis requiring long-term statistics on real users: the testbed dataset is synthetic.

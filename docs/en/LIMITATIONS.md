@@ -42,10 +42,11 @@ English | [Русский](../ru/LIMITATIONS.md)
   would mean accepting a copy again. Anyone who builds circuits can fill the cache, each tag
   costing a TCP connection and a link handshake. This is a denial of service. At the default
   setup rate of 0.2 per second one address needs about 91 hours to fill the default 65536 tags,
-  n addresses 91/n hours. On the testbed a forwarding node takes cells only from the previous
-  relay (network policy), so its setups pass the per-address rate of the entry first and the same
-  times hold; a node without per-address limits that anyone can reach would be bounded only by
-  how fast it completes handshakes.
+  n addresses 91/n hours. This estimate is for the entry. On the testbed a forwarding node takes
+  cells only from the previous relay where the cluster's network plugin enforces network policies
+  (in CI the e2e fails without it), so every setup that reaches it has first spent a token at the
+  entry; a node without per-address limits that anyone can reach would be bounded only by how
+  fast it completes handshakes.
 - A tag takes 16 bytes (about 36 bytes of heap) of ordinary node memory per opened control cell
   until restart. It holds no key, but a memory dump gives an upper bound on the number of
   circuits, and together with the node key and a kept control cell it confirms that the node
@@ -83,9 +84,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   stays in unlocked memory of a process without dump prevention while it issues.
 - The node limits (ARCHITECTURE) give one address at most 32 of the 512 links, 4 of the 32
   concurrent handshakes, 10 new links and 0.2 setups per second; an IPv6 /64 counts as one
-  address. Sixteen addresses fill the links and eight keep every handshake slot busy, each slot
-  for at most 2 s, and the node then refuses new connections. This is a denial of service; each
-  slot is held at most until its deadline, the idle timeout or the circuit lifetime runs out.
+  address. The shared caps equal 16 per-address shares of links and 8 of handshakes; once a
+  shared cap is used up the node refuses new connections. This is a denial of service; each slot
+  is held at most until its deadline (2 s for a handshake), the idle timeout or the circuit
+  lifetime runs out.
 - A node cannot tell a relay from a client until links between nodes are authenticated, and on a
   middle or exit node every circuit arrives from the previous relay's one address. Per-address
   limits there would let one client use up the allowance of every circuit through that pair of
