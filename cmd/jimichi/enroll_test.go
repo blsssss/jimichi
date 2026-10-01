@@ -37,17 +37,19 @@ type fakeRelay struct {
 
 	request    func(nonce [pki.NonceSize]byte) ([]byte, error)
 	refuseCert bool
-	// answers requests and certificates the way a relay with a valid
+	// answers requests and certificates the way a relay that has taken a
 	// certificate does
 	holdsCert bool
 	// fails the certificate with 500 after taking it
 	failAfterInstall bool
 	// installs the first certificate, then drops the connection unanswered
 	dropFirstPut bool
+	// installs every certificate it gets and never answers
+	dropEveryPut bool
 	descriptor   func() ([]byte, bool)
 }
 
-const installedText = "certificate already installed and valid: a new one needs a relay restart"
+const installedText = "certificate already installed: a new one needs a relay restart, which gives a fresh identity"
 
 func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr string) *fakeRelay {
 	t.Helper()
@@ -109,7 +111,7 @@ func newRelay(t *testing.T, p jcrypto.CryptoProvider, name, certName, certAddr s
 		switch {
 		case r.failAfterInstall:
 			http.Error(w, "signing failed", http.StatusInternalServerError)
-		case r.dropFirstPut && n == 1:
+		case r.dropEveryPut, r.dropFirstPut && n == 1:
 			panic(http.ErrAbortHandler)
 		default:
 			w.WriteHeader(http.StatusNoContent)
@@ -384,7 +386,7 @@ func TestHoldingRelayGetsARestartHint(t *testing.T) {
 	if err := runEnroll(append(enrollArgs(s, relays...), "-namespace", "lab"), &stdout, &stderr); err == nil || stdout.Len() != 0 {
 		t.Fatalf("enroll = %v, stdout %q", err, stdout.String())
 	}
-	want := "relay relay-2 already holds a valid certificate; re-enrollment needs a fresh identity: kubectl -n lab rollout restart deployment/relay-2"
+	want := "relay relay-2 already holds a certificate; re-enrollment needs a fresh identity: kubectl -n lab rollout restart deployment/relay-2"
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("no restart hint in %q", stderr.String())
 	}
@@ -404,6 +406,42 @@ func TestRetryAfterALostAnswerSucceeds(t *testing.T) {
 	}
 	if _, err := pki.ParseAnchor(strings.TrimSpace(stdout.String())); err != nil {
 		t.Fatalf("stdout %q: %v", stdout.String(), err)
+	}
+}
+
+// the relay took the certificate, but no answer ever came back: enroll cannot
+// know, so the report names it among the relays that may hold one
+func TestLostAnswersLeaveAMayHold(t *testing.T) {
+	s := jcrypto.SuiteC25519
+	p := provider(t, s)
+	relays := []*fakeRelay{honestRelay(t, p, "relay-1"), honestRelay(t, p, "relay-2"), honestRelay(t, p, "relay-3")}
+	relays[1].dropEveryPut = true
+	args := enrollArgs(s, relays...)
+	args[5] = "1s"
+	var stdout, stderr bytes.Buffer
+	err := runEnroll(args, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "node relay-2: installing the certificate") || stdout.Len() != 0 {
+		t.Fatalf("enroll = %v, stdout %q", err, stdout.String())
+	}
+	want := "relays relay-1 now hold and relay-2 may hold certificates of a discarded CA; clients refuse them, restart them with kubectl -n jimichi rollout restart deployment/relay-1 deployment/relay-2, then run enroll again"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("no may-hold report in %q", stderr.String())
+	}
+	if relays[1].installs.Load() == 0 || relays[1].puts.Load() < 2 {
+		t.Fatalf("relay-2 took %d of %d uploads, want it to install and the upload to be retried", relays[1].installs.Load(), relays[1].puts.Load())
+	}
+	if relays[2].puts.Load() != 0 {
+		t.Fatal("relay-3 got a certificate after relay-2 failed")
+	}
+}
+
+func TestTimeoutStaysInsideTheInstallWindow(t *testing.T) {
+	node := "relay-1=" + addrOf("relay-1") + ",admin=127.0.0.1:1,info=127.0.0.1:2,identity=" + strings.Repeat("ab", pki.HashSize)
+	for _, timeout := range []string{"61s", "1h", "0s", "-1s"} {
+		err := runEnroll([]string{"-timeout", timeout, "-node", node, "-keymem", "zero", "-harden=false"}, io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "-timeout") || !strings.Contains(err.Error(), "at most 1m0s") {
+			t.Errorf("-timeout %s: enroll = %v, want the timeout refused", timeout, err)
+		}
 	}
 }
 
@@ -512,8 +550,6 @@ func TestCommandLine(t *testing.T) {
 		{[]string{"keygen-ca", "extra"}, 1},
 		{[]string{"enroll", "-h"}, 0},
 		{[]string{"enroll", "-cert-ttl", "1s", "-node", node}, 1},
-		{[]string{"enroll", "-timeout", "61s", "-node", node}, 1},
-		{[]string{"enroll", "-timeout", "0s", "-node", node}, 1},
 	} {
 		if code := run(c.args, io.Discard, io.Discard); code != c.code {
 			t.Errorf("jimichi %v: exit %d, want %d", c.args, code, c.code)

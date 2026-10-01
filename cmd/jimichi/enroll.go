@@ -48,8 +48,8 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("%d %s: %s", e.code, http.StatusText(e.code), e.text)
 }
 
-// the relay's answer to a request or certificate while a valid certificate is
-// installed; only a restart, with its fresh identity, makes it enrollable again
+// the relay's answer to a request or certificate once it has taken one; only a
+// restart, with its fresh identity, makes it enrollable again
 func alreadyInstalled(err error) bool {
 	var se *statusError
 	return errors.As(err, &se) && se.code == http.StatusConflict && strings.Contains(se.text, "already installed")
@@ -274,7 +274,7 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 		}
 		raw, err := e.call(ctx, http.MethodPost, "http://"+n.admin+"/csr", nonce[:], http.StatusOK)
 		if alreadyInstalled(err) {
-			fmt.Fprintf(e.log, "relay %s already holds a valid certificate; re-enrollment needs a fresh identity: %s, then run enroll again\n",
+			fmt.Fprintf(e.log, "relay %s already holds a certificate; re-enrollment needs a fresh identity: %s, then run enroll again\n",
 				n.name, e.restartHint([]string{n.name}))
 		}
 		if err != nil {
@@ -342,7 +342,7 @@ func (e *enrollment) run(ctx context.Context) (anchor pki.Anchor, err error) {
 			installed = append(installed, n.name)
 			continue
 		case alreadyInstalled(err):
-			fmt.Fprintf(e.log, "relay %s already holds a valid certificate; re-enrollment needs a fresh identity: %s\n",
+			fmt.Fprintf(e.log, "relay %s already holds a certificate; re-enrollment needs a fresh identity: %s\n",
 				n.name, e.restartHint([]string{n.name}))
 		case ambiguous(err):
 			mayHold = append(mayHold, n.name)
