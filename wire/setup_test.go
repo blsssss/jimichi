@@ -348,6 +348,52 @@ func TestPublicKeySizeIsTheGeneratedKeyLength(t *testing.T) {
 	}
 }
 
+// a setup layer costs the hop's ephemeral key, a 16-byte tag and a 73-byte
+// header: 121 bytes on c25519, 153 on GOST. The body is 494 bytes, so four
+// layers fit on c25519 (484) and three on GOST (459, a fourth would need 612)
+func TestMaxLayersIsWhatASetupCellCarries(t *testing.T) {
+	for _, c := range []struct {
+		suite jcrypto.Suite
+		want  int
+	}{{jcrypto.SuiteC25519, 4}, {jcrypto.SuiteGOST, 3}} {
+		t.Run(c.suite.String(), func(t *testing.T) {
+			p, err := suite.New(c.suite)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n, err := wire.MaxLayers(p)
+			if err != nil || n != c.want {
+				t.Fatalf("MaxLayers = %d, %v, want %d", n, err, c.want)
+			}
+			privs, pubs := staticKeys(t, p, n+1)
+			setup, err := wire.BuildSetup(p, chainTo(pubs[:n]))
+			if err != nil {
+				t.Fatalf("BuildSetup with %d hops: %v", n, err)
+			}
+			for _, k := range setup.CellKeys {
+				t.Cleanup(k.Release)
+			}
+			cell := setup.Cell
+			for i := 0; i < n; i++ {
+				layer, err := wire.OpenSetup(p, privs[i], cell)
+				if err != nil {
+					t.Fatalf("OpenSetup %d of %d: %v", i, n, err)
+				}
+				layer.CellKey.Release()
+				if exit := layer.NextAddr == ""; exit != (i == n-1) {
+					t.Fatalf("hop %d of %d: exit %v", i, n, exit)
+				}
+				if cell, err = wire.ForwardSetup(layer, i); err != nil {
+					t.Fatalf("ForwardSetup %d: %v", i, err)
+				}
+			}
+			if _, err := wire.BuildSetup(p, chainTo(pubs)); !errors.Is(err, wire.ErrSetupSize) {
+				t.Fatalf("BuildSetup with %d hops: %v, want ErrSetupSize", n+1, err)
+			}
+		})
+	}
+}
+
 // the client and every relay derive a hop's offsets from their shared secret
 // alone, so both ends of each link agree on its counter values
 func TestSetupHandsBothSidesTheSameOffsets(t *testing.T) {

@@ -101,6 +101,15 @@ func PublicKeySize(p jcrypto.CryptoProvider) (int, error) {
 
 func perHopCost(pubLen, overhead int) int { return pubLen + overhead + setupHdr }
 
+// how many hops one setup cell of the suite carries
+func MaxLayers(p jcrypto.CryptoProvider) (int, error) {
+	sz, err := sizesOf(p)
+	if err != nil {
+		return 0, err
+	}
+	return min(BodySize/perHopCost(sz.pub, sz.overhead), MaxHops), nil
+}
+
 // builds the nested setup and returns the per-hop cell keys the client keeps
 func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error) {
 	if len(chain) == 0 {
