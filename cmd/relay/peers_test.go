@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -110,6 +111,24 @@ func (f *fixture) takeRoster(t *testing.T, raw []byte) *peerCache {
 func (f *fixture) descriptors(t *testing.T) (int, []byte) {
 	t.Helper()
 	return call(t, http.MethodGet, f.info.URL+"/descriptors", nil)
+}
+
+// the addresses a node's mirror lists; nil when it serves none
+func (f *fixture) mirrored(t *testing.T) []string {
+	t.Helper()
+	code, raw := f.descriptors(t)
+	if code != http.StatusOK {
+		return nil
+	}
+	entries, err := pki.ParseMirror(raw)
+	if err != nil {
+		t.Fatalf("ParseMirror: %v", err)
+	}
+	addrs := make([]string, len(entries))
+	for i, e := range entries {
+		addrs[i] = e.Addr
+	}
+	return addrs
 }
 
 func three(t *testing.T, s jcrypto.Suite) *cluster {
@@ -315,8 +334,8 @@ func TestPeerCacheRefreshesAndExpires(t *testing.T) {
 			if got := n1.stats(t); !strings.Contains(got, `"peers":1`) {
 				t.Fatalf("stats with one descriptor expired: %s", got)
 			}
-			if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
-				t.Fatalf("GET /descriptors with a peer's descriptor expired = %d, want 503", code)
+			if listed := n1.mirrored(t); !slices.Contains(listed, n2.n.addr) || slices.Contains(listed, n3.n.addr) {
+				t.Fatalf("GET /descriptors with a peer's descriptor expired lists %v, want relay-2 and not relay-3", listed)
 			}
 			if asked() != [2]uint64{2, 2} {
 				t.Fatalf("requests %v, a lookup or a request for the descriptors fetched", asked())
@@ -378,8 +397,8 @@ func TestPeerBundleMustVerifyAtItsAddress(t *testing.T) {
 		if !strings.Contains(n1.log.String(), "peer "+n2.n.addr+": descriptor: "+tc.want+"\n") {
 			t.Fatalf("%s: no line with %q in the log: %q", tc.name, tc.want, n1.log.String())
 		}
-		if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
-			t.Fatalf("%s: GET /descriptors = %d, want 503", tc.name, code)
+		if listed := n1.mirrored(t); slices.Contains(listed, n2.n.addr) || !slices.Contains(listed, n3.n.addr) {
+			t.Fatalf("%s: GET /descriptors lists %v, want relay-3 and not relay-2", tc.name, listed)
 		}
 	}
 	if _, ok := n1.n.peerKey(n3.n.addr); !ok {
@@ -400,13 +419,16 @@ func TestDescriptorsMirror(t *testing.T) {
 			c.route(n3.n.addr, "")
 			cache := n1.takeRoster(t, c.roster())
 			cache.refresh()
-			if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
-				t.Fatalf("GET /descriptors with a roster node missing = %d, want 503", code)
+			code, raw := n1.descriptors(t)
+			partial, err := pki.ParseMirror(raw)
+			if code != http.StatusOK || err != nil || len(partial) != 2 ||
+				partial[0].Addr != n1.n.addr || partial[1].Addr != n2.n.addr {
+				t.Fatalf("GET /descriptors with a roster node missing = %d, %d entries, %v, want the node and the peer it holds", code, len(partial), err)
 			}
 
 			c.route(n3.n.addr, n3.info.URL)
 			cache.refresh()
-			code, raw := n1.descriptors(t)
+			code, raw = n1.descriptors(t)
 			if code != http.StatusOK {
 				t.Fatalf("GET /descriptors = %d %s", code, raw)
 			}
@@ -448,9 +470,13 @@ func TestDescriptorsMirror(t *testing.T) {
 				t.Fatal("the mirror kept the node's previous descriptor")
 			}
 
+			// the peers' descriptors run out, the node's own was signed again: the
+			// mirror goes on with what is left, without a gap
 			c.clock.advance(15 * time.Minute)
-			if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
-				t.Fatalf("GET /descriptors once a peer's descriptor expired = %d, want 503", code)
+			code, raw = n1.descriptors(t)
+			entries, err = pki.ParseMirror(raw)
+			if code != http.StatusOK || err != nil || len(entries) != 1 || entries[0].Addr != n1.n.addr {
+				t.Fatalf("GET /descriptors once the peers' descriptors expired = %d, %d entries, %v, want the node alone", code, len(entries), err)
 			}
 			if got := n1.stats(t); !strings.Contains(got, `"mirror_requests":5`) {
 				t.Fatalf("stats: %s", got)
@@ -523,8 +549,8 @@ func TestUnsignedNodeMirrorsItsPeersUnverified(t *testing.T) {
 
 	n1.n.setPeers([]string{n2.n.addr, n3.n.addr}, unverifiedPeer(p))
 	cache := n1.n.peers.Load()
-	if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
-		t.Fatalf("GET /descriptors before the first refresh = %d, want 503", code)
+	if listed := n1.mirrored(t); len(listed) != 1 || listed[0] != n1.n.addr {
+		t.Fatalf("GET /descriptors before the first refresh lists %v, want the node alone", listed)
 	}
 	if !cache.refresh() {
 		t.Fatalf("refresh: %s", n1.log.String())
@@ -902,8 +928,8 @@ func TestFailedRefetchKeepsTheEntryUntilItExpires(t *testing.T) {
 	if cache.refresh() {
 		t.Fatal("refresh reports every peer held after the entry expired")
 	}
-	if code, _ := n1.descriptors(t); code != http.StatusServiceUnavailable {
-		t.Fatalf("GET /descriptors after the entry expired = %d, want 503", code)
+	if listed := n1.mirrored(t); len(listed) == 0 || slices.Contains(listed, n2.n.addr) {
+		t.Fatalf("GET /descriptors after the entry expired lists %v, want the mirror without relay-2", listed)
 	}
 }
 

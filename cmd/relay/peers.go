@@ -196,11 +196,13 @@ func (c *peerCache) publish() {
 	now := c.now().Unix()
 	entries := make([]pki.MirrorEntry, 0, len(c.addrs)+1)
 	entries = append(entries, pki.MirrorEntry{Addr: c.self, Bundle: own})
+	// a peer whose bundle this node does not hold is left out: were the mirror
+	// to wait for every roster node, one node that withholds its descriptor
+	// would empty the mirror of every node it withholds from
 	for _, addr := range c.addrs {
 		e := c.entries[addr]
 		if e == nil || now >= e.expires {
-			c.mirror.Store(nil)
-			return
+			continue
 		}
 		entries = append(entries, pki.MirrorEntry{Addr: addr, Bundle: e.bundle})
 		until = min(until, e.expires)
@@ -260,6 +262,12 @@ func (c *peerCache) held() int {
 
 func (c *peerCache) descriptors() ([]byte, bool) {
 	m := c.mirror.Load()
+	if m != nil && c.now().Unix() >= m.until {
+		// an entry ran out since the last refresh: it is dropped here once, and the
+		// rebuilt mirror lasts until the next entry runs out
+		c.publish()
+		m = c.mirror.Load()
+	}
 	if m == nil || c.now().Unix() >= m.until {
 		return nil, false
 	}
