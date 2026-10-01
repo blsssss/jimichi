@@ -95,7 +95,7 @@ isolation() {
   local script="" code=""
   # pulled by digest on the host and loaded like the testbed images, so the
   # nodes need no registry access and run exactly this image
-  docker pull -q "busybox@$PROBE_DIGEST" >/dev/null
+  docker image inspect "busybox@$PROBE_DIGEST" >/dev/null 2>&1 || docker pull -q "busybox@$PROBE_DIGEST" >/dev/null
   docker tag "busybox@$PROBE_DIGEST" "$PROBE_IMAGE"
   kind load docker-image "$PROBE_IMAGE" --name "$CLUSTER" >/dev/null
   for h in 1 2 3; do
