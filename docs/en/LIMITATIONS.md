@@ -27,13 +27,19 @@ English | [Русский](../ru/LIMITATIONS.md)
   who connects to its cell port.
 - The baseline without node authentication (-auth=false) extends a circuit to any address named
   in the setup cell, and its links between nodes are anonymous: they hide headers from a passive
-  observer only. It serves measurements on the testbed.
+  observer only. Its client takes the unverified keys of every hop from the entry alone, and a
+  node serves them only when started with -advertise and -peers. It serves measurements on the
+  testbed.
 - The entry serves the bundles of the whole chain. It cannot alter them, but it can withhold
   them, which is a denial of service, and it sees when a client prepares a circuit: the request
   for the descriptors precedes the setup.
 - A node keeps a peer's descriptor until it expires. After a peer restarts, the mirror serves its
-  previous bundle for up to the descriptor lifetime (1 h), and circuits through that peer close
-  at setup, since the new process holds another link key.
+  previous bundle for up to the descriptor lifetime (1 h), and circuits through that peer fail
+  at setup: the new process holds another link key and does not pass the link handshake.
+- Whoever installs a roster chooses which hosts a node polls on the info port: the node sends a
+  GET for /descriptor to port -peer-info-port of every roster address whenever an entry is due,
+  and every 5 s while a peer is missing. The addresses are IP literals and DNS names only, and
+  an answer counts only if it verifies under the roster's anchor.
 - A link is covered by own-clock sending only if the node sending on it has the measure turned on.
   The client cannot check that the nodes of its chain do: a node without the measure carries the
   timing onwards, and the protection is gone on its outgoing links.
@@ -77,10 +83,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   can enroll a fresh node process under a CA of their own before the operator does: clients
   holding the operator's anchor refuse that node, and it stays out of service until it restarts.
   The same right lets them send a node its roster before enroll does, within the window after
-  the certificate. Such a roster must name the anchor that certified the node and gives it as
-  peers only nodes whose descriptors verify under that anchor, so it can leave nodes out but not
-  add one, and enroll then fails on that node. That is operator-level power, the runtime
-  administrator of the threat model.
+  the certificate. The node list of a roster is not authenticated: such a roster must name the
+  anchor that certified the node and gives it as peers only nodes whose descriptors verify under
+  that anchor, so it can leave nodes out but not add one, and enroll then fails on that node.
+  That is operator-level power, the runtime administrator of the threat model.
 - There is no revocation beyond not_after and a node restart with a new issuance under a new CA.
   A signing key extracted from the memory of a live node impersonates that node until whichever
   of the two comes first.

@@ -96,17 +96,25 @@ A cell never crosses a link in the clear: it travels inside an encrypted frame. 
 the cell header is visible on the wire: an observer on a link would see the kind, the circuit
 identifier and the counter of every cell.
 
-- Handshake: the initiator sends an ephemeral public key, the responder answers with its own. The
-  secret of the two ephemeral keys gives the link forward secrecy.
+- Handshake: the initiator sends a mode byte and an ephemeral public key. The responder answers
+  with its own ephemeral public key and one frame: a link padding cell sealed as frame 0 of its
+  direction. The secret of the two ephemeral keys gives the link forward secrecy.
+- That frame confirms the keys before any cell is sent. The initiator finishes the handshake only
+  once the frame has opened under the keys it derived and holds a padding cell, within the
+  deadline of whoever dials. Otherwise the handshake fails, and the initiator has sent nothing but
+  its hello. The responder sends the frame in both modes, and the frames of its direction go on
+  from number 1. The responder's part of the handshake is its key and that one frame: 32 + 528
+  bytes on c25519, 64 + 528 on GOST.
 - The initiator mixes the responder's link key, taken from a verified descriptor, into the
   secret: the client does it for the entry node, a node for the next node of the circuit. Every
-  link of a circuit is therefore authenticated to the node it leads to. Only the holder of that
-  link key derives the frame keys: any other responder opens no frame, and the circuit closes.
-  The responder does not authenticate the initiator.
+  link of a circuit is therefore authenticated to the node it leads to: only the holder of that
+  link key derives the frame keys, so a responder without it cannot produce the confirmation and
+  is sent no cell. The responder does not authenticate the initiator.
 - A node extends a circuit only to a node of its roster whose verified descriptor it holds
   (section "Node authentication"). A setup that names any other address is refused without a
-  connection and counted (refused_extend); its cell is counted with the dropped ones like that of
-  any setup that fails.
+  connection and counted (refused_extend). A next node that does not finish the handshake is
+  sent no setup cell, and the failure is counted (failed_extend). In both cases the setup cell
+  is counted with the dropped ones, like that of any setup that fails.
 - Without node authentication (-auth=false) a node holds no verified link keys: it extends to
   any address, and its link to the next node is anonymous. An anonymous link hides headers from
   a passive observer only. This is the measurement baseline.
@@ -197,8 +205,8 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
   much of the body belongs to its layer.
 - After stripping its layer a node refills the cell to 512 bytes and forwards it.
 - A node with a roster forwards the control cell only to a roster node, over a link authenticated
-  with that node's link key (section "Link encryption"). A setup that names another address ends
-  at this node, and the link it arrived on closes.
+  with that node's link key (section "Link encryption"). A setup that names another address, or
+  whose next node fails the link handshake, ends at this node, and the link it arrived on closes.
 - A node remembers a tag of every control cell it opened for as long as its key lives, and drops a
   copy, including after the original circuit has closed. Otherwise the copy would create the hop
   key again and the counters would restart from zero under the same key. The tag is derived from
@@ -336,7 +344,10 @@ transmitted.
   leading zero, from 1 to 65535. wire drops trailing NULs from an address, so an address with a
   NUL, a space or a byte outside ASCII could name one node and lead to another. Host and port
   have one spelling each (host names in lower case without a trailing dot, IP literals in
-  canonical form) because Verify compares addresses byte for byte.
+  canonical form) because Verify compares addresses byte for byte. A host is an IP literal or
+  DNS labels of a-z, 0-9 and the hyphen joined by dots, no label empty or starting or ending
+  with a hyphen: an address carries nothing a URL would read as a path, a query, user
+  information or another port.
 - Keys and signatures are at most 128 bytes. cert_hash is the Hash of the whole certificate,
   signature included.
 - Parsing rejects an unknown version (ErrVersion), an unknown suite (ErrSuite), a field over its
@@ -352,8 +363,8 @@ transmitted.
   and Verify rejects such a bundle (ErrFormat).
 - The roster a node receives after its certificate: JSON
   `{"anchor":"<suite>:<base64>","nodes":[{"name":"<name>","addr":"<host:port>"},...]}`. Parsing
-  accepts only the spelling Roster.Marshal writes; names and addresses are well formed and
-  pairwise distinct (ErrFormat, ErrDuplicate).
+  accepts only the spelling Roster.Marshal writes, at most 4 KiB (pki.MaxRoster); names and
+  addresses are well formed and pairwise distinct (ErrFormat, ErrDuplicate).
 - The descriptor mirror: JSON `[{"addr":"<host:port>","bundle":{...}},...]`, sorted by address,
   every bundle in its own canonical spelling; parsing accepts only that. The mirror carries no
   signature of its own: each bundle in it is verified like any other.
@@ -412,9 +423,10 @@ The first failure stops the check; every check after parsing has its own error:
   link.Dial. client.Dial refuses a node with an empty key or a key of the wrong size: an empty
   link key would make the link to the entry anonymous.
 - With -auth=false the client takes the bundles from its entry in the same way, reads them
-  through pki.Unverified and logs one WARNING line. A node run with -auth=false serves an
-  unsigned bundle (pki.Unsigned). This is the baseline for measuring what authentication is
-  worth.
+  through pki.Unverified and logs one WARNING line. The unverified keys of every hop then come
+  from the entry alone: whoever answers for the entry chooses them. A node run with -auth=false
+  serves an unsigned bundle (pki.Unsigned). This is the baseline for measuring what
+  authentication is worth.
 
 ### Certificate issuance
 
@@ -434,8 +446,9 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
    hash in the request must equal the hash from the log, and the signing keys of the nodes must
    be pairwise distinct. A node that has already taken a certificate, valid or expired, answers
    POST /csr with 409, and enroll prints the command that restarts it.
-4. Only when every request has passed is the CA key created in a secmem buffer. The CA issues
-   every certificate and its key is released at once (Close): it lives for the issuance only.
+4. Only when every request has passed and the roster of the run fits the 4 KiB a node accepts
+   (pki.MaxRoster) is the CA key created in a secmem buffer. The CA issues every certificate
+   and its key is released at once (Close): it lives for the issuance only.
 5. Each certificate goes to its node with PUT /cert. The node accepts a certificate only if it
    has taken none before, within 60 s of POST /csr (pki.InstallWindow), once per request and only
    with a not_before no earlier than the request time minus Skew; otherwise it answers 409 with
@@ -483,19 +496,25 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
 - A node takes one roster per process: only after its certificate, within 60 s of installing it
   (pki.InstallWindow), and only on the admin port. A roster that does not list the node's own
   name and address is refused (400), and so is a roster under whose anchor the node's own served
-  bundle does not verify (pki.Verify at its own address): the roster always comes from the CA
-  that certified the node. A roster before the certificate, after the window, after another
-  roster or while the node serves no valid descriptor gets 409. The same bytes again get 204, so
-  a retry after a lost answer goes through.
+  bundle does not verify (pki.Verify at its own address): the roster names the anchor of the CA
+  that certified the node. Its node list is not authenticated; it only narrows the set of nodes
+  that CA certified, since a peer counts only with a descriptor verified under that anchor. A
+  roster before the certificate, after the window, after another roster or while the node
+  serves no valid descriptor gets 409. The same bytes again get 204, so a retry after a lost
+  answer goes through.
 - With the roster the node keeps the descriptors of its peers: it fetches /descriptor from the
   info port of every other roster node (the host of the roster address, the port from
-  -peer-info-port, 9100 by default) with a 5 s timeout, a 16 KiB limit, no redirects and strict
-  decoding, and checks the bundle with pki.Verify against the roster's anchor and the roster
-  address. The cache holds public data and lives in memory only.
-- A timer every min(ttl/4, 1 min) fetches again each entry whose wall-clock age has reached half
-  of its descriptor's lifetime; while a peer is missing the node asks every 5 s. An entry ends at
-  the expires of its descriptor. A bundle that does not verify is not taken, and the cause is
-  logged once. No request and no circuit setup triggers a fetch.
+  -peer-info-port, 9100 by default) with a 5 s timeout, a 16 KiB limit on the body and 4 KiB on
+  the status line and headers, no redirects and strict decoding, and checks the bundle with
+  pki.Verify against the roster's anchor and the roster address. The cache holds public data and
+  lives in memory only.
+- The node fetches an entry again once its wall-clock age reaches half of its descriptor's
+  lifetime. Its timer sleeps until the nearest such moment, at most 1 min and at least 5 s;
+  while a peer is missing, or due and not answering, the node asks every 5 s. An entry ends at
+  the expires of its descriptor. A bundle that cannot be fetched or does not verify is not
+  taken, and the entry held so far stays until it expires. The log gets one line per kind of
+  cause: no answer, the status code or the check that failed, and nothing the peer sent. No
+  request and no circuit setup triggers a fetch.
 - A circuit is extended from this cache alone: the next address must be a roster node with a
   valid entry, and the link to it is authenticated with the link key of that entry. A node with
   -auth extends nowhere until its roster arrives.
@@ -508,11 +527,13 @@ machine or the CI runner. scripts/enroll.sh runs it for every node of the testbe
   cannot alter them.
 - A node run with -auth=false takes no roster. It lists itself in /descriptors under -advertise
   together with the unsigned bundles of the nodes named in -peers, read without verification,
-  and extends circuits to any address.
-- scripts/e2e.sh checks that clients ask the entry alone. It waits until every node holds both
-  peers, reads the counters of relay-2 and relay-3, runs the clients and requires that
-  mirror_requests of both is still 0, that descriptor_requests has not changed, and that relay-1
-  has answered requests for the mirror.
+  and extends circuits to any address. Without -advertise it answers /descriptors with 503 and
+  names the two flags.
+- scripts/e2e.sh checks that clients ask the entry alone. It waits until two passes in a row
+  show every node with both peers and relay-2 and relay-3 with unchanged counts, then runs the
+  clients. It requires that relay-1 has answered more requests for the mirror after client-a
+  and again after the client with the foreign anchor, that mirror_requests of relay-2 and
+  relay-3 is still 0 and that their descriptor_requests has not changed.
 
 ### Key lifetime and revocation
 
@@ -555,7 +576,7 @@ those come from the nodes' agreement keys, which the CA never sees.
 | Source | Data |
 |---|---|
 | client | send and receive timestamps per cell, losses, flow identifier; at start the fingerprint and validity of every verified node |
-| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests). No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, and one line per cause, naming the peer by its roster address, when a peer's descriptor cannot be fetched or verified |
+| relay | aggregated counters on stdout once a minute and on loopback on request: accepted, forwarded, delivered, dropped, padding, closed circuits, refusals by limit, setups refused for an address outside the roster (refused_extend), setups whose next node did not finish the link handshake (failed_extend), expired deadlines, expired circuits, accept retries, state of the installed certificate (cert: none, valid, expired), roster size and peers with a valid cached descriptor (roster, peers), requests answered on the info port for the node's descriptor and for the mirror (descriptor_requests, mirror_requests). No flow identifiers or addresses. The counters are not published on the network: polled often, they would show which ticks carried a real cell. At start the fingerprint and the full hash of the signing key (identity=, identity_hash=), on certificate installation a line with the serial number and not_after, on roster installation a line with the number of nodes and ca_id, and one line per kind of cause, naming the peer by its roster address and carrying nothing the peer sent, when a peer's descriptor cannot be fetched or verified |
 | network | traffic captures at the entry and the exit for the correlation attack |
 | memory | dumps of the relay process in the key extraction scenario |
 
