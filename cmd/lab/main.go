@@ -75,9 +75,15 @@ type result struct {
 	P95               string  `json:"latency_p95,omitempty"`
 	P99               string  `json:"latency_p99,omitempty"`
 
-	// a closed circuit stops its flow early, so its traces are shorter
+	// a closed circuit stops its flow early, so its traces are shorter; the
+	// relay count sums what each relay noticed and can count one circuit twice
 	RelayBrokenCircuits uint64 `json:"relay_broken_circuits"`
 	BrokenFlows         int    `json:"broken_flows"`
+	// per flow as its client saw it, whatever the cause: whether the circuit
+	// closed before the run was read, and how long after the flows started;
+	// "" for a flow whose circuit stayed open
+	FlowClosed      []bool   `json:"flow_closed"`
+	FlowClosedAfter []string `json:"flow_closed_after"`
 }
 
 type variant struct {
@@ -252,9 +258,10 @@ type summary struct {
 	LatencyP50Ms *float64 `json:"latency_p50_ms_median"`
 }
 
-// a closure counted by a relay or a client makes the run broken
+// a closure counted by a relay or a client, or a flow whose circuit closed
+// before the run was read, makes the run broken
 func broken(r result) bool {
-	return r.RelayBrokenCircuits > 0 || r.BrokenFlows > 0
+	return r.RelayBrokenCircuits > 0 || r.BrokenFlows > 0 || slices.Contains(r.FlowClosed, true)
 }
 
 func summarise(rows []result) []summary {
@@ -439,6 +446,16 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 
 		RelayBrokenCircuits: run.RelayBroken,
 		BrokenFlows:         run.BrokenFlows,
+		FlowClosed:          make([]bool, len(run.Closures)),
+		FlowClosedAfter:     make([]string, len(run.Closures)),
+	}
+	for i, c := range run.Closures {
+		if !c.Closed {
+			continue
+		}
+		res.FlowClosed[i] = true
+		// a circuit can close while the others are still being built
+		res.FlowClosedAfter[i] = max(c.At-run.Origin, 0).Round(time.Millisecond).String()
 	}
 	return res, detail{Traffic: traffic, Bin: bin.String(), Entry: entry, Exit: exit, Scores: matrix}
 }

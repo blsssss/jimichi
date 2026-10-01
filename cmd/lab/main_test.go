@@ -12,7 +12,7 @@ import (
 )
 
 // two flows with a few frames each, enough for analyse to score them
-func syntheticRun(broken uint64, brokenFlows int) *lab.Run {
+func syntheticRun(broken uint64, brokenFlows int, closures ...lab.Closure) *lab.Run {
 	start := time.Now()
 	trace := func(offsets ...time.Duration) *lab.Trace {
 		t := lab.NewTrace(start)
@@ -32,6 +32,24 @@ func syntheticRun(broken uint64, brokenFlows int) *lab.Run {
 		RelayBroken:  broken,
 		BrokenFlows:  brokenFlows,
 		RelayDropped: 4,
+		Origin:       100 * ms,
+		Closures:     closures,
+	}
+}
+
+// flow 0 closed 350 ms on the trace clock, 250 ms after the flows started at
+// 100 ms; flow 1 stayed open
+func TestFlowClosuresReachTheReport(t *testing.T) {
+	ms := time.Millisecond
+	res, _ := analyse(syntheticRun(0, 0, lab.Closure{Closed: true, At: 350 * ms}, lab.Closure{}), "x", 100*ms)
+	if len(res.FlowClosed) != 2 || !res.FlowClosed[0] || res.FlowClosed[1] ||
+		res.FlowClosedAfter[0] != "250ms" || res.FlowClosedAfter[1] != "" {
+		t.Fatalf("flow_closed %v, flow_closed_after %q; want [true false] and [250ms \"\"]", res.FlowClosed, res.FlowClosedAfter)
+	}
+	// no relay or client counted it, the flow alone makes the run broken
+	sum := summarise([]result{res})
+	if sum[0].BrokenRuns != 1 || sum[0].AUC != nil {
+		t.Fatalf("a run with a closed flow was summarised as clean: %s", encode(t, sum[0]))
 	}
 }
 

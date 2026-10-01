@@ -77,6 +77,10 @@ type Run struct {
 	// clients that closed their circuit over a reply out of turn or one that
 	// did not open
 	BrokenFlows int
+	// per flow, as its client saw it, whatever closed the circuit; the relay
+	// counters above sum what each relay noticed and may count one circuit
+	// more than once
+	Closures []Closure
 	// where the observation window starts on the trace clock: flows begin to
 	// send only once every circuit is up, so setup falls before it
 	Origin time.Duration
@@ -218,7 +222,7 @@ func Execute(cfg Config) (*Run, error) {
 		}
 	}
 
-	latency := newLatency(clients)
+	latency := newLatency(clients, start)
 	// the last client started its schedule a moment ago, so a window opening
 	// now would sit in phase with it and not with the others
 	if schedule > 0 {
@@ -232,7 +236,7 @@ func Execute(cfg Config) (*Run, error) {
 	drain := 300*time.Millisecond + time.Duration(4*cfg.Hops)*(cfg.Rate+cfg.RelayPeriod+cfg.Jitter)
 	_ = waitFor(func() bool { return latency.pending() == 0 }, drain)
 
-	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin, Unanswered: latency.pending()}
+	run := &Run{Config: cfg, Entry: entry, EntryBack: entryBack, Sent: sent, Latency: latency.samples(), Origin: origin, Unanswered: latency.pending(), Closures: latency.closures()}
 	for _, c := range clients {
 		run.Dropped += c.Dropped()
 		if c.Broken() {
@@ -265,12 +269,22 @@ func waitFor(cond func() bool, limit time.Duration) error {
 	return nil
 }
 
+// whether a flow's circuit closed before the run was read, and when on the
+// trace clock
+type Closure struct {
+	Closed bool
+	At     time.Duration
+}
+
 // pairs a reply with the message that caused it by the sequence number the
-// exit echoes back, so a lost message cannot shift every later pairing
+// exit echoes back, so a lost message cannot shift every later pairing; the
+// end of a client's replies is the end of its circuit
 type latencyCollector struct {
-	mu   sync.Mutex
-	sent []map[uint64]time.Time
-	out  []time.Duration
+	mu     sync.Mutex
+	start  time.Time
+	sent   []map[uint64]time.Time
+	out    []time.Duration
+	closed []Closure
 }
 
 const (
@@ -278,8 +292,8 @@ const (
 	seqField  = 8
 )
 
-func newLatency(clients []*client.Client) *latencyCollector {
-	l := &latencyCollector{sent: make([]map[uint64]time.Time, len(clients))}
+func newLatency(clients []*client.Client, start time.Time) *latencyCollector {
+	l := &latencyCollector{start: start, sent: make([]map[uint64]time.Time, len(clients)), closed: make([]Closure, len(clients))}
 	for i, c := range clients {
 		l.sent[i] = make(map[uint64]time.Time)
 		go func(flow int, c *client.Client) {
@@ -295,9 +309,18 @@ func newLatency(clients []*client.Client) *latencyCollector {
 				}
 				l.mu.Unlock()
 			}
+			l.mu.Lock()
+			l.closed[flow] = Closure{Closed: true, At: time.Since(l.start)}
+			l.mu.Unlock()
 		}(i, c)
 	}
 	return l
+}
+
+func (l *latencyCollector) closures() []Closure {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]Closure(nil), l.closed...)
 }
 
 func (l *latencyCollector) mark(flow int, seq uint64) {

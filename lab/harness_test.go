@@ -54,6 +54,33 @@ func TestPacedRunFillsBothDirections(t *testing.T) {
 	if run.RelayDropped != 0 || run.RelayBroken != 0 || run.BrokenFlows != 0 {
 		t.Fatalf("relays dropped %d cells and closed %d circuits, %d clients closed theirs on an idle run", run.RelayDropped, run.RelayBroken, run.BrokenFlows)
 	}
+	if len(run.Closures) != 2 || run.Closures[0].Closed || run.Closures[1].Closed {
+		t.Fatalf("closures %+v on an idle run, want two open flows", run.Closures)
+	}
+}
+
+// relays ticking at 10 ms while a flow sends every millisecond on average fill
+// their queues at once: every circuit closes, and each flow's client records
+// when, after the flows started
+func TestClosedCircuitsReachTheRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs a live chain for seconds")
+	}
+	run, err := Execute(Config{Flows: 2, Duration: 2 * time.Second, SendEvery: time.Millisecond, RelayPeriod: 10 * time.Millisecond, Seed: 7})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if run.RelayBroken == 0 {
+		t.Fatal("no relay closed a circuit under a load its queues cannot hold")
+	}
+	if len(run.Closures) != 2 {
+		t.Fatalf("%d closures for 2 flows", len(run.Closures))
+	}
+	for i, c := range run.Closures {
+		if !c.Closed || c.At < run.Origin {
+			t.Fatalf("flow %d: %+v, want closed after the flows started at %v", i, c, run.Origin)
+		}
+	}
 }
 
 // skip 3, frame 4, reads of 2, 3, 4, 1 and 6 bytes: the first read and one
