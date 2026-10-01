@@ -347,3 +347,53 @@ func TestPublicKeySizeIsTheGeneratedKeyLength(t *testing.T) {
 		}
 	}
 }
+
+// the client and every relay derive a hop's offsets from their shared secret
+// alone, so both ends of each link agree on its counter values
+func TestSetupHandsBothSidesTheSameOffsets(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			p, err := suite.New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			privs, pubs := staticKeys(t, p, hops)
+			setup, err := wire.BuildSetup(p, chainTo(pubs))
+			if err != nil {
+				t.Fatalf("BuildSetup: %v", err)
+			}
+			for _, k := range setup.CellKeys {
+				t.Cleanup(k.Release)
+			}
+			if len(setup.Offsets) != hops {
+				t.Fatalf("%d offsets for %d hops", len(setup.Offsets), hops)
+			}
+			cell := setup.Cell
+			for i := 0; i < hops; i++ {
+				layer, err := wire.OpenSetup(p, privs[i], cell)
+				if err != nil {
+					t.Fatalf("OpenSetup %d: %v", i, err)
+				}
+				layer.CellKey.Release()
+				if layer.Offsets != setup.Offsets[i] {
+					t.Fatalf("hop %d derived %x, the client %x", i, layer.Offsets, setup.Offsets[i])
+				}
+				// the exit learns the value the first forward cell arrives with:
+				// the base counter 0 plus the forward offsets of the hops before it
+				want := uint64(0)
+				if i == hops-1 {
+					want = (setup.Offsets[0][wire.Forward] + setup.Offsets[1][wire.Forward]) % (1 << 62)
+				}
+				if layer.First != want {
+					t.Fatalf("hop %d expects the first forward counter %#x, want %#x", i, layer.First, want)
+				}
+				if cell, err = wire.ForwardSetup(layer, i); err != nil {
+					t.Fatalf("ForwardSetup %d: %v", i, err)
+				}
+			}
+			if setup.Offsets[0] == setup.Offsets[1] || setup.Offsets[0][wire.Forward] == setup.Offsets[0][wire.Backward] {
+				t.Fatalf("offsets repeat: %x", setup.Offsets)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -73,6 +74,16 @@ type result struct {
 	P50               string  `json:"latency_p50,omitempty"`
 	P95               string  `json:"latency_p95,omitempty"`
 	P99               string  `json:"latency_p99,omitempty"`
+
+	// a closed circuit stops its flow early, so its traces are shorter; the
+	// relay count sums what each relay noticed and can count one circuit twice
+	RelayBrokenCircuits uint64 `json:"relay_broken_circuits"`
+	BrokenFlows         int    `json:"broken_flows"`
+	// per flow as its client saw it, whatever the cause: whether the circuit
+	// closed before the run was read, and how long after the flows started;
+	// "" for a flow whose circuit stayed open
+	FlowClosed      []bool   `json:"flow_closed"`
+	FlowClosedAfter []string `json:"flow_closed_after"`
 }
 
 type variant struct {
@@ -189,6 +200,16 @@ func main() {
 				os.Exit(1)
 			}
 			after := loadavg()
+			closed := 0
+			for _, c := range run.Closures {
+				if c.Closed {
+					closed++
+				}
+			}
+			if run.RelayBroken > 0 || run.BrokenFlows > 0 || closed > 0 {
+				fmt.Fprintf(os.Stderr, "%s: relays closed %d circuits, clients %d, and %d flows saw their circuit close during the run\n",
+					v.label, run.RelayBroken, run.BrokenFlows, closed)
+			}
 			for _, bin := range bins {
 				res, d := analyse(run, v.label, bin)
 				res.Repeat, res.BaseSeed, res.Rev = r, *seed, *rev
@@ -215,7 +236,7 @@ func main() {
 		os.Exit(1)
 	}
 	sum := summarise(results)
-	printSummary(sum)
+	printSummary(os.Stdout, sum)
 	if err := write(*out, "summary-"+*set+"-"+stamp, sum); err != nil {
 		fmt.Fprintf(os.Stderr, "summary: %v\n", err)
 		os.Exit(1)
@@ -223,20 +244,31 @@ func main() {
 }
 
 // runs of one configuration at one window, reduced to the median and the range
-// across repeats; the rows stay in the report for anything finer
+// across repeats; the rows stay in the report for anything finer. A run where a
+// circuit closed stopped a flow early and scored shorter traces, so it is
+// counted in BrokenRuns and left out of every median, range and count below
 type summary struct {
-	Suite          string  `json:"suite"`
-	Traffic        string  `json:"traffic"`
-	Bin            string  `json:"bin"`
-	Runs           int     `json:"runs"`
-	AUC            float64 `json:"auc_median"`
-	AUCMin         float64 `json:"auc_min"`
-	AUCMax         float64 `json:"auc_max"`
-	TopOne         float64 `json:"top1_median"`
-	Multiplier     float64 `json:"bandwidth_multiplier_median"`
-	RelayMult      float64 `json:"relay_link_multiplier_median"`
-	LatencyP50Ms   float64 `json:"latency_p50_ms_median"`
-	DegenerateRuns int     `json:"ci_degenerate_runs"`
+	Suite      string `json:"suite"`
+	Traffic    string `json:"traffic"`
+	Bin        string `json:"bin"`
+	Runs       int    `json:"runs"`
+	BrokenRuns int    `json:"broken_runs"`
+	// null when no run of the line is clean: a zero would read as a result
+	AUC            *float64 `json:"auc_median"`
+	AUCMin         *float64 `json:"auc_min"`
+	AUCMax         *float64 `json:"auc_max"`
+	TopOne         *float64 `json:"top1_median"`
+	Multiplier     *float64 `json:"bandwidth_multiplier_median"`
+	RelayMult      *float64 `json:"relay_link_multiplier_median"`
+	DegenerateRuns *int     `json:"ci_degenerate_runs"`
+	// null also when the clean runs have no latency sample
+	LatencyP50Ms *float64 `json:"latency_p50_ms_median"`
+}
+
+// a closure counted by a relay or a client, or a flow whose circuit closed
+// before the run was read, makes the run broken
+func broken(r result) bool {
+	return r.RelayBrokenCircuits > 0 || r.BrokenFlows > 0 || slices.Contains(r.FlowClosed, true)
 }
 
 func summarise(rows []result) []summary {
@@ -253,9 +285,14 @@ func summarise(rows []result) []summary {
 	out := make([]summary, 0, len(order))
 	for _, k := range order {
 		g := groups[k]
+		s := summary{Suite: g[0].Suite, Traffic: k.traffic, Bin: k.bin, Runs: len(g)}
 		var auc, top, mult, relay, p50 []float64
 		degenerate := 0
 		for _, r := range g {
+			if broken(r) {
+				s.BrokenRuns++
+				continue
+			}
 			auc = append(auc, r.AUC)
 			top = append(top, r.TopOne)
 			mult = append(mult, r.Multiplier)
@@ -267,26 +304,45 @@ func summarise(rows []result) []summary {
 				degenerate++
 			}
 		}
-		out = append(out, summary{
-			Suite: g[0].Suite, Traffic: k.traffic, Bin: k.bin, Runs: len(g),
-			AUC: metrics.Median(auc), AUCMin: slices.Min(auc), AUCMax: slices.Max(auc),
-			TopOne: metrics.Median(top), Multiplier: metrics.Median(mult), RelayMult: metrics.Median(relay),
-			LatencyP50Ms: metrics.Median(p50), DegenerateRuns: degenerate,
-		})
+		if len(auc) > 0 {
+			s.AUC, s.AUCMin, s.AUCMax = ptr(metrics.Median(auc)), ptr(slices.Min(auc)), ptr(slices.Max(auc))
+			s.TopOne, s.Multiplier, s.RelayMult = ptr(metrics.Median(top)), ptr(metrics.Median(mult)), ptr(metrics.Median(relay))
+			s.DegenerateRuns = &degenerate
+		}
+		if len(p50) > 0 {
+			s.LatencyP50Ms = ptr(metrics.Median(p50))
+		}
+		out = append(out, s)
 	}
 	return out
 }
 
-func printSummary(sum []summary) {
+func ptr(v float64) *float64 { return &v }
+
+func printSummary(w io.Writer, sum []summary) {
 	if len(sum) > 0 {
-		fmt.Printf("\nsuite %s", sum[0].Suite)
+		fmt.Fprintf(w, "\nsuite %s", sum[0].Suite)
 	}
-	fmt.Printf("\n%-11s %6s %4s %20s %6s %8s %8s %10s %4s\n",
-		"traffic", "bin", "runs", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
+	fmt.Fprintf(w, "\n%-11s %6s %4s %4s %20s %6s %8s %8s %10s %4s\n",
+		"traffic", "bin", "runs", "brk", "auc median [min,max]", "top1", "mult", "relay-x", "p50 ms", "deg")
 	for _, s := range sum {
-		fmt.Printf("%-11s %6s %4d %6.3f [%.3f, %.3f] %6.3f %8.2f %8.2f %10.2f %4d\n",
-			s.Traffic, s.Bin, s.Runs, s.AUC, s.AUCMin, s.AUCMax, s.TopOne, s.Multiplier, s.RelayMult, s.LatencyP50Ms, s.DegenerateRuns)
+		clean := s.Runs - s.BrokenRuns
+		if clean == 0 {
+			fmt.Fprintf(w, "%-11s %6s %4d %4d  every run closed a circuit, nothing to summarise\n", s.Traffic, s.Bin, s.Runs, s.BrokenRuns)
+			continue
+		}
+		p50 := "-"
+		if s.LatencyP50Ms != nil {
+			p50 = fmt.Sprintf("%.2f", *s.LatencyP50Ms)
+		}
+		note := ""
+		if clean == 1 {
+			note = "  one clean run: its values, not a median"
+		}
+		fmt.Fprintf(w, "%-11s %6s %4d %4d %6.3f [%.3f, %.3f] %6.3f %8.2f %8.2f %10s %4d%s\n",
+			s.Traffic, s.Bin, s.Runs, s.BrokenRuns, *s.AUC, *s.AUCMin, *s.AUCMax, *s.TopOne, *s.Multiplier, *s.RelayMult, p50, *s.DegenerateRuns, note)
 	}
+	fmt.Fprintln(w, "brk: runs where a circuit closed, left out of the medians, ranges and deg; medians rest on runs - brk")
 }
 
 // the first three fields of /proc/loadavg; empty where there is no such file
@@ -394,6 +450,19 @@ func analyse(run *lab.Run, traffic string, bin time.Duration) (result, detail) {
 		P50:               percentile(run.Latency, 0.5),
 		P95:               percentile(run.Latency, 0.95),
 		P99:               percentile(run.Latency, 0.99),
+
+		RelayBrokenCircuits: run.RelayBroken,
+		BrokenFlows:         run.BrokenFlows,
+		FlowClosed:          make([]bool, len(run.Closures)),
+		FlowClosedAfter:     make([]string, len(run.Closures)),
+	}
+	for i, c := range run.Closures {
+		if !c.Closed {
+			continue
+		}
+		res.FlowClosed[i] = true
+		// a circuit can close while the others are still being built
+		res.FlowClosedAfter[i] = max(c.At-run.Origin, 0).Round(time.Millisecond).String()
 	}
 	return res, detail{Traffic: traffic, Bin: bin.String(), Entry: entry, Exit: exit, Scores: matrix}
 }

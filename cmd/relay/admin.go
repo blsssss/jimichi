@@ -142,6 +142,7 @@ func (n *node) adminMux(counters func() relay.Counters) http.Handler {
 			"delivered": s.Delivered,
 			"dropped":   s.Dropped,
 			"padding":   s.Padding,
+			"broken":    s.Broken,
 			"cert":      n.certState(),
 		})
 	})

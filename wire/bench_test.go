@@ -33,7 +33,7 @@ func BenchmarkSeal(b *testing.B) {
 	p := provider()
 	keys := benchKeys(b, p, hops)
 	links := []uint64{101, 102, 103}
-	c, err := wire.NewCircuit(p, keys, links)
+	c, err := wire.NewCircuit(p, keys, hopOffsets(hops), links)
 	if err != nil {
 		b.Fatalf("NewCircuit: %v", err)
 	}
@@ -54,13 +54,13 @@ func BenchmarkPeel(b *testing.B) {
 	p := provider()
 	keys := benchKeys(b, p, hops)
 	links := []uint64{101, 102, 103}
-	c, err := wire.NewCircuit(p, keys, links)
+	c, err := wire.NewCircuit(p, keys, hopOffsets(hops), links)
 	if err != nil {
 		b.Fatalf("NewCircuit: %v", err)
 	}
 	defer c.Close()
 
-	hop, err := wire.NewHop(p, keys[0], 0)
+	hop, err := wire.NewHop(p, keys[0], hopOffsets(hops)[0], 0)
 	if err != nil {
 		b.Fatalf("NewHop: %v", err)
 	}
@@ -80,7 +80,7 @@ func BenchmarkPeel(b *testing.B) {
 	b.SetBytes(wire.CellSize)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := hop.Peel(cells[i%len(cells)], wire.Forward); err != nil {
+		if _, err := hop.Peel(cells[i%len(cells)]); err != nil {
 			b.Fatalf("Peel: %v", err)
 		}
 	}

@@ -22,20 +22,25 @@ type Circuit struct {
 	provider jcrypto.CryptoProvider
 	hops     []jcrypto.AEAD
 	links    []uint64
+	// before[i] sums, per direction, the offsets of the hops between the client
+	// and hop i
+	before   []Offsets
+	total    Offsets
 	overhead int
 }
 
-// keys and links are ordered from the first hop to the exit; links[i] is the
-// circuit identifier on the channel into hop i, which is what its nonce is
-// built from
-func NewCircuit(p jcrypto.CryptoProvider, keys []*secmem.Buffer, links []uint64) (*Circuit, error) {
+// keys, offsets and links are ordered from the first hop to the exit; links[i]
+// is the circuit identifier on the channel into hop i, which is what its nonce
+// is built from
+func NewCircuit(p jcrypto.CryptoProvider, keys []*secmem.Buffer, offsets []Offsets, links []uint64) (*Circuit, error) {
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("wire: circuit needs at least one hop")
 	}
-	if len(links) != len(keys) {
-		return nil, fmt.Errorf("wire: %d keys against %d links", len(keys), len(links))
+	if len(links) != len(keys) || len(offsets) != len(keys) {
+		return nil, fmt.Errorf("wire: %d keys against %d offsets and %d links", len(keys), len(offsets), len(links))
 	}
-	c := &Circuit{provider: p, hops: make([]jcrypto.AEAD, 0, len(keys)), links: links}
+	c := &Circuit{provider: p, hops: make([]jcrypto.AEAD, 0, len(keys)), links: links, before: make([]Offsets, len(keys))}
+	var sum Offsets
 	for i, k := range keys {
 		a, err := p.NewAEAD(k)
 		if err != nil {
@@ -49,8 +54,25 @@ func NewCircuit(p jcrypto.CryptoProvider, keys []*secmem.Buffer, links []uint64)
 			return nil, fmt.Errorf("wire: hops disagree on overhead")
 		}
 		c.hops = append(c.hops, a)
+		c.before[i] = sum
+		sum = Offsets{shift(sum[Forward], offsets[i][Forward]), shift(sum[Backward], offsets[i][Backward])}
 	}
+	c.total = sum
 	return c, nil
+}
+
+// the counter on the link into hop i, which its layer is bound to, from the one
+// on the client's own link: every hop a cell leaves adds its offset
+func (c *Circuit) valueAt(i int, dir Direction, first uint64) uint64 {
+	if dir == Forward {
+		return shift(first, c.before[i][Forward])
+	}
+	return unshift(first, c.before[i][Backward])
+}
+
+// the exit's own number of a reply that reached the client with this counter
+func (c *Circuit) ReplyNumber(counter uint64) uint64 {
+	return unshift(counter, c.total[Backward])
 }
 
 func (c *Circuit) Hops() int { return len(c.hops) }
@@ -86,6 +108,9 @@ func (c *Circuit) seal(counter uint64, payload []byte, cover bool) (*Cell, error
 	if len(payload) > c.MaxPayload() {
 		return nil, fmt.Errorf("%w: %d > %d", ErrPayloadSize, len(payload), c.MaxPayload())
 	}
+	if counter >= cellLimit {
+		return nil, fmt.Errorf("wire: counter exhausted")
+	}
 
 	// random padding to the full width the layers leave, so the wire length
 	// never depends on the message
@@ -102,11 +127,12 @@ func (c *Circuit) seal(counter uint64, payload []byte, cover bool) (*Cell, error
 	// wrap from the exit inwards, so the first hop strips the outermost layer
 	body := inner
 	for i := len(c.hops) - 1; i >= 0; i-- {
-		nonce, err := nonceFor(c.hops[i].NonceSize(), Forward, c.links[i], counter)
+		value := c.valueAt(i, Forward, counter)
+		nonce, err := nonceFor(c.hops[i].NonceSize(), Forward, c.links[i], value)
 		if err != nil {
 			return nil, err
 		}
-		body = c.hops[i].Seal(nil, nonce, body, cell.aad(i))
+		body = c.hops[i].Seal(nil, nonce, body, cell.aad(value, i))
 	}
 	if len(body) != BodySize {
 		return nil, fmt.Errorf("wire: sealed body %d, want %d", len(body), BodySize)
@@ -121,13 +147,17 @@ func (c *Circuit) OpenExit(cell *Cell, dir Direction) (payload []byte, cover boo
 	if err != nil {
 		return nil, false, err
 	}
+	if h.Counter >= counterLimit {
+		return nil, false, fmt.Errorf("wire: counter exhausted")
+	}
 	body := append([]byte(nil), cell.Body()...)
 	for i := 0; i < len(c.hops); i++ {
-		nonce, err := nonceFor(c.hops[i].NonceSize(), dir, c.links[i], h.Counter)
+		value := c.valueAt(i, dir, h.Counter)
+		nonce, err := nonceFor(c.hops[i].NonceSize(), dir, c.links[i], value)
 		if err != nil {
 			return nil, false, err
 		}
-		body, err = c.hops[i].Open(nil, nonce, body[:layerLen(i, c.overhead)], cell.aad(i))
+		body, err = c.hops[i].Open(nil, nonce, body[:layerLen(i, c.overhead)], cell.aad(value, i))
 		if err != nil {
 			return nil, false, err
 		}
@@ -146,11 +176,12 @@ type Hop struct {
 	aead     jcrypto.AEAD
 	index    int
 	overhead int
+	offset   Offsets
 }
 
 // index must match the position the client used, or the associated data will
 // not verify
-func NewHop(p jcrypto.CryptoProvider, key *secmem.Buffer, index int) (*Hop, error) {
+func NewHop(p jcrypto.CryptoProvider, key *secmem.Buffer, off Offsets, index int) (*Hop, error) {
 	if index < 0 || index >= MaxHops {
 		return nil, fmt.Errorf("wire: hop index %d outside 0..%d", index, MaxHops-1)
 	}
@@ -161,7 +192,7 @@ func NewHop(p jcrypto.CryptoProvider, key *secmem.Buffer, index int) (*Hop, erro
 	if layerLen(index, a.Overhead()) <= a.Overhead() {
 		return nil, fmt.Errorf("wire: hop index %d leaves no room in a cell", index)
 	}
-	return &Hop{aead: a, index: index, overhead: a.Overhead()}, nil
+	return &Hop{aead: a, index: index, overhead: a.Overhead(), offset: off}, nil
 }
 
 func (h *Hop) Close() {
@@ -172,8 +203,9 @@ func (h *Hop) Close() {
 }
 
 // refills with random bytes so the cell that leaves is the size of the cell that
-// arrived; without it the position in the chain would be visible on the wire
-func (h *Hop) Peel(cell *Cell, dir Direction) (*Cell, error) {
+// arrived; without it the position in the chain would be visible on the wire.
+// The cell leaves with the counter of the next link, this hop's offset added
+func (h *Hop) Peel(cell *Cell) (*Cell, error) {
 	if h.aead == nil {
 		return nil, fmt.Errorf("wire: hop closed")
 	}
@@ -181,12 +213,12 @@ func (h *Hop) Peel(cell *Cell, dir Direction) (*Cell, error) {
 	if err != nil {
 		return nil, err
 	}
-	nonce, err := nonceFor(h.aead.NonceSize(), dir, hdr.Circuit, hdr.Counter)
+	nonce, err := nonceFor(h.aead.NonceSize(), Forward, hdr.Circuit, hdr.Counter)
 	if err != nil {
 		return nil, err
 	}
 	// only the prefix belongs to this layer; the tail is padding from earlier hops
-	inner, err := h.aead.Open(nil, nonce, cell.Body()[:layerLen(h.index, h.overhead)], cell.aad(h.index))
+	inner, err := h.aead.Open(nil, nonce, cell.Body()[:layerLen(h.index, h.overhead)], cell.aad(hdr.Counter, h.index))
 	if err != nil {
 		return nil, err
 	}
@@ -196,12 +228,13 @@ func (h *Hop) Peel(cell *Cell, dir Direction) (*Cell, error) {
 	if _, err := io.ReadFull(rand.Reader, body[len(inner):]); err != nil {
 		return nil, fmt.Errorf("wire: refill: %w", err)
 	}
+	hdr.Counter = shift(hdr.Counter, h.offset[Forward])
 	return NewCell(hdr, body)
 }
 
 // cover tells the exit the cell carried nothing; no earlier hop could see that
-func (h *Hop) OpenLast(cell *Cell, dir Direction) (payload []byte, cover bool, err error) {
-	peeled, err := h.Peel(cell, dir)
+func (h *Hop) OpenLast(cell *Cell) (payload []byte, cover bool, err error) {
+	peeled, err := h.Peel(cell)
 	if err != nil {
 		return nil, false, err
 	}
@@ -259,27 +292,14 @@ func (h *Hop) sealReply(inboundCircuit, counter uint64, payload []byte, cover bo
 	if h.aead == nil {
 		return nil, fmt.Errorf("wire: hop closed")
 	}
+	if counter >= cellLimit {
+		return nil, fmt.Errorf("wire: counter exhausted")
+	}
 	inner := make([]byte, layerLen(h.index, h.overhead)-h.overhead)
 	if err := frame(inner, payload, cover); err != nil {
 		return nil, err
 	}
-
-	cell, err := NewCell(Header{Kind: KindData, Circuit: inboundCircuit, Counter: counter}, make([]byte, BodySize))
-	if err != nil {
-		return nil, err
-	}
-	nonce, err := nonceFor(h.aead.NonceSize(), Backward, inboundCircuit, counter)
-	if err != nil {
-		return nil, err
-	}
-	sealed := h.aead.Seal(nil, nonce, inner, cell.aad(h.index))
-
-	body := make([]byte, BodySize)
-	copy(body, sealed)
-	if _, err := io.ReadFull(rand.Reader, body[len(sealed):]); err != nil {
-		return nil, err
-	}
-	return NewCell(Header{Kind: KindData, Circuit: inboundCircuit, Counter: counter}, body)
+	return h.seal(Header{Kind: KindData, Circuit: inboundCircuit, Counter: shift(counter, h.offset[Backward])}, inner)
 }
 
 // adds this hop's layer to a cell travelling back towards the client
@@ -291,20 +311,31 @@ func (h *Hop) Wrap(cell *Cell, inboundCircuit uint64) (*Cell, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := NewCell(Header{Kind: hdr.Kind, Circuit: inboundCircuit, Counter: hdr.Counter}, make([]byte, BodySize))
-	if err != nil {
-		return nil, err
+	if hdr.Kind != KindData {
+		return nil, fmt.Errorf("%w: %s on the way back", ErrKind, hdr.Kind)
 	}
-	nonce, err := nonceFor(h.aead.NonceSize(), Backward, inboundCircuit, hdr.Counter)
-	if err != nil {
-		return nil, err
+	// a value past the limit would wrap onto one already used under this key
+	if hdr.Counter >= counterLimit {
+		return nil, fmt.Errorf("wire: counter exhausted")
 	}
-	sealed := h.aead.Seal(nil, nonce, cell.Body()[:layerLen(h.index+1, h.overhead)], out.aad(h.index))
+	return h.seal(Header{Kind: KindData, Circuit: inboundCircuit, Counter: shift(hdr.Counter, h.offset[Backward])}, cell.Body()[:layerLen(h.index+1, h.overhead)])
+}
 
-	body := make([]byte, BodySize)
-	copy(body, sealed)
-	if _, err := io.ReadFull(rand.Reader, body[len(sealed):]); err != nil {
+// one backward layer under this hop's key, bound to the counter of the link the
+// cell leaves on
+func (h *Hop) seal(hdr Header, inner []byte) (*Cell, error) {
+	out, err := NewCell(hdr, make([]byte, BodySize))
+	if err != nil {
 		return nil, err
 	}
-	return NewCell(Header{Kind: hdr.Kind, Circuit: inboundCircuit, Counter: hdr.Counter}, body)
+	nonce, err := nonceFor(h.aead.NonceSize(), Backward, hdr.Circuit, hdr.Counter)
+	if err != nil {
+		return nil, err
+	}
+	sealed := h.aead.Seal(nil, nonce, inner, out.aad(hdr.Counter, h.index))
+	copy(out.Body(), sealed)
+	if _, err := io.ReadFull(rand.Reader, out.Body()[len(sealed):]); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

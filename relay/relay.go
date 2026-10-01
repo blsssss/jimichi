@@ -23,7 +23,6 @@ type Deliver func(circuit uint64, payload []byte) []byte
 type Config struct {
 	Provider   jcrypto.CryptoProvider
 	StaticPriv *secmem.Buffer
-	ReplaySize uint64
 	// setups remembered to refuse a copy; once full the node refuses new
 	// circuits until it restarts with a new key; zero picks the default
 	SetupCache int
@@ -71,6 +70,10 @@ type Counters struct {
 	Delivered uint64
 	Dropped   uint64
 	Padding   uint64
+	// circuits this node closed: a cell out of turn, a backward cell of another
+	// kind or one it could not wrap, a cell with no room in its queue, a cell it
+	// could not write to either neighbour, or a reply the exit could not seal
+	Broken uint64
 }
 
 func (s *Stats) add(field *uint64) {
@@ -87,8 +90,8 @@ func (s *Stats) Snapshot() Counters {
 
 type circuit struct {
 	hop      *wire.Hop
-	replay   *wire.ReplayWindow
-	back     *wire.ReplayWindow
+	fwdSeq   wire.Sequence
+	bwdSeq   wire.Sequence
 	next     *link.Conn
 	nextRaw  net.Conn
 	in       *link.Conn
@@ -140,8 +143,11 @@ const MaxSetupCache = 1 << 20
 var (
 	errDuplicate = errors.New("relay: circuit id already in use")
 	errLinkTaken = errors.New("relay: link already carries a circuit")
-	errQueueFull = errors.New("relay: send queue full")
-	errReplay    = errors.New("relay: replayed counter")
+	// a cell out of turn or with no room ends its circuit: losing or passing it
+	// would leave a mark every node after this one could see
+	errBroken    = errors.New("relay: circuit broken")
+	errOutOfTurn = fmt.Errorf("%w: counter out of turn", errBroken)
+	errQueueFull = fmt.Errorf("%w: send queue full", errBroken)
 )
 
 func (r *Relay) Stats() *Stats { return &r.stats }
@@ -236,6 +242,10 @@ func (r *Relay) handle(conn net.Conn) {
 			return
 		}
 		if err := r.route(&cell, lc); err != nil {
+			if errors.Is(err, errBroken) {
+				r.stats.add(&r.stats.Broken)
+				return
+			}
 			r.stats.add(&r.stats.Dropped)
 			if errors.Is(err, errFatal) {
 				return
@@ -265,19 +275,15 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 	if c == nil || c.in != from {
 		return fmt.Errorf("relay: unknown circuit")
 	}
-	// recorded only once the layer opens, so a forged far counter cannot push
-	// genuine cells out of the window
-	if !c.replay.Check(hdr.Counter) {
-		return errReplay
-	}
-
+	// the counter is taken only once the layer opens: a cell nobody sealed is
+	// dropped and decides nothing about which counter is due
 	if c.isExit {
-		payload, cover, err := c.hop.OpenLast(cell, wire.Forward)
+		payload, cover, err := c.hop.OpenLast(cell)
 		if err != nil {
 			return err
 		}
-		if !c.replay.Commit(hdr.Counter) {
-			return errReplay
+		if !c.fwdSeq.Next(hdr.Counter) {
+			return errOutOfTurn
 		}
 		r.stats.add(&r.stats.Delivered)
 		var reply []byte
@@ -289,12 +295,12 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		return r.reply(c, reply)
 	}
 
-	out, err := c.hop.Peel(cell, wire.Forward)
+	out, err := c.hop.Peel(cell)
 	if err != nil {
 		return err
 	}
-	if !c.replay.Commit(hdr.Counter) {
-		return errReplay
+	if !c.fwdSeq.Next(hdr.Counter) {
+		return errOutOfTurn
 	}
 	out.SetCircuit(c.nextID)
 	if c.fwd != nil {
@@ -304,7 +310,7 @@ func (r *Relay) route(cell *wire.Cell, from *link.Conn) error {
 		return nil
 	}
 	if err := c.write(out); err != nil {
-		return fmt.Errorf("%w: %v", errFatal, err)
+		return writeFailure(err)
 	}
 	r.stats.add(&r.stats.Forwarded)
 	return nil
@@ -319,13 +325,24 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 
 	var cell *wire.Cell
 	var err error
-	if payload == nil {
-		cell, err = c.hop.SealCoverReply(c.inbound, counter)
-	} else {
+	if payload != nil {
 		cell, err = c.hop.SealReply(c.inbound, counter, payload)
+		// the number is taken and a gap would close the circuit a relay further
+		// on, so a reply too long for a cell leaves as cover under the same
+		// number; the length is refused before anything is sealed, so the cover
+		// reuses no nonce, while any other failure may come after the seal
+		if errors.Is(err, wire.ErrPayloadSize) {
+			r.stats.add(&r.stats.Dropped)
+			cell, err = nil, nil
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %v", errBroken, err)
+		}
 	}
-	if err != nil {
-		return err
+	if cell == nil {
+		if cell, err = c.hop.SealCoverReply(c.inbound, counter); err != nil {
+			return fmt.Errorf("%w: %v", errBroken, err)
+		}
 	}
 	if c.bwd != nil {
 		if !c.bwd.push(cell, false) {
@@ -333,8 +350,23 @@ func (r *Relay) reply(c *circuit, payload []byte) error {
 		}
 		return nil
 	}
-	return c.writeBack(cell)
+	if err := c.writeBack(cell); err != nil {
+		return writeFailure(err)
+	}
+	return nil
 }
+
+// a cell that cannot be written ends its circuit as surely as one out of turn,
+// so it is counted the same way; a link this node closed itself belongs to a
+// teardown already under way and is not counted again
+func writeFailure(err error) error {
+	if lostToTeardown(err) {
+		return fmt.Errorf("%w: %v", errFatal, err)
+	}
+	return fmt.Errorf("%w: write: %v", errBroken, err)
+}
+
+func lostToTeardown(err error) bool { return errors.Is(err, net.ErrClosed) }
 
 // a circuit dies with the link it came in on; closing the link onwards makes the
 // next relay do the same, so a break anywhere reaches both ends of the chain
@@ -376,27 +408,29 @@ func (r *Relay) backward(c *circuit) {
 		if err := c.next.ReadCell(&cell); err != nil {
 			return
 		}
+		// this node cannot open what comes back, so the header is all it can
+		// check, and any break in it ends the circuit
 		hdr, err := cell.Header()
-		if err != nil {
-			r.stats.add(&r.stats.Dropped)
-			continue
-		}
-		if !c.back.Accept(hdr.Counter) {
-			r.stats.add(&r.stats.Dropped)
-			continue
+		if err != nil || hdr.Kind != wire.KindData || !c.bwdSeq.Next(hdr.Counter) {
+			r.stats.add(&r.stats.Broken)
+			return
 		}
 		out, err := c.hop.Wrap(&cell, c.inbound)
 		if err != nil {
-			r.stats.add(&r.stats.Dropped)
-			continue
+			r.stats.add(&r.stats.Broken)
+			return
 		}
 		if c.bwd != nil {
 			if !c.bwd.push(out, true) {
-				r.stats.add(&r.stats.Dropped)
+				r.stats.add(&r.stats.Broken)
+				return
 			}
 			continue
 		}
 		if err := c.writeBack(out); err != nil {
+			if !lostToTeardown(err) {
+				r.stats.add(&r.stats.Broken)
+			}
 			return
 		}
 		r.stats.add(&r.stats.Forwarded)
@@ -425,7 +459,7 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 	}
 	index := int(hdr.Counter)
 
-	hop, err := wire.NewHop(r.cfg.Provider, layer.CellKey, index)
+	hop, err := wire.NewHop(r.cfg.Provider, layer.CellKey, layer.Offsets, index)
 	layer.CellKey.Release()
 	if err != nil {
 		return r.setupFailed(from, err)
@@ -433,14 +467,15 @@ func (r *Relay) setup(cell *wire.Cell, hdr wire.Header, from *link.Conn) error {
 
 	c := &circuit{
 		hop:      hop,
-		replay:   wire.NewReplayWindow(r.cfg.ReplaySize),
-		back:     wire.NewReplayWindow(r.cfg.ReplaySize),
 		nextID:   layer.NextCircuit,
 		isExit:   layer.NextAddr == "",
 		inbound:  hdr.Circuit,
 		in:       from,
 		hopIndex: index,
 		done:     make(chan struct{}),
+	}
+	if c.isExit {
+		c.fwdSeq.Expect(layer.First)
 	}
 
 	// registered before the next hop is dialled: a second setup with the same id,

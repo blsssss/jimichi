@@ -53,8 +53,9 @@ func newPacer(out *link.Conn, period time.Duration, size int, stats *Stats) *pac
 	return p
 }
 
-// a full queue drops the cell: the node's own clock decides what the wire sees,
-// so a burst from the client costs a loss and never a longer backlog
+// a full queue refuses the cell and the caller closes the circuit: the node's
+// own clock decides what the wire sees, so a burst from the client never
+// becomes a longer backlog, and losing the cell would break the counter order
 func (p *pacer) push(cell *wire.Cell, forwarded bool) bool {
 	select {
 	case p.queue <- queued{cell: cell, forwarded: forwarded}:
@@ -82,7 +83,11 @@ func (p *pacer) run() {
 	for {
 		if err := p.send(); err != nil {
 			// the link is broken; closing it lets the circuit teardown run the
-			// same way it does for a failed read
+			// same way it does for a failed read, and it counts as a circuit the
+			// node closed unless the node closed the link itself
+			if !lostToTeardown(err) {
+				p.stats.add(&p.stats.Broken)
+			}
 			_ = p.out.Close()
 			return
 		}

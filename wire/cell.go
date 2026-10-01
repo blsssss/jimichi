@@ -16,7 +16,8 @@ const (
 	headerSize = 18
 	BodySize   = CellSize - headerSize
 
-	Version = 1
+	// 2: the counter takes its own value on every link
+	Version = 2
 )
 
 // travels in clear text because a relay routes a cell before it can open it
@@ -56,8 +57,8 @@ var (
 	ErrFraming     = errors.New("wire: bad framing")
 )
 
-// Circuit changes on every link, so two observers cannot match a flow by the
-// identifier alone
+// Circuit and Counter both change on every link, so no header field is shared
+// by two links of one circuit
 type Header struct {
 	Version uint8
 	Kind    Kind
@@ -114,12 +115,12 @@ func NewPadding() *Cell {
 
 func (c *Cell) IsPadding() bool { return c[0] == Version && Kind(c[1]) == KindPadding }
 
-// authenticated fields are the ones that stay the same end to end, plus the hop
-// index; the circuit identifier is excluded because every link rewrites it
-func (c *Cell) aad(hop int) []byte {
+// the counter is the value on the link into this hop, the same one its nonce is
+// built from; the circuit identifier enters the nonce only
+func (c *Cell) aad(counter uint64, hop int) []byte {
 	ad := make([]byte, 0, 11)
 	ad = append(ad, c[0], c[1])
-	ad = append(ad, c[10:18]...)
+	ad = binary.BigEndian.AppendUint64(ad, counter)
 	return append(ad, byte(hop))
 }
 

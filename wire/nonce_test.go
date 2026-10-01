@@ -35,3 +35,13 @@ func TestNonceSeparatesDirections(t *testing.T) {
 		t.Fatal("a counter at the limit must be refused")
 	}
 }
+
+// the direction takes one bit of the nonce; any other value would land on the
+// nonce of a real direction or on the bit MGM needs clear
+func TestNonceRefusesAnUnknownDirection(t *testing.T) {
+	for _, size := range []int{16, 24} {
+		if _, err := nonceFor(size, Backward+1, 7, 9); err == nil {
+			t.Fatalf("size %d: direction %d accepted", size, Backward+1)
+		}
+	}
+}
