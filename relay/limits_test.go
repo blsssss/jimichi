@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"sync"
@@ -25,7 +26,8 @@ type served struct {
 	done chan error
 }
 
-func serveOn(t *testing.T, p jcrypto.CryptoProvider, cfg Config, ln net.Listener) *served {
+// tune sees the relay before it serves, where no handler reads its fields yet
+func serveOn(t *testing.T, p jcrypto.CryptoProvider, cfg Config, ln net.Listener, tune ...func(*Relay)) *served {
 	t.Helper()
 	priv, pub, err := p.GenerateEphemeral()
 	if err != nil {
@@ -36,6 +38,9 @@ func serveOn(t *testing.T, p jcrypto.CryptoProvider, cfg Config, ln net.Listener
 	r, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
+	}
+	for _, f := range tune {
+		f(r)
 	}
 	s := &served{r: r, addr: ln.Addr().String(), pub: pub, done: make(chan error, 1)}
 	go func() { s.done <- r.Serve(ln) }()
@@ -442,6 +447,125 @@ func TestStalledNextHopTearsTheCircuitDown(t *testing.T) {
 				t.Fatal("Close is stuck")
 			}
 		})
+	}
+}
+
+// a next hop that takes the connection and leaves the link handshake unfinished:
+// it says nothing, or answers its key and withholds the frame that confirms it
+func startSilentHop(t *testing.T, answersKey bool) (addr string, pub []byte) {
+	t.Helper()
+	p := c25519.New()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, pub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv.Release()
+	hello, err := link.InitiatorHandshakeSize(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := make(chan net.Conn, 1)
+	go func() {
+		raw, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		held <- raw
+		if !answersKey {
+			return
+		}
+		if _, err := io.ReadFull(raw, make([]byte, hello)); err == nil {
+			_, _ = raw.Write(pub)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		select {
+		case raw := <-held:
+			_ = raw.Close()
+		default:
+		}
+	})
+	return ln.Addr().String(), pub
+}
+
+// a relay whose bound on the dial and the handshake onwards a test can wait
+// out, set before the relay serves
+func serveBounded(t *testing.T, cfg Config, onward time.Duration) *served {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serveOn(t, c25519.New(), cfg, ln, func(r *Relay) { r.onward = onward })
+}
+
+// the handshake onwards ends at its deadline wherever the next hop stopped: one
+// failed extend, one deadline that ran out and the setup cell dropped
+func TestSilentNextHopFailsTheExtendAtItsDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		answersKey bool
+	}{{"no answer", false}, {"no confirmation", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, pub := startSilentHop(t, tc.answersKey)
+			s := serveBounded(t, Config{Peers: func(next string) ([]byte, bool) { return pub, next == addr }}, 150*time.Millisecond)
+
+			cl, err := client.Dial(client.Config{Provider: c25519.New(), Chain: []client.Node{
+				{Addr: s.addr, StaticPub: s.pub},
+				{Addr: addr, StaticPub: pub},
+			}})
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			t.Cleanup(func() { _ = cl.Close() })
+			// well inside the 5 s the bound is outside this test
+			waitClosed(t, cl, 3*time.Second)
+
+			if st := s.r.Stats().Snapshot(); st.FailedExtend != 1 || st.TimedOut != 1 || st.Dropped != 1 || st.RefusedExtend != 0 || st.Broken != 0 {
+				t.Fatalf("failed extends = %d, timed out = %d, dropped = %d, refused extends = %d, closed circuits = %d, want 1, 1, 1, 0, 0",
+					st.FailedExtend, st.TimedOut, st.Dropped, st.RefusedExtend, st.Broken)
+			}
+		})
+	}
+}
+
+// a dial onwards that never connects ends at the same bound and, unlike a
+// handshake, leaves nothing but the dropped setup cell in the counters
+func TestUnreachableNextHopDropsTheSetupAtTheDialDeadline(t *testing.T) {
+	priv, pub, err := c25519.New().GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv.Release()
+	s := serveBounded(t, Config{Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}, 150*time.Millisecond)
+
+	cl, err := client.Dial(client.Config{Provider: c25519.New(), Chain: []client.Node{
+		{Addr: s.addr, StaticPub: s.pub},
+		{Addr: "127.0.0.1:9", StaticPub: pub},
+	}})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = cl.Close() })
+	waitClosed(t, cl, 3*time.Second)
+
+	if st := s.r.Stats().Snapshot(); st.Dropped != 1 || st.FailedExtend != 0 || st.TimedOut != 0 || st.RefusedExtend != 0 || st.Broken != 0 {
+		t.Fatalf("dropped = %d, failed extends = %d, timed out = %d, refused extends = %d, closed circuits = %d, want 1, 0, 0, 0, 0",
+			st.Dropped, st.FailedExtend, st.TimedOut, st.RefusedExtend, st.Broken)
+	}
+}
+
+func TestOnwardBoundIsFiveSecondsUnlessATestSetsIt(t *testing.T) {
+	if s := serveRelay(t, Config{}); s.r.onward != 5*time.Second {
+		t.Fatalf("a relay bounds the dial and the handshake onwards by %v, want 5s", s.r.onward)
 	}
 }
 
