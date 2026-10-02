@@ -74,7 +74,7 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 			static = pub
 			whole, cut = 6, 2
 		}
-		expect := func(name string, tp *trackingProvider, want int) {
+		expect := func(t *testing.T, name string, tp *trackingProvider, want int) {
 			t.Helper()
 			if made, live := tp.counts(); made != want || live != 0 {
 				t.Fatalf("%s: %d buffers made, %d still held; want %d and 0", name, made, live, want)
@@ -100,8 +100,8 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 			if server == nil {
 				t.FailNow()
 			}
-			expect("the initiator", dialer, whole)
-			expect("the responder", accepter, whole)
+			expect(t, "the initiator", dialer, whole)
+			expect(t, "the responder", accepter, whole)
 			_ = client.Close()
 			_ = server.Close()
 		})
@@ -119,7 +119,7 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 			if _, err := link.Dial(a, dialer, static); !errors.Is(err, link.ErrHandshake) {
 				t.Fatalf("Dial = %v, want %v", err, link.ErrHandshake)
 			}
-			expect("the initiator", dialer, cut)
+			expect(t, "the initiator", dialer, cut)
 			_ = a.Close()
 			_ = b.Close()
 		})
@@ -143,7 +143,7 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 			if _, err := link.Dial(a, dialer, static); !errors.Is(err, link.ErrHandshake) {
 				t.Fatalf("Dial = %v, want %v", err, link.ErrHandshake)
 			}
-			expect("the initiator", dialer, whole)
+			expect(t, "the initiator", dialer, whole)
 			_ = a.Close()
 			_ = b.Close()
 		})
@@ -163,7 +163,7 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 			if _, err := link.Accept(b, accepter, priv, pub); !errors.Is(err, link.ErrHandshake) {
 				t.Fatalf("Accept = %v, want %v", err, link.ErrHandshake)
 			}
-			expect("the responder", accepter, 1)
+			expect(t, "the responder", accepter, 1)
 			_ = a.Close()
 			_ = b.Close()
 		})

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
@@ -95,6 +96,15 @@ func TestEqual(t *testing.T) {
 	if a.Equal(last) || a.Equal(shorter) || shorter.Equal(a) || a.Equal(nil) {
 		t.Fatal("another content, another length or no buffer compares equal")
 	}
+	for i := 0; i < 32; i++ {
+		for _, bit := range []byte{0x01, 0x80} {
+			other := fill(32, 7)
+			other.Bytes()[i] ^= bit
+			if a.Equal(other) || other.Equal(a) {
+				t.Fatalf("a buffer that differs in byte %d by %#02x compares equal", i, bit)
+			}
+		}
+	}
 	gone := fill(32, 7)
 	gone.Release()
 	if a.Equal(gone) || gone.Equal(a) || gone.Equal(gone) {
@@ -102,37 +112,92 @@ func TestEqual(t *testing.T) {
 	}
 }
 
-// under the protected policy a release unmaps the pages, so a comparison that
-// read them after it would fault; both orders of the pair run against both
-// releases, which would also show two locks taken in opposite orders
-func TestEqualAgainstAConcurrentRelease(t *testing.T) {
-	for round := 0; round < 200; round++ {
-		a, err := secmem.New(32)
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		b, err := secmem.New(32)
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		start := make(chan struct{})
-		var wg sync.WaitGroup
-		run := func(f func()) {
+// a comparison holds the read locks of both buffers and a release waits for
+// the write lock of one, after which no new reader gets in: were the two read
+// locks taken in the order of the arguments, a.Equal(b) and b.Equal(a) would
+// each hold one buffer and wait behind a release for the other
+func TestEqualTakesItsLocksInOneOrder(t *testing.T) {
+	a, err := secmem.New(32)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	b, err := secmem.New(32)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var wg sync.WaitGroup
+	for _, f := range []func(){
+		func() { a.Equal(b) },
+		func() { b.Equal(a) },
+		// takes the write lock on every call, also once the buffer is released
+		a.Release,
+		b.Release,
+	} {
+		for range 2 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				<-start
-				f()
+				for i := 0; i < 50000; i++ {
+					f()
+				}
 			}()
 		}
-		for i := 0; i < 4; i++ {
-			run(func() { a.Equal(b) })
-			run(func() { b.Equal(a) })
-			run(func() { a.Equal(a) })
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("comparisons and releases of one pair wait on each other")
+	}
+}
+
+// off the heap a release unmaps the pages, so a comparison still reading them
+// would fault. The buffers are large and compared in a loop, and nothing is
+// zeroed first, so the unmapping lands inside a comparison that did not hold
+// its locks. Where buffers have no pages of their own, on systems other than
+// Linux, the test only shows that a released buffer equals nothing
+func TestEqualAgainstAConcurrentRelease(t *testing.T) {
+	before := secmem.CurrentPolicy()
+	if err := secmem.SetPolicy(secmem.Policy{OffHeap: true}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = secmem.SetPolicy(before) }()
+	for round := 0; round < 50; round++ {
+		a, err := secmem.New(1 << 20)
+		if err != nil {
+			t.Fatalf("New: %v", err)
 		}
-		run(a.Release)
-		run(b.Release)
-		close(start)
+		b, err := secmem.New(1 << 20)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		// fresh buffers are equal, so each comparison repeats until a release
+		var comparing, wg sync.WaitGroup
+		for _, pair := range [][2]*secmem.Buffer{{a, b}, {b, a}, {a, a}} {
+			comparing.Add(1)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if !pair[0].Equal(pair[1]) {
+					t.Error("two fresh buffers compare unequal")
+				}
+				comparing.Done()
+				for pair[0].Equal(pair[1]) {
+				}
+			}()
+		}
+		comparing.Wait()
+		for _, buf := range []*secmem.Buffer{a, b} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				buf.Release()
+			}()
+		}
 		wg.Wait()
 		if a.Equal(b) || b.Equal(a) || a.Equal(a) {
 			t.Fatal("a released buffer compares equal")

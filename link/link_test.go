@@ -530,12 +530,40 @@ func TestAuthenticatedHelloNeedsALinkKey(t *testing.T) {
 	})
 }
 
+// a hello whose first byte names no mode is refused the same way, although the
+// key after it is a valid one
+func TestHelloOfAnUnknownModeIsRefused(t *testing.T) {
+	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		priv, pub := keyPair(t, p)
+		_, eph := keyPair(t, p)
+		for _, mode := range []byte{0x02, 0x80, 0xff} {
+			a, b := net.Pipe()
+			m := &meter{Conn: b}
+			go func() {
+				_, _ = a.Write(append([]byte{mode}, eph...))
+				_, _ = io.Copy(io.Discard, a)
+			}()
+			_ = b.SetDeadline(time.Now().Add(2 * time.Second))
+			conn, err := link.Accept(m, p, priv, pub)
+			if !errors.Is(err, link.ErrHandshake) || conn != nil {
+				t.Fatalf("mode %#02x: Accept = %v, want %v", mode, err, link.ErrHandshake)
+			}
+			if _, written := m.totals(); written != 0 {
+				t.Fatalf("mode %#02x: the responder wrote %d bytes", mode, written)
+			}
+			_ = a.Close()
+			_ = b.Close()
+		}
+	})
+}
+
 func TestDialRefusesALinkKeyOfAnotherLength(t *testing.T) {
 	eachSuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
 		_, pub := keyPair(t, p)
 		for _, static := range [][]byte{{}, pub[:len(pub)-1], append(bytes.Clone(pub), 0)} {
 			a, b := net.Pipe()
 			m := &meter{Conn: a}
+			_ = a.SetDeadline(time.Now().Add(2 * time.Second))
 			conn, err := link.Dial(m, p, static)
 			if !errors.Is(err, link.ErrHandshake) || conn != nil {
 				t.Fatalf("link key of %d bytes: Dial = %v, want %v", len(static), err, link.ErrHandshake)
