@@ -75,7 +75,8 @@ type Relay struct {
 	cfg   Config
 	lim   limits
 	onion *OnionRing
-	// onwardTimeout, held here so that a test need not wait it out
+	// onwardTimeout, held here so that a test need not wait it out; read without
+	// a lock, so it is set before the relay serves and never after
 	onward time.Duration
 
 	ctx    context.Context
