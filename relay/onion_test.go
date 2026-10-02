@@ -842,6 +842,71 @@ func TestKeyPairCheckReportsOtherFailuresAsTheyAre(t *testing.T) {
 	})
 }
 
+// holds the agreements made through it, once armed, until the test lets them go
+type heldCheck struct {
+	jcrypto.CryptoProvider
+	armed   atomic.Bool
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *heldCheck) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	if h.armed.Load() {
+		h.once.Do(func() { close(h.entered) })
+		<-h.release
+	}
+	return h.CryptoProvider.Agree(priv, peerPub, ctx)
+}
+
+func TestSetupsDoNotWaitForTheKeyPairCheckOfARotation(t *testing.T) {
+	onEverySuite(t, func(t *testing.T, inner jcrypto.CryptoProvider) {
+		h := &heldCheck{CryptoProvider: inner, entered: make(chan struct{}), release: make(chan struct{})}
+		ring, first := newRing(t, h, 0)
+		cell := setupFor(t, inner, first.pub)
+		priv, pub, err := inner.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		h.armed.Store(true)
+		rotated := make(chan error, 1)
+		go func() {
+			_, err := ring.Rotate(priv, pub)
+			rotated <- err
+		}()
+		<-h.entered
+		opened := make(chan error, 1)
+		go func() {
+			layer, err := ring.Open(inner, cell)
+			if err == nil {
+				layer.CellKey.Release()
+			}
+			opened <- err
+		}()
+		var waited bool
+		select {
+		case err := <-opened:
+			if err != nil {
+				t.Errorf("a setup during the key pair check: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			waited = true
+		}
+		close(h.release)
+		if err := <-rotated; err != nil {
+			t.Fatalf("Rotate: %v", err)
+		}
+		if waited {
+			<-opened
+			t.Fatal("a setup waited for the key pair check of a rotation")
+		}
+		if epoch, _ := ring.Current(); epoch != 1 {
+			t.Fatalf("epoch %d after the held check, want 1", epoch)
+		}
+	})
+}
+
 type rotating struct {
 	*node
 	ring  *relay.OnionRing
