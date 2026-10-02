@@ -631,6 +631,23 @@ func TestRelayNeedsItsPublicKey(t *testing.T) {
 				t.Errorf("relay.New accepted %s", name)
 			}
 		}
+		other, otherPub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		other.Release()
+		for name, bad := range map[string][]byte{
+			"the public key of another pair":   otherPub,
+			"a key that the agreement refuses": make([]byte, len(pub)),
+		} {
+			r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: bad})
+			if !errors.Is(err, relay.ErrStaticPair) {
+				if r != nil {
+					r.Close()
+				}
+				t.Errorf("relay.New with %s: %v, want ErrStaticPair", name, err)
+			}
+		}
 		r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub})
 		if err != nil {
 			t.Fatalf("relay.New with the key pair: %v", err)

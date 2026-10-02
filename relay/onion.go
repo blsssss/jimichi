@@ -40,7 +40,9 @@ type OnionRing struct {
 
 // the ring owns priv once it is returned without an error and releases it on
 // Retire or Close; cacheSize bounds the setups remembered per key, zero picks
-// the default
+// the default. pub, here and in Rotate, must be byte for byte what the node
+// publishes for priv: it is a part of the setup transcript, so under any other
+// bytes the key opens no setup
 func NewOnionRing(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, cacheSize int) (*OnionRing, error) {
 	if cacheSize < 0 || cacheSize > MaxSetupCache {
 		return nil, fmt.Errorf("relay: setup cache of %d entries outside 0..%d", cacheSize, MaxSetupCache)
