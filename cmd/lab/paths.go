@@ -157,7 +157,12 @@ func printPaths(w io.Writer, r pathsResult) {
 	for _, line := range pathsLegend {
 		fmt.Fprintln(w, line)
 	}
-	fmt.Fprintf(w, "full mirrors, a uniform choice: %.4f and %.4f, k(k-1)/(N(N-1)) and 1 - C(N-k,h)/C(N,h)\n", r.EndsUniform, r.TouchedUniform)
+	// a chain of one node has that node at both ends
+	ends := "k(k-1)/(N(N-1))"
+	if r.Hops == 1 {
+		ends = "k/N"
+	}
+	fmt.Fprintf(w, "full mirrors, a uniform choice: %.4f and %.4f, %s and 1 - C(N-k,h)/C(N,h)\n", r.EndsUniform, r.TouchedUniform, ends)
 }
 
 var pathsLegend = []string{

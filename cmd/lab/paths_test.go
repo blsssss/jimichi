@@ -133,6 +133,16 @@ func TestPathsSetWhenARogueEntryLeavesOutAnHonestNode(t *testing.T) {
 		t.Fatalf("row %v and %v, the sampled paths give %v and %v", res.Ends, res.Touched, ends, touched)
 	}
 
+	// the row of full mirrors at the same seed is not an independent sample: it
+	// reads the same stream, so the entries are the same and so are the chains
+	// through the honest ones, and a rogue entry puts a rogue node on its chain
+	// either way. The share with a rogue node is the same number in both rows
+	full, err := samplePaths(pathsConfig{nodes: 5, hops: 3, rogue: 2, missing: 1, samples: samples, seed: 1})
+	if err != nil || full.Touched != res.Touched || full.Ends == res.Ends {
+		t.Fatalf("full mirrors at the same seed: %v and %v (%v) against %v and %v; want the same share with a rogue node and another share of rogue ends",
+			full.Ends, full.Touched, err, res.Ends, res.Touched)
+	}
+
 	// a client that allows no node to be left out refuses the rogue entries, 2/5
 	// of its attempts, standard error sqrt(0.4*0.6/60000) = 0.002, and no chain
 	// that comes up has a rogue entry. The honest entries serve all five and
@@ -502,6 +512,18 @@ func TestPathsRowIsPrintedAndEncodedWithItsConfiguration(t *testing.T) {
 		if !strings.Contains(out.String(), said+"\n") {
 			t.Errorf("the printed report does not say %q:\n%s", said, out.String())
 		}
+	}
+	// a chain of one node has both ends rogue when that node is: two of five,
+	// k/N = 0.4, where k(k-1)/(N(N-1)) = 2*1/(5*4) is 0.1. A rogue node is in
+	// 1 - C(3,1)/C(5,1) = 1 - 3/5 = 0.4 of them, the same chains
+	single, err := samplePaths(pathsConfig{nodes: 5, hops: 1, rogue: 2, missing: 1, samples: 200, seed: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var one bytes.Buffer
+	printPaths(&one, single)
+	if want := "full mirrors, a uniform choice: 0.4000 and 0.4000, k/N and 1 - C(N-k,h)/C(N,h)\n"; !strings.HasSuffix(one.String(), want) || strings.Contains(one.String(), "k(k-1)") {
+		t.Errorf("chains of one node are printed with:\n%swant the last line %q", one.String(), want)
 	}
 	raw, err := json.Marshal(res)
 	if err != nil {
