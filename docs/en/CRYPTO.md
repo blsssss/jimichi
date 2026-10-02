@@ -135,6 +135,9 @@ th = Hash(T)        SHA-256 or Streebog-256, 32 bytes
 - 1 to 255 parts, each 1 to 65535 bytes.
 - The layout is unambiguous: the string holds no 0x00, and after it come a separator, the number
   of parts and the length of every part. The same bytes cut at other places give another hash.
+- NewContext takes the hash and the suite name from the provider it is given, so a context is as
+  trustworthy as that provider: the type guarantees that a context is present, not that it is the
+  suite hash of a transcript. wire, link and relay pass the provider of the suite itself.
 - NewContext copies the parts into T and hashes it at once: a slice of a cell body cannot change
   between two derivations.
 - The transcript consists of public data and is not signed with the node signing key. Sum
@@ -221,14 +224,17 @@ The key pair check at node start, exchange `relay/keycheck`: the node generates 
 and, under a context made of its published link key and the one-time public key, agrees a secret
 from both sides. The two secrets must be equal; no key is derived from them and both are released
 at once. A node whose published key is not the public half of its private key does not start:
-it would otherwise confirm no authenticated link and open no setup.
+it would otherwise confirm no authenticated link and, without -onion-rotate, where the link key
+also serves as the onion key, open no setup. The pairs of the onion key ring are not checked this
+way.
 
 ### Rules for changes
 
-- The scheme version `v1` changes with any change to the transcript layout, the set of purposes
-  or the formulas. Versions are not compatible with each other, and there is no version
-  negotiation.
-- A new purpose is a new row in the label table and a new golden vector in crypto/providertest.
+- The scheme version `v1` changes with any change to the transcript layout, to the formulas, or
+  to the name or size of an existing purpose. Versions are not compatible with each other, and
+  there is no version negotiation.
+- A new purpose does not change the version: it adds a row to the label table and a golden
+  vector in crypto/providertest.
 - The golden vectors pin the composition: the hashes of three transcripts, every derived key,
   MixKey and Agree on fixed keys, for both suites. The comment next to them says how to recompute
   the values without this code. The VKO examples of RFC 7836 (appendix B, examples 7 and 8) are on
@@ -365,10 +371,10 @@ some of them live long:
 |---|---|---|
 | x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct | the whole life of the circuit or link, never wiped; building the AEAD state per call from the secmem key is planned ([#39](https://github.com/jimichi-org/jimichi/issues/39)) |
 | crypto/ecdh | the X25519 scalar, the node's link and onion keys included, and the shared secret | until the freed heap memory is reused, which can be after the onion key itself was released |
-| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret and the MixKey chain key; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block | until the heap memory is reused; the provider zeroes its own copy of the PRK |
+| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block | until the heap memory is reused; the provider zeroes its own copy of the PRK |
 | Ed25519 generation and signing | the SHA-512 state with the seed or the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; generation and signing always wipe their own scalars and digests, -keymem none included |
 | gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them unless zeroing is off (-keymem none or a list without zero) |
-| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret and the MixKey chain key; the Streebog message buffer holding the second secret of MixKey | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer |
+| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key; the Streebog message buffer holding the second secret of MixKey | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer |
 | gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys included | until the heap memory is reused, which can be after the onion key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 

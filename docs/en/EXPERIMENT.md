@@ -244,6 +244,12 @@ lab and the benchmarks have no switch for the key-memory measures).
 | Latency by hop count | one, two, three nodes; p50, p95, p99 |
 | Cost of mlock | the same metrics with memory locking on and off |
 
+The binding of every derived key to the transcript, the suite and the scheme version has no
+switch, like the setup replay tag and the link confirmation frame: a build without it would be a
+second key schedule, that is, a downgrade path. No block measures its contribution; the key
+agreement and key derivation benchmarks include it, and its cost is their difference from release
+v0.2.0, the last revision without the binding.
+
 ## Statistics
 
 - Target for the full series ([#23](https://github.com/jimichi-org/jimichi/issues/23)): at least 30

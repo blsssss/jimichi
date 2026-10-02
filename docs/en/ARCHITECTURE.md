@@ -163,8 +163,9 @@ identifier and the counter of every cell.
   byte, the ephemeral keys of both sides as they crossed the wire and, in the authenticated mode,
   the responder's link key. The hash of the transcript goes into every agreement and into the
   derivation of every key (CRYPTO, section "Key derivation"). A byte of the hello or of the
-  answer changed on the way gives the two sides different keys: the confirmation frame does not
-  open, and the handshake fails.
+  answer changed on the way is either refused outright (an unknown mode, a key the agreement
+  does not accept) or gives the two sides different keys, so the confirmation frame does not
+  open; in every case the handshake fails.
 - In the authenticated mode the initiator makes a second agreement, of its ephemeral key with
   the responder's link key taken from a verified descriptor: the client does it for the entry
   node, a node for the next node of the circuit. The two secrets are chained (MixKey), and the

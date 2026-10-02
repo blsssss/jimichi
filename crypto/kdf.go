@@ -8,8 +8,9 @@ import (
 const (
 	ContextSize = 32
 
-	// changes with any change to the transcript layout, the set of purposes or
-	// the derivation formulas
+	// changes with any change to the transcript layout, to the derivation
+	// formulas or to the name or size of an existing purpose; a new purpose
+	// leaves it as it is
 	labelPrefix = "jimichi/v1/"
 
 	maxNameSize  = 32
