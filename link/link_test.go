@@ -666,6 +666,12 @@ func TestDirectionsHaveSeparateKeys(t *testing.T) {
 				t.Error("frame 0 of both directions is sealed under one key")
 			}
 		}()
+		// the responder reports through t, so a failing test waits for it
+		defer func() {
+			_ = a.Close()
+			_ = b.Close()
+			<-done
+		}()
 
 		client, err := link.Dial(a, p, static)
 		if err != nil {

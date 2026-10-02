@@ -146,6 +146,10 @@ func TestBuildSetupReleasesEarlierHopsWhenOneFails(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// the size probe of the suite makes a key pair, so it runs before the count
+		if _, err := wire.PublicKeySize(p); err != nil {
+			t.Fatal(err)
+		}
 		_, pubs := staticKeys(t, p, hops)
 		for name, bad := range map[string][]byte{
 			"a short key":                 pubs[hops-1][:5],

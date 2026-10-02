@@ -124,6 +124,30 @@ func TestHandshakeReleasesEverySecret(t *testing.T) {
 			_ = b.Close()
 		})
 
+		// what a responder under another transcript looks like to the initiator:
+		// every key is derived, and then the confirmation does not open
+		t.Run("the confirmation frame does not open", func(t *testing.T) {
+			dialer := &trackingProvider{CryptoProvider: p}
+			frame, _ := link.FrameSize(p)
+			ephPriv, ephPub, err := p.GenerateEphemeral()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ephPriv.Release()
+			a, b := net.Pipe()
+			go func() {
+				_, _ = io.ReadFull(b, make([]byte, hello))
+				_, _ = b.Write(append(ephPub, make([]byte, frame)...))
+			}()
+			_ = a.SetDeadline(time.Now().Add(5 * time.Second))
+			if _, err := link.Dial(a, dialer, static); !errors.Is(err, link.ErrHandshake) {
+				t.Fatalf("Dial = %v, want %v", err, link.ErrHandshake)
+			}
+			expect("the initiator", dialer, whole)
+			_ = a.Close()
+			_ = b.Close()
+		})
+
 		t.Run("the initiator sends a key the agreement refuses", func(t *testing.T) {
 			accepter := &trackingProvider{CryptoProvider: p}
 			a, b := net.Pipe()
