@@ -88,9 +88,11 @@ func run(t *testing.T, relays int, args ...string) (status int, stderr, calls st
 	return cmd.ProcessState.ExitCode(), errOut.String(), string(recorded)
 }
 
-// relay 100 would be forwarded to the base + 100, the first port of the next
-// base: 19100 + 100 for the counters, 19200 + 100 for enrollment. Both scripts
-// refuse after listing the relays and before they forward anything
+// relay 100 would be forwarded to the base + 100, which reaches the next port
+// base: 19100 + 100 for the counters, 19200 + 100 for enrollment. Places start
+// at 1, so that port is not yet one another relay is forwarded to and the
+// bound of 99 leaves one port of margin. Both scripts refuse after listing the
+// relays and before they forward anything
 func TestScriptsRefuseMoreRelaysThanTheirPortsHold(t *testing.T) {
 	for _, name := range []string{"stats.sh", "enroll.sh"} {
 		status, stderr, calls := run(t, 100, script(t, name))
