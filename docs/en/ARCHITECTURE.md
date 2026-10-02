@@ -116,7 +116,8 @@ Every cell is 512 bytes, payload and cover cells alike.
   the counter on the link into the node and the hop index, so a cell cannot be moved to another
   position in the chain and a node cannot shift the counter without breaking the layer.
 - The circuit identifier is rewritten on every link and is not part of the associated data: the
-  layer is bound to it through the nonce.
+  layer is bound to it through the nonce, and the hop key is derived under the setup transcript,
+  which holds the identifier of the link into the node (section "Circuit setup").
 - The layer of hop i occupies the first 494 - 16 * i bytes of the body. After stripping its layer
   a node refills the body with random bytes, so every link carries the same size and the size
   does not show the position in the chain.
@@ -158,11 +159,20 @@ identifier and the counter of every cell.
   its hello. The responder sends the frame in both modes, and the frames of its direction go on
   from number 1. The responder's part of the handshake is its key and that one frame: 32 + 528
   bytes on c25519, 64 + 528 on GOST.
-- The initiator mixes the responder's link key, taken from a verified descriptor, into the
-  secret: the client does it for the entry node, a node for the next node of the circuit. Every
-  link of a circuit is therefore authenticated to the node it leads to: only the holder of that
-  link key derives the frame keys, so a responder without it cannot produce the confirmation and
-  is sent no cell. The responder does not authenticate the initiator.
+- The frame keys are bound to the transcript of the handshake: the format version, the mode
+  byte, the ephemeral keys of both sides as they crossed the wire and, in the authenticated mode,
+  the responder's link key. The hash of the transcript goes into every agreement and into the
+  derivation of every key (CRYPTO, section "Key derivation"). A byte of the hello or of the
+  answer changed on the way gives the two sides different keys: the confirmation frame does not
+  open, and the handshake fails.
+- In the authenticated mode the initiator makes a second agreement, of its ephemeral key with
+  the responder's link key taken from a verified descriptor: the client does it for the entry
+  node, a node for the next node of the circuit. The two secrets are chained (MixKey), and the
+  frame keys depend on both. Every link of a circuit is therefore authenticated to the node it
+  leads to: only the holder of that link key derives the frame keys, so a responder without it
+  cannot produce the confirmation and is sent no cell. The responder puts its published link key
+  into the transcript, and a hello in the authenticated mode to a responder without a link key
+  is refused before any agreement. The responder does not authenticate the initiator.
 - A node extends a circuit only to a node of its roster whose verified descriptor it holds
   (section "Node authentication"). A setup that names any other address is refused without a
   connection and counted (refused_extend). A next node that does not finish the handshake is
@@ -174,6 +184,7 @@ identifier and the counter of every cell.
   nodes this way, and no experiment block compares it with the authenticated one.
 - Two keys are derived from the secret, one per direction. The nonce is the frame number in that
   direction.
+- The binding takes no byte on the wire: the hello, the answer and the frame keep their sizes.
 - A frame is the 512-byte cell plus a 16-byte tag, 528 bytes. After the handshake the wire carries
   only frames of one size: no identifiers, no counters.
 - The link layer takes its primitives from the same CryptoProvider, so it works on the GOST suite
@@ -254,9 +265,14 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
 
 - The client knows the addresses of the nodes and their onion keys from verified descriptors.
 - For each node it generates an ephemeral pair and agrees a shared secret with that node's onion
-  key, bound to the identifier of the link into that node.
-- Two keys are derived from the secret, one for the control cell and one for data cells, two
-  counter offsets and a replay tag.
+  key. The secret is bound to the setup transcript of that hop: the format version, the hop
+  index, the identifier of the link into that node, the node's onion key and the client's
+  ephemeral key (CRYPTO, section "Key derivation"). The node assembles the same transcript from
+  the cell header, its onion key and the start of the layer.
+- Two keys are derived from the secret under the same transcript, one for the control cell and
+  one for data cells, two counter offsets and a replay tag.
+- The binding takes no byte in the cell: the control cell and the data cell are the same on the
+  wire, and a control cell still carries four nodes on c25519 and three on GOST.
 - The control cell is nested like a data cell: the layer of each node holds its ephemeral public
   key, the address of the next node, the identifier of the next link and the layer for the next
   node.
@@ -269,9 +285,11 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
 - A node remembers a tag of every control cell it opened for as long as it holds the onion key
   that opened it, and drops a copy, including after the original circuit has closed. Otherwise
   the copy would create the hop key again and the counters would restart from zero under the same
-  key. The tag is derived from the shared secret under a KDF label of its own rather than read
-  off the wire: keys that differ by a point of small order (8 points on X25519, 4 on GOST) and an
-  X25519 encoding with the top bit set give one secret.
+  key. The tag is derived from the shared secret under a KDF purpose of its own. A copy that
+  carries another encoding of the ephemeral key (a key shifted by a point of small order, of
+  which X25519 has 8 and GOST 4, or an X25519 encoding with the top bit set) does not open the
+  layer: the bytes of the key are part of the transcript, and the secret comes out different.
+  Only an exact copy of the layer gets the tag.
 - Every onion key has a tag cache of its own, bounded by -setup-cache. A full cache refuses new
   setups under its key rather than forget tags, and under that key only: the refusal ends when
   the node publishes its next onion key. A control cell on a link that already carries a circuit
@@ -733,7 +751,7 @@ prints the counters to the terminal.
 
 | Package | Purpose | Depends on |
 |---|---|---|
-| crypto | CryptoProvider interface | crypto/secmem |
+| crypto | CryptoProvider interface, labels and the transcript of key derivation | crypto/secmem |
 | crypto/gost, crypto/c25519 | primitive suites | crypto, secmem, external libraries |
 | crypto/suite | picks a suite by name for entry points and the testbed | crypto/gost, crypto/c25519 |
 | crypto/secmem | key memory | x/sys/unix |
