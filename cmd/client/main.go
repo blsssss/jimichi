@@ -148,31 +148,46 @@ func main() {
 
 	logger.Printf("circuit of %d hops among %d listed nodes, payload limit %d bytes, mode %s", len(chain), len(addrs), c.MaxPayload(), *mode)
 
-	for i := 0; *count == 0 || i < *count; i++ {
+	if code, line := exchange(c, logger, []byte(*message), *count, *interval, sel.cause); code != 0 {
+		exit(code, line)
+	}
+}
+
+type circuit interface {
+	Send(payload []byte) error
+	Replies() <-chan []byte
+	Refused() error
+}
+
+// sends count messages, endlessly for 0, and waits for the reply to each. A
+// code other than 0 is the end of the circuit and comes with its line
+func exchange(c circuit, logger *log.Logger, message []byte, count int, interval time.Duration, cause func(error) string) (code int, line string) {
+	for i := 0; count == 0 || i < count; i++ {
 		start := time.Now()
-		if err := c.Send([]byte(*message)); err != nil {
+		if err := c.Send(message); err != nil {
 			// the class is set before the link closes, so a send that failed on
 			// that close is reported as the refusal it follows
 			if refused := c.Refused(); refused != nil {
-				exit(ending(refused))
+				return ending(refused)
 			}
-			exit(1, "send: "+sel.cause(err))
+			return 1, "send: " + cause(err)
 		}
 		select {
 		case reply, open := <-c.Replies():
 			if !open {
 				// a dead circuit would otherwise swallow every message silently;
 				// exiting lets the orchestrator restart the client on a fresh one
-				exit(ending(c.Refused()))
+				return ending(c.Refused())
 			}
 			logger.Printf("round trip %d bytes in %s", len(reply), time.Since(start).Round(time.Microsecond))
 		case <-time.After(5 * time.Second):
 			logger.Print("no reply within 5s")
 		}
-		if *count == 0 || i+1 < *count {
-			time.Sleep(*interval)
+		if count == 0 || i+1 < count {
+			time.Sleep(interval)
 		}
 	}
+	return 0, ""
 }
 
 // the line of a refusal names the check the reply failed and nothing of the
