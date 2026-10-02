@@ -194,8 +194,8 @@ The GOST profile:
 - The output is one block, at most 32 bytes.
 - A 64-bit UKM is taken from the start of the transcript hash, and the whole hash goes into the
   seed. RFC 7836 (4.3.1) allows a UKM of up to half the public key size and recommends 64 bits or
-  more when at least one side uses a static key. A wider factor would lengthen the second scalar
-  multiplication.
+  more when at least one side uses a static key. gogost multiplies the shared point by the UKM
+  in a separate scalar multiplication, and a wider factor would lengthen it.
 - In MixKey the second secret takes the seed position. The function is the same, but the seed is
   not a public value here: this departs from the usual use of KDF_GOSTR3411_2012_256. The
   reasoning: HMAC is treated as a pseudorandom function in the key chain and as an extractor in

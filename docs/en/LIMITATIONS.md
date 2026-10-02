@@ -58,8 +58,8 @@ English | [Русский](../ru/LIMITATIONS.md)
   crosses the wire in the clear ([#57](https://github.com/jimichi-org/jimichi/issues/57)).
 - The tests of wire and link are what keeps the content of the transcript right. The interface
   guarantees only that no key can be derived without a transcript, not that the transcript holds
-  everything it should. There is no formal model of the setup and the handshake
-  ([#61](https://github.com/jimichi-org/jimichi/issues/61)).
+  everything it should. There is no formal model of the setup or of the link handshake;
+  a model of the setup is planned ([#61](https://github.com/jimichi-org/jimichi/issues/61)).
 - The key schedule is not Noise. The setup and the link follow the shape of the N, NN and NK
   exchanges and bind the transcript to every key, but an agreement returns the output of a KDF
   rather than the raw Diffie-Hellman result, so the published Noise test vectors do not apply.
@@ -169,9 +169,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   is exceeded while the node cannot act: a sleeping host and a frozen process keep their memory
   until they run again, and a machine paused and resumed with neither clock moved forward keeps
   a key longer by the length of the pause.
-- The window holds only while rotations succeed. A node that cannot make its next key, or cannot
-  lock its page, keeps the published key, tries again every second and counts the attempts
-  (onion_rotate_failed); until one succeeds that key has no bound.
+- The window holds only while rotations succeed. A node that cannot make its next key, cannot
+  lock its page or whose key pair check (CRYPTO) does not pass keeps the published key, tries
+  again every second and counts the attempts (onion_rotate_failed); until one succeeds that key
+  has no bound.
 - Onion key rotation does not cover: the hop keys of circuits that are alive when memory is
   taken, which open the cells of those circuits, recorded ones included, for as long as the
   circuit lives (24 h at most by default); the link key, which lives as long as the process and
