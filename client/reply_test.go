@@ -219,12 +219,26 @@ func TestOpenTakesAReplyOnlyInTurn(t *testing.T) {
 				{"identifier of another link", 0, 1, func(t *testing.T, _ *Client, back *backChain) *wire.Cell {
 					return otherCircuit(back.reply(t, 0, "a"))
 				}, ErrReplyHeader},
+				// the cells below fail more than one check, and the class is that of
+				// the first: the header, the layers, the number, the count of cells
+				{"copy of reply 0 with no cell written after it", 1, 1, func(t *testing.T, _ *Client, back *backChain) *wire.Cell {
+					return back.reply(t, 0, "a")
+				}, ErrReplyOutOfTurn},
+				{"altered reply before the first cell", 0, 0, func(t *testing.T, _ *Client, back *backChain) *wire.Cell {
+					return flipped(back.reply(t, 0, "a"), wire.CellSize-1, 0x01)
+				}, ErrReplyNotOpened},
+				{"altered reply out of turn", 0, 2, func(t *testing.T, _ *Client, back *backChain) *wire.Cell {
+					return flipped(back.reply(t, 1, "b"), wire.CellSize-1, 0x01)
+				}, ErrReplyNotOpened},
+				{"identifier of another link on an altered reply out of turn", 0, 0, func(t *testing.T, _ *Client, back *backChain) *wire.Cell {
+					return otherCircuit(flipped(back.reply(t, 1, "b"), wire.CellSize-1, 0x01))
+				}, ErrReplyHeader},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					c, back := builtCircuit(t, p, tc.sent)
 					payload, cover, err := c.open(tc.cell(t, c, back), tc.want)
-					if err != tc.refused {
-						t.Fatalf("open = %v, want %v", err, tc.refused)
+					if err != tc.refused || !errors.Is(err, ErrReply) {
+						t.Fatalf("open = %v, want %v, a refusal of a reply", err, tc.refused)
 					}
 					if payload != nil || cover {
 						t.Fatalf("a refused reply gave payload %q, cover %v", payload, cover)
@@ -236,9 +250,11 @@ func TestOpenTakesAReplyOnlyInTurn(t *testing.T) {
 }
 
 // the header check and the layer of the first node between them cover every
-// byte of a reply on the client's link: bytes 0 to 9 are the version, the kind
+// bit of a reply on the client's link: bytes 0 to 9 are the version, the kind
 // and the identifier, the counter in bytes 10 to 17 enters every layer, and
-// the layer of the first node spans the whole body
+// the layer of the first node spans the whole body. The two top bits of the
+// counter are in no layer, link values being taken below 2^62, so there the
+// refusal is the limit on the counter itself
 func TestAlteredBitAnywhereInAReplyIsRefused(t *testing.T) {
 	for _, s := range replySuites {
 		t.Run(s.String(), func(t *testing.T) {
@@ -252,9 +268,9 @@ func TestAlteredBitAnywhereInAReplyIsRefused(t *testing.T) {
 				if at < 10 {
 					want = ErrReplyHeader
 				}
-				for _, mask := range []byte{0x01, 0x80} {
-					if _, _, err := c.open(flipped(genuine, at, mask), 0); err != want {
-						t.Fatalf("byte %d, mask %#02x: open = %v, want %v", at, mask, err, want)
+				for bit := 0; bit < 8; bit++ {
+					if _, _, err := c.open(flipped(genuine, at, 1<<bit), 0); err != want {
+						t.Fatalf("byte %d, bit %d: open = %v, want %v", at, bit, err, want)
 					}
 				}
 			}
@@ -546,18 +562,70 @@ func TestRepliesInTurnKeepTheCircuit(t *testing.T) {
 	}
 }
 
-// a reply that never comes is not a refusal: the far side closing the link
-// with a cell still unanswered leaves no class behind
-func TestCloseByTheFarSideIsNotARefusal(t *testing.T) {
-	cl, s := dialScripted(t, replyProvider(t, jcrypto.SuiteC25519))
-	write(t, cl, s, 2)
-	s.send(t, -1, s.reply(t, 0, "a"))
-	_ = s.conn.Close()
+// a reply that never comes is not a refusal, and neither is the end of a
+// circuit that owes none: a link closed by the far side or by the client's own
+// Close leaves no class behind
+func TestCloseWithoutARefusedReplyLeavesNoClass(t *testing.T) {
+	farSide := func(_ *Client, s *scriptedChain) { _ = s.conn.Close() }
+	own := func(cl *Client, _ *scriptedChain) { _ = cl.Close() }
+	for _, tc := range []struct {
+		name    string
+		written int
+		closes  func(cl *Client, s *scriptedChain)
+	}{
+		{"far side, a cell still unanswered", 2, farSide},
+		{"far side, every cell answered", 1, farSide},
+		{"the client's own Close, a cell still unanswered", 2, own},
+		{"the client's own Close, every cell answered", 1, own},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, s := dialScripted(t, replyProvider(t, jcrypto.SuiteC25519))
+			write(t, cl, s, tc.written)
+			s.send(t, -1, s.reply(t, 0, "a"))
+			if got := nextReply(t, cl); got != "a" {
+				t.Fatalf("reply %q, want %q", got, "a")
+			}
+			tc.closes(cl, s)
 
-	if got := repliesUntilClosed(t, cl); !slices.Equal(got, []string{"a"}) {
-		t.Fatalf("the client passed on %q, want only %q", got, "a")
+			if got := repliesUntilClosed(t, cl); len(got) != 0 {
+				t.Fatalf("the client passed on %q after its only reply", got)
+			}
+			if err := cl.Refused(); err != nil || cl.Broken() {
+				t.Fatalf("Refused = %v, Broken = %v on a circuit that refused no reply", err, cl.Broken())
+			}
+		})
 	}
-	if err := cl.Refused(); err != nil || cl.Broken() {
-		t.Fatalf("Refused = %v, Broken = %v after the far side closed the link", err, cl.Broken())
+}
+
+// the class is on record before the link closes, so a Send that fails on that
+// close already finds it
+func TestClassIsOnRecordWhenASendFailsOnTheRefusal(t *testing.T) {
+	cl, s := dialScripted(t, replyProvider(t, jcrypto.SuiteC25519))
+	type failure struct{ send, refused error }
+	failed := make(chan failure, 1)
+	go func() {
+		for {
+			if err := cl.Send([]byte("ping")); err != nil {
+				failed <- failure{err, cl.Refused()}
+				return
+			}
+		}
+	}()
+	s.read(t, 1)
+	// a writer the chain stopped reading would block instead of failing
+	go func() {
+		var c wire.Cell
+		for s.conn.ReadCell(&c) == nil {
+		}
+	}()
+	s.send(t, 0, s.unsealed(t, 0))
+
+	select {
+	case f := <-failed:
+		if f.refused != ErrReplyNotOpened {
+			t.Fatalf("Send failed with %v and found Refused = %v, want %v", f.send, f.refused, ErrReplyNotOpened)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Send kept going through after a refused reply")
 	}
 }
