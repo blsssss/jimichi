@@ -85,9 +85,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   rotation of the peer's onion key has no such effect: the peer holds the replaced key until
   that bundle has expired.
 - Whoever installs a roster chooses which hosts a node polls on the info port: the node sends a
-  GET for /descriptor to port -peer-info-port of every roster address whenever an entry is due,
-  and every 5 s while a peer is missing. The addresses are IP literals and DNS names only, and
-  an answer counts only if it verifies under the roster's anchor.
+  GET for /descriptor to port -peer-info-port of every roster address when its entry is due,
+  and every 5 s for as long as the peer is missing or the entry stays due, which includes a
+  peer that still serves the descriptor it has not signed again. The addresses are IP literals
+  and DNS names only, and an answer counts only if it verifies under the roster's anchor.
 - A link is covered by own-clock sending only if the node sending on it has the measure turned on.
   The client cannot check that the nodes of its chain do: a node without the measure carries the
   timing onwards, and the protection is gone on its outgoing links.

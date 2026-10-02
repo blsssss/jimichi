@@ -638,12 +638,17 @@ finds by the label of their deployments (app=relay).
   pki.Verify against the roster's anchor and the roster address. The cache holds public data and
   lives in memory only.
 - The node fetches an entry again once its wall-clock age reaches half of its descriptor's
-  lifetime. Its timer sleeps until the nearest such moment, at most 1 min and at least 5 s;
-  while a peer is missing, or due and not answering, the node asks every 5 s. An entry ends at
-  the expires of its descriptor. A bundle that cannot be fetched or does not verify is not
-  taken, and the entry held so far stays until it expires. The log gets one line per kind of
-  cause: no answer, the status code or the check that failed, and nothing the peer sent. No
-  request and no circuit setup triggers a fetch.
+  lifetime: from then on the entry is due. Its timer sleeps until the nearest such moment, at
+  most 1 min and at least 5 s. A pass asks every peer that is missing or due and no other, and
+  while such a peer is left the next pass comes 5 s later. A due entry stays due until a fetch
+  brings a descriptor signed later, so the node asks every 5 s a peer that does not answer, a
+  peer whose bundle does not verify and a peer that still serves the descriptor it has not
+  signed again. The last is routine at the middle of a descriptor's lifetime and ends when that
+  peer's own timer signs (section "Key lifetime and revocation"). An entry ends at the expires
+  of its descriptor. A bundle that cannot be fetched or does not verify is not taken, and the
+  entry held so far stays until it expires. The log gets one line per kind of cause: no answer,
+  the status code or the check that failed, and nothing the peer sent. No request and no circuit
+  setup triggers a fetch.
 - A circuit is extended from this cache alone: the next address must be a roster node with a
   valid entry, and the link to it is authenticated with the link key of that entry. A node with
   -auth extends nowhere until its roster arrives.
