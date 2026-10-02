@@ -62,6 +62,8 @@ are not computed yet ([#119](https://github.com/jimichi-org/jimichi/issues/119))
 |---|---|
 | Share of chains with a rogue entry and exit | share of the chains whose first and last node are both rogue, that is held by the adversary, who then links the two ends of the circuit; a chain of one node counts when that node is rogue. A uniform choice of h distinct nodes among N, k of them rogue, gives k(k-1)/(N(N-1)), and k/N for h = 1 |
 | Share of chains with a rogue node | share of the chains that hold at least one rogue node; a uniform choice gives 1 - C(N-k,h)/C(N,h) |
+| Share of refused attempts | share of the attempts to build a chain whose entry serves a mirror the client refuses, one that lacks more than min(-missing, N - h) listed nodes. The two shares above are taken over the chains that were built |
+| Standard error of a share | sqrt(p(1-p)/n) for a share of n independent draws at the value p the choice gives; n is the number of chains built, and the number of attempts for the refused share |
 
 ### Traffic indistinguishability
 
@@ -170,23 +172,63 @@ of the node, not measured as a share.
 | Entry and exit nodes | fraction of correctly linked pairs, time to link |
 | Middle and one edge node | the same, for comparison |
 | Inserted node with a valid certificate | fraction of intercepted sessions, fraction decrypted |
-| Choice of the chain with k rogue nodes among N | share of chains with a rogue entry and exit and share of chains with a rogue node, over chains drawn with the client's own choice, against the values of a uniform choice |
+| Choice of the chain with k rogue nodes among N | share of chains with a rogue entry and exit and share of chains with a rogue node, over chains drawn with the client's own choice, against the values that choice gives: with full mirrors, with rogue entries that leave honest nodes out of their mirrors, and with rogue nodes that withhold their descriptors |
+| Ordered pairs of nodes kept busy from one address (planned) | share of the surviving chains with a rogue entry and exit and with a rogue node, against the addresses and circuits the adversary spends (LIMITATIONS, node limits) |
 | Replay and tampering | share of replayed, reordered or altered cells that go no further than the first node that sees them (a cell out of turn closes the circuit, an altered one is dropped), one hundred percent expected |
 
 The block is to conclude which share of the chain must be compromised to destroy the property,
 and whether that matches the theoretical probability of picking a compromised chain.
 
-The choice of the chain is measured without traffic and without nodes. `cmd/lab -set paths` draws
--samples chains of -hops nodes among -nodes with the function the client uses (client.Choose),
-on a stream derived from -seed in place of the system generator, takes the first -rogue nodes
-as rogue and reports both shares next to the values of a uniform choice. The report row carries
-nodes, hops, rogue_nodes, samples, seed and rev, so the same sample can be drawn again.
+The choice of the chain is measured without traffic and without nodes. `cmd/lab -set paths` makes
+-samples attempts to draw a chain of -hops nodes among -nodes the way the client does, with the
+client's own functions for the entry and for the rest of the chain, on a stream derived from
+-seed in place of the system generator: the entry among all the nodes, a refusal when its mirror
+lacks more than min(-missing, N - h) of them (the bound), the other hops among the nodes the
+mirror holds. The first -rogue nodes are rogue and act together:
+
+| Flag | What the rogue nodes do | What it does to the choice |
+|---|---|---|
+| -leftout o | as an entry each leaves o honest nodes out of its mirror | the exit of a rogue entry is drawn among N - o - 1 nodes, k - 1 of them rogue |
+| -withhold w | w of them keep their descriptors from the honest nodes | the mirror of an honest entry lacks w nodes: within the bound its chain is drawn among the N - w nodes the mirror holds, beyond it the attempt is refused |
+
+With both at 0, the default, every mirror is full and the choice is the uniform one. The report
+gives the share of refused attempts and, over the chains built, the two shares of chains, each
+next to the value the choice gives and the standard error of a share at that value, and the
+values of a uniform choice next to them. A configuration in which every attempt is refused is
+turned away: there is no chain to take a share of. The report row carries nodes, hops,
+rogue_nodes, missing, left_out, withheld, samples, seed and rev, so the same sample can be drawn
+again, and the report file is named after the same configuration, so runs started within one
+second do not overwrite each other.
+
+The values the choice gives are closed forms, checked in the tests of the metric against every
+chain the client can build. A sampled share differs from its value by about the standard error.
+Where the value is 0 or 1 the share is exact by construction: every chain gives the same answer,
+the sampled share equals the value for any seed and any number of samples, the standard error is
+0, and the row says nothing about the choice. The common cases:
+
+| Row | Exact share |
+|---|---|
+| no rogue node, or every node rogue | both shares of chains, 0 or 1 |
+| one rogue node, chains of two nodes or more | a rogue entry and exit, 0 |
+| fewer honest nodes than hops | a rogue node, 1 |
+| the mirrors of the honest entries are refused (-withhold above the bound) | a rogue node, 1 |
+| the mirrors of the rogue entries are refused (-leftout above the bound) | a rogue entry and exit, 0 |
+| no mirror lacks more than the bound | refused attempts, 0 |
 
 For N = 5, k = 2 and h = 3 there are 5 * 4 * 3 = 60 ordered chains. Six have rogue nodes at both
 ends (2 choices of the entry, the other rogue node as the exit, any of the 3 honest nodes
 between them): 6/60 = 0.1 = k(k-1)/(N(N-1)). Six hold no rogue node (the three honest nodes in
 any order), so 54/60 = 0.9 = 1 - C(3,3)/C(5,3) hold one. The test of the metric enumerates the
 60 chains and requires exactly these values.
+
+With -leftout 1 in the same configuration a rogue entry serves four nodes and draws its two
+further hops among the three others: 3 * 2 = 6 chains, two of them ending at the other rogue
+node. An honest entry serves all five: 4 * 3 = 12 chains, ten of them with a rogue node. The
+entry is any node with 1/5, so both ends are rogue with 2/5 * 2/6 = 2/15 against 0.1 for full
+mirrors, and a rogue node is in 2/5 + 3/5 * 10/12 = 0.9 of the chains, as before. With
+-withhold 2 and -missing 1 the mirrors of the three honest nodes lack two nodes and are refused,
+3/5 of the attempts; every chain enters through a rogue node, which serves all five, and its
+exit is the other rogue node with 1/4. The tests enumerate the chains of these cases as well.
 
 The correlation series of block 1 run with as many nodes as hops, in an order the harness sets
 itself: the choice of the chain does not enter them. The harness starts the nodes and the clients
