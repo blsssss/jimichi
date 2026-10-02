@@ -12,6 +12,7 @@ import (
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 // hands out keys as usual and remembers every buffer, so a test can see
@@ -54,6 +55,10 @@ func TestFailedStartReleasesTheKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer taken.Close()
+	// the size probe of the suite makes a key pair once; it runs here so no case counts it
+	if _, err := wire.PublicKeySize(inner); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, c := range []struct {
 		name  string
