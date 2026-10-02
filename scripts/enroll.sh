@@ -70,10 +70,7 @@ identity_of() {
 }
 
 relay_list=$(relays)
-if [ "$(printf '%s\n' "$relay_list" | wc -l)" -gt 99 ]; then
-  echo "more than 99 relays: their local ports would run into the next port base" >&2
-  exit 1
-fi
+ports_fit "$relay_list"
 
 # the roster is every relay of the namespace, each under the name of its
 # deployment and the address of its service
