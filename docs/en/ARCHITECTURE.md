@@ -242,7 +242,7 @@ the number of every reply. The client checks every reply, cover and payload alik
 
 | Check | What fails it |
 |---|---|
-| the header: the version, the kind "data", the circuit identifier of the client's link | a cell of another version or kind, another identifier |
+| the header: the version, the kind "data", the circuit identifier of the client's link | a cell of another version or kind, another identifier; a reply that the entry relabels as link padding does not reach this check: the link drops it (link.ReadCell), and it counts as a reply that never arrived |
 | every layer opens | an altered body or counter, a cell nobody sealed, a cell of another circuit, direction or position, a bad length under the last layer |
 | the number of the reply is strictly the next one | a copy, a gap, a step back, a reorder of genuine replies |
 | the number is below the count of cells the client has written to the link | a reply to a cell the client did not write: the exit answers every cell once |
@@ -371,8 +371,12 @@ Circuit teardown:
   `did not open`, `out of turn`, `more replies than cells written`. That line names neither a
   node nor a cell number. Any other break gives code 1 and the line `circuit closed`, or `send:`
   with the cause. Code 1 does not mean the path was honest: a copy, a gap or a reorder made by a
-  node past the entry closes the circuit at the node before it, a damaged frame closes the link,
-  and a node can simply close the connection.
+  node past the entry closes the circuit at the node before it, provided that node has already
+  taken a backward cell, a damaged frame closes the link, and a node can simply close the
+  connection. Before its first backward cell a node has nothing to compare with: every node on
+  the way back takes the first backward counter as it comes, so when a node past the entry skips
+  the first replies, the later reply passes every node and only the client refuses it, as
+  `out of turn`, with code 3.
 
 ## Node limits
 
