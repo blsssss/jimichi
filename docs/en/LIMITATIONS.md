@@ -37,11 +37,13 @@ English | [Русский](../ru/LIMITATIONS.md)
 - Delivery is not guaranteed. At a constant rate the client queues at most 256 messages and drops
   a new one without an error when the queue is full, counting it only; a message in the queue or
   on the way is lost when its circuit closes. Nothing acknowledges or resends a message, and a
-  reply is dropped when the application has 64 of them unread.
+  reply is dropped when the application has 64 of them unread. A reply the exit did not send
+  cannot be told from a delayed one by the client.
 - Any break in the counter order closes the circuit. A neighbouring node can cause one with a
-  single cell. A party on the wire cannot put a frame of its own on an authenticated link, but a
-  frame it damages or a connection it breaks closes the circuit all the same. This is a denial of
-  service.
+  single cell. One reply that fails a check at the client does the same, and any node of the
+  chain can cause it: the client tolerates no such reply and keeps no count across restarts. A
+  party on the wire cannot put a frame of its own on an authenticated link, but a frame it
+  damages or a connection it breaks closes the circuit all the same. This is a denial of service.
 - A link is authenticated in one direction, to the node it leads to. The responder does not
   authenticate the initiator: a node cannot tell a roster node from a client or from anyone else
   who connects to its cell port. Authenticating the initiator on links between nodes is planned

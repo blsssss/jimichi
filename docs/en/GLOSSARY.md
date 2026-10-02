@@ -37,7 +37,7 @@ English | [Русский](../ru/GLOSSARY.md)
 | Node roster | the anchor with the names and addresses of the nodes of one issuance, sent to each of them; a node extends circuits only to roster nodes |
 | Descriptor mirror | the node's own bundle and the bundles of the roster nodes it currently holds, served on /descriptors so that a client asks its entry alone; a roster node whose bundle is missing or expired is left out |
 | Certificate issuance | the CA checks a node's signed request, carrying a nonce the CA chose, against the operator roster and signs the certificate |
-| Counter order | on every link a node accepts only the counter one above the previous one, anything else closes the circuit; the replay defence |
+| Counter order | on every link a node accepts only the counter one above the previous one, anything else closes the circuit; the client takes the numbers of replies the same way; the replay defence |
 | Memory dump | a snapshot of process memory; the key extraction scenarios that will search it are planned ([#24](https://github.com/jimichi-org/jimichi/issues/24)) |
 | ROC, AUC | the error curve and the area under it, the measure of attack success |
 | Bootstrap | a resampling method for confidence intervals |

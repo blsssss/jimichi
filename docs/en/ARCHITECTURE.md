@@ -117,7 +117,10 @@ Every cell is 512 bytes, payload and cover cells alike.
   position in the chain and a node cannot shift the counter without breaking the layer.
 - The circuit identifier is rewritten on every link and is not part of the associated data: the
   layer is bound to it through the nonce, and the hop key is derived under the setup transcript,
-  which holds the identifier of the link into the node (section "Circuit setup").
+  which holds the identifier of the link into the node (section "Circuit setup"). Forward, a
+  node finds the circuit by the identifier of the cell and builds the nonce from it. Backward, a
+  node does not read the identifier of the cell that arrived and sets its own, and the client
+  compares the identifier of a reply with that of its own link.
 - The layer of hop i occupies the first 494 - 16 * i bytes of the body. After stripping its layer
   a node refills the body with random bytes, so every link carries the same size and the size
   does not show the position in the chain.
@@ -245,12 +248,25 @@ takes a value of its own on every link: the exit and every relay on the way back
 offset.
 
 A relay cannot check a backward cell: its inner layers do not open for it. It therefore passes back
-only cells of kind "data" with the next counter in turn, and any other cell closes the circuit. The
-exit numbers its replies from zero. The client knows the offsets of all nodes, recovers the number
-of every reply and accepts only the next one: a reply out of turn, or one that does not open,
-closes the circuit on the client's side as well. The client counts the cells it has written to the
-link and closes the circuit on a reply numbered at or past that count: the exit answers every cell
-once.
+only cells of kind "data" with the next counter in turn, and any other cell closes the circuit.
+
+The exit numbers its replies from zero, and the client knows the offsets of all nodes and recovers
+the number of every reply. The client checks every reply, cover and payload alike, in this order:
+
+| Check | What fails it |
+|---|---|
+| the header: the version, the kind "data", the circuit identifier of the client's link | a cell of another version or kind, another identifier; a reply that the entry relabels as link padding does not reach this check: the link drops it (link.ReadCell), and it counts as a reply that never arrived |
+| every layer opens | an altered body or counter, a cell nobody sealed, a cell of another circuit, direction or position, a bad length under the last layer |
+| the number of the reply is strictly the next one | a copy, a gap, a step back, a reorder of genuine replies |
+| the number is below the count of cells the client has written to the link | a reply to a cell the client did not write: the exit answers every cell once |
+
+Nothing is tolerated: the first reply that fails a check closes the circuit, and the client reads
+nothing after it. A reply out of turn cannot be taken without taking a gap or a replay, and a
+reply too many answers no cell of the client. A reply with a bad header or one that does not open
+takes no number, and forward a node drops such a cell and keeps the circuit; the client closes
+the circuit here as well: an honest chain produces no such reply, and the reply whose place such
+a cell took is already lost. Of a circuit it closed the client keeps only which of the four
+checks the reply failed. A reply that never arrives is not noticed by these checks.
 
 A reply too long for a cell is replaced by a cover reply under the same number. The length is
 checked before anything is sealed, so no nonce is used twice. Any other failure to seal a reply
@@ -370,6 +386,17 @@ Circuit teardown:
 - Circuit keys are released once every goroutine using them has stopped.
 - The client sees the break as its reply channel closing and exits. The orchestrator restarts
   it, and it draws a new chain.
+- When the client closed the circuit itself over a reply, it exits with code 3 and the line
+  `circuit closed: client: reply refused: <check>`, the check being one of four: `bad header`,
+  `did not open`, `out of turn`, `more replies than cells written`. That line names neither a
+  node nor a cell number. Any other break gives code 1 and the line `circuit closed`, or `send:`
+  with the cause. Code 1 does not mean the path was honest: a copy, a gap or a reorder made by a
+  node past the entry closes the circuit at the node before it, provided that node has already
+  taken a backward cell, a damaged frame closes the link, and a node can simply close the
+  connection. Before its first backward cell a node has nothing to compare with: every node on
+  the way back takes the first backward counter as it comes, so when a node past the entry skips
+  the first replies, the later reply passes every node and only the client refuses it, as
+  `out of turn`, with code 3.
 
 ## Node limits
 

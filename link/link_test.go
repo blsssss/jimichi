@@ -22,11 +22,19 @@ import (
 type recorder struct {
 	net.Conn
 	seen bytes.Buffer
+	// set after the handshake: what goes onto the wire in place of a frame
+	rewrite func(frame []byte) []byte
 }
 
 func (r *recorder) Write(b []byte) (int, error) {
 	r.seen.Write(b)
-	return r.Conn.Write(b)
+	if r.rewrite == nil {
+		return r.Conn.Write(b)
+	}
+	if _, err := r.Conn.Write(r.rewrite(b)); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 func eachSuite(t *testing.T, run func(t *testing.T, p jcrypto.CryptoProvider)) {
@@ -209,6 +217,51 @@ func TestPaddingIsDroppedByTheReceiver(t *testing.T) {
 	}
 	if n := rec.seen.Len() - hs; n != 5*frame {
 		t.Fatalf("wire carried %d bytes after the handshake, want %d", n, 5*frame)
+	}
+}
+
+// the frame number is the nonce, so a frame put on the wire a second time and a
+// frame with one byte changed both fail to open at the receiver
+func TestCopiedOrAlteredFrameDoesNotOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rewrite func(frame []byte) []byte
+		// frames that open before the one that must not
+		opens int
+	}{
+		{"copy", func(frame []byte) []byte { return append(bytes.Clone(frame), frame...) }, 1},
+		{"altered byte", func(frame []byte) []byte {
+			out := bytes.Clone(frame)
+			out[len(out)/2] ^= 0x01
+			return out
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server, rec := pair(t, true)
+			rec.rewrite = tc.rewrite
+			go func() { _ = client.WriteCell(sample(7)) }()
+
+			var got wire.Cell
+			read := func() error {
+				done := make(chan error, 1)
+				go func() { done <- server.ReadCell(&got) }()
+				select {
+				case err := <-done:
+					return err
+				case <-time.After(3 * time.Second):
+					t.Fatal("no frame reached the receiver")
+					return nil
+				}
+			}
+			for i := 0; i < tc.opens; i++ {
+				if err := read(); err != nil || got != *sample(7) {
+					t.Fatalf("the genuine frame did not open as sent: %v", err)
+				}
+			}
+			if err := read(); err == nil {
+				t.Fatal("the frame opened")
+			}
+		})
 	}
 }
 
