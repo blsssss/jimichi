@@ -3,7 +3,9 @@ package relay_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -747,6 +749,96 @@ func TestRelayNeedsItsPublicKey(t *testing.T) {
 			t.Fatalf("relay.New with the key pair: %v", err)
 		}
 		r.Close()
+	})
+}
+
+// the agreement of a key pair check fails at the call given, as it does when
+// no page is left to lock for its secret
+type failingAgree struct {
+	jcrypto.CryptoProvider
+	at    int
+	err   error
+	calls int
+}
+
+func (p *failingAgree) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	p.calls++
+	if p.calls == p.at {
+		return nil, p.err
+	}
+	return p.CryptoProvider.Agree(priv, peerPub, ctx)
+}
+
+// only a refused key or a pair that does not agree is a bad pair; a failure of
+// memory comes back as it is, so the node logs it as such
+func TestKeyPairCheckReportsOtherFailuresAsTheyAre(t *testing.T) {
+	noRoom := errors.New("no room to lock a page")
+	onEverySuite(t, func(t *testing.T, inner jcrypto.CryptoProvider) {
+		priv, pub, err := inner.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer priv.Release()
+		next, nextPub, err := inner.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer next.Release()
+		p := &failingAgree{CryptoProvider: inner}
+		ring, err := relay.NewOnionRing(p, priv, pub, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ring.Close()
+		owned, ownedPub, err := inner.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer owned.Release()
+
+		checks := map[string]func() error{
+			"NewOnionRing": func() error {
+				_, err := relay.NewOnionRing(p, owned, ownedPub, 0)
+				return err
+			},
+			"Rotate": func() error {
+				_, err := ring.Rotate(next, nextPub)
+				return err
+			},
+			"relay.New": func() error {
+				r, err := relay.New(relay.Config{Provider: p, StaticPriv: owned, StaticPub: ownedPub})
+				if err == nil {
+					r.Close()
+				}
+				return err
+			},
+		}
+		mismatch := map[string]error{"NewOnionRing": relay.ErrOnionKey, "Rotate": relay.ErrOnionKey, "relay.New": relay.ErrStaticPair}
+		for name, check := range checks {
+			for _, at := range []int{1, 2} {
+				for _, c := range []struct {
+					err error
+					bad bool
+				}{
+					{noRoom, false},
+					{fmt.Errorf("%w: wrapped", noRoom), false},
+					{jcrypto.ErrBadPublicKey, true},
+					{jcrypto.ErrBadKeySize, true},
+				} {
+					p.at, p.err, p.calls = at, c.err, 0
+					err := check()
+					if c.bad && (!errors.Is(err, mismatch[name]) || !strings.HasSuffix(err.Error(), c.err.Error())) {
+						t.Errorf("%s with agreement %d failing with %q = %v, want %v with the cause", name, at, c.err, err, mismatch[name])
+					}
+					if !c.bad && (!errors.Is(err, c.err) || errors.Is(err, mismatch[name]) || err.Error() != c.err.Error()) {
+						t.Errorf("%s with agreement %d failing with %q = %v, want the failure as it is", name, at, c.err, err)
+					}
+				}
+			}
+		}
+		if epoch, _ := ring.Current(); epoch != 0 || next.Bytes() == nil || owned.Bytes() == nil {
+			t.Fatalf("failed checks moved the ring to epoch %d or released a key", epoch)
+		}
 	})
 }
 

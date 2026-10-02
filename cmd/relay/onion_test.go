@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -949,6 +950,90 @@ func TestRotationGivesItsHeldPageToTheNewKey(t *testing.T) {
 	f.n.rotateIfDue()
 	if f.n.onion.reserve != nil || strings.Count(f.log.String(), "onion key rotated") != 2 {
 		t.Fatal("a node that closed its onion keys went on rotating")
+	}
+}
+
+// fails with one error at whichever step the test names, as a node short of
+// locked memory does at a different step from one attempt to the next
+type shortProvider struct {
+	jcrypto.CryptoProvider
+	mu   sync.Mutex
+	step string
+}
+
+var errNoRoom = errors.New("no room to lock a page")
+
+func (p *shortProvider) failAt(step string) {
+	p.mu.Lock()
+	p.step = step
+	p.mu.Unlock()
+}
+
+func (p *shortProvider) fails(step string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.step == step
+}
+
+func (p *shortProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
+	if p.fails("generate") {
+		return nil, nil, errNoRoom
+	}
+	return p.CryptoProvider.GenerateEphemeral()
+}
+
+func (p *shortProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	if p.fails("agree") {
+		return nil, errNoRoom
+	}
+	return p.CryptoProvider.Agree(priv, peerPub, ctx)
+}
+
+// one cause is one line, whether the key or the secret of its pair check found
+// no room
+func TestShortMemoryIsOneLineWhereverItStrikes(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			f := newFixture(t, s)
+			p := &shortProvider{CryptoProvider: f.p}
+			priv, pub, err := f.p.GenerateEphemeral()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ring, err := relay.NewOnionRing(p, priv, pub, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.n.mu.Lock()
+			f.n.p = p
+			f.n.link = f.pub
+			f.n.onion = newOnionKeys(ring, time.Hour, f.n.ttl, false, f.clock.Now())
+			f.n.mu.Unlock()
+			t.Cleanup(f.n.closeOnion)
+
+			f.clock.advance(time.Hour)
+			for range 2 {
+				for _, step := range []string{"generate", "agree"} {
+					p.failAt(step)
+					f.n.rotateIfDue()
+				}
+			}
+			if epoch, _ := ring.Current(); epoch != 0 || f.n.onionFailures() != 4 {
+				t.Fatalf("epoch %d after %d failed attempts, want 0 after 4", epoch, f.n.onionFailures())
+			}
+			lines := strings.Count(f.log.String(), "onion key rotation: ")
+			if lines != 1 || !strings.Contains(f.log.String(), "onion key rotation: "+errNoRoom.Error()+"\n") {
+				t.Fatalf("%d lines for one cause, want one naming it: %q", lines, f.log.String())
+			}
+			if strings.Contains(f.log.String(), relay.ErrOnionKey.Error()) {
+				t.Fatalf("a memory failure logged as a bad key: %q", f.log.String())
+			}
+			p.failAt("")
+			f.n.rotateIfDue()
+			if epoch, _ := ring.Current(); epoch != 1 {
+				t.Fatalf("epoch %d once there is room, want 1", epoch)
+			}
+		})
 	}
 }
 

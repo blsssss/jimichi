@@ -229,7 +229,9 @@ its private key (the public key of another pair, or one the agreement refuses) d
 it would otherwise confirm no authenticated link and, with -onion-rotate 0, where the link key
 also serves as the onion key, open no setup. An onion pair that does not agree is refused the
 same way, since the node would open no setup under it: at start the node does not run, at a
-rotation the published key stays in place and the attempt is counted as a failed rotation.
+rotation the published key stays in place and the attempt is counted as a failed rotation. A
+check that fails for another reason, no room to lock a secret above all, reports that reason and
+not a bad pair.
 
 ### Rules for changes
 

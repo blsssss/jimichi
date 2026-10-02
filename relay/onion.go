@@ -190,7 +190,8 @@ func (g *OnionRing) Open(p jcrypto.CryptoProvider, cell *wire.Cell) (*wire.Setup
 // peers put the public key into their transcripts, so one that is not the half
 // of the private key would leave a node that confirms no authenticated link or
 // opens no setup, with nothing but failures at its neighbours to show for it;
-// such a pair gives mismatch
+// such a pair gives mismatch. Any other failure, memory above all, comes back
+// as it is, so a node that cannot lock a page does not report a bad key
 func checkKeyPair(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, mismatch error) error {
 	ephPriv, ephPub, err := p.GenerateEphemeral()
 	if err != nil {
@@ -203,16 +204,23 @@ func checkKeyPair(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, mis
 	}
 	theirs, err := p.Agree(ephPriv, pub, ctx)
 	if err != nil {
-		return fmt.Errorf("%w: %v", mismatch, err)
+		return refusedKey(err, mismatch)
 	}
 	defer theirs.Release()
 	ours, err := p.Agree(priv, ephPub, ctx)
 	if err != nil {
-		return fmt.Errorf("%w: %v", mismatch, err)
+		return refusedKey(err, mismatch)
 	}
 	defer ours.Release()
 	if !theirs.Equal(ours) {
 		return mismatch
 	}
 	return nil
+}
+
+func refusedKey(err, mismatch error) error {
+	if errors.Is(err, jcrypto.ErrBadPublicKey) || errors.Is(err, jcrypto.ErrBadKeySize) {
+		return fmt.Errorf("%w: %v", mismatch, err)
+	}
+	return err
 }
