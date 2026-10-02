@@ -5,7 +5,6 @@ package relay
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -197,7 +196,7 @@ func New(cfg Config) (*Relay, error) {
 		return nil, err
 	}
 	if len(cfg.StaticPub) != pubSize {
-		return nil, fmt.Errorf("relay: static public key of %d bytes, want %d", len(cfg.StaticPub), pubSize)
+		return nil, fmt.Errorf("%w: %d bytes, want %d", ErrStaticPubSize, len(cfg.StaticPub), pubSize)
 	}
 	cfg.StaticPub = bytes.Clone(cfg.StaticPub)
 	if cfg.QueueCells < 0 || cfg.QueueCells > maxQueueCells {
@@ -256,7 +255,7 @@ func checkKeyPair(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte) err
 		return fmt.Errorf("%w: %v", ErrStaticPair, err)
 	}
 	defer ours.Release()
-	if subtle.ConstantTimeCompare(theirs.Bytes(), ours.Bytes()) != 1 {
+	if !theirs.Equal(ours) {
 		return ErrStaticPair
 	}
 	return nil
@@ -274,7 +273,10 @@ const MaxSetupCache = 1 << 20
 // no key leaves the check, so its secrets share an exchange with nothing else
 const exchangeKeyCheck = "relay/keycheck"
 
-var ErrStaticPair = errors.New("relay: static public key is not the half of the private key")
+var (
+	ErrStaticPubSize = errors.New("relay: static public key of the wrong size")
+	ErrStaticPair    = errors.New("relay: static public key is not the half of the private key")
+)
 
 var (
 	errDuplicate = errors.New("relay: circuit id already in use")

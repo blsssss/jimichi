@@ -1,6 +1,7 @@
 package secmem
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"sync"
@@ -86,6 +87,18 @@ func (b *Buffer) Clone() (*Buffer, error) {
 	}
 	copy(c.mem, b.mem)
 	return c, nil
+}
+
+// constant time in the contents; a released buffer equals nothing
+func (b *Buffer) Equal(other *Buffer) bool {
+	if other == nil {
+		return false
+	}
+	x, y := b.Bytes(), other.Bytes()
+	if x == nil || y == nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(x, y) == 1
 }
 
 // safe to call twice: deferred cleanup often runs after an explicit release on

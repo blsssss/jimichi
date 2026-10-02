@@ -626,9 +626,12 @@ func TestRelayNeedsItsPublicKey(t *testing.T) {
 			"a short public key": pub[1:],
 			"a long public key":  append(append([]byte{}, pub...), 0),
 		} {
-			if r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: bad}); err == nil {
-				r.Close()
-				t.Errorf("relay.New accepted %s", name)
+			r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: bad})
+			if !errors.Is(err, relay.ErrStaticPubSize) {
+				if r != nil {
+					r.Close()
+				}
+				t.Errorf("relay.New with %s: %v, want ErrStaticPubSize", name, err)
 			}
 		}
 		other, otherPub, err := p.GenerateEphemeral()

@@ -75,6 +75,32 @@ func TestClone(t *testing.T) {
 	}
 }
 
+func TestEqual(t *testing.T) {
+	fill := func(size int, v byte) *secmem.Buffer {
+		b, err := secmem.New(size)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(b.Release)
+		copy(b.Bytes(), bytes.Repeat([]byte{v}, size))
+		return b
+	}
+	a, same, shorter, last := fill(32, 7), fill(32, 7), fill(31, 7), fill(32, 7)
+	last.Bytes()[31] ^= 1
+
+	if !a.Equal(same) || !a.Equal(a) {
+		t.Fatal("equal contents compare unequal")
+	}
+	if a.Equal(last) || a.Equal(shorter) || shorter.Equal(a) || a.Equal(nil) {
+		t.Fatal("another content, another length or no buffer compares equal")
+	}
+	gone := fill(32, 7)
+	gone.Release()
+	if a.Equal(gone) || gone.Equal(a) || gone.Equal(gone) {
+		t.Fatal("a released buffer compares equal")
+	}
+}
+
 func TestBadSize(t *testing.T) {
 	if _, err := secmem.New(0); err == nil {
 		t.Fatal("New(0) must fail")
