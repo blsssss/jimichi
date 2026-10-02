@@ -44,7 +44,29 @@ English | [Русский](../ru/LIMITATIONS.md)
   service.
 - A link is authenticated in one direction, to the node it leads to. The responder does not
   authenticate the initiator: a node cannot tell a roster node from a client or from anyone else
-  who connects to its cell port.
+  who connects to its cell port. Authenticating the initiator is planned
+  ([#56](https://github.com/jimichi-org/jimichi/issues/56)).
+- The transcript binds keys, not the identity of a node: the certificate hash and the address of
+  the node are not part of it. A node that publishes another node's link key byte for byte in
+  its own descriptor is not detected by this: the chain check compares the addresses, the
+  signing keys and the onion keys of the nodes, and does not compare the link keys.
+- The link handshake has no explicit confirmation from the initiator: the responder learns that
+  the initiator derived the same keys only when the first frame from it opens. The mode byte
+  crosses the wire in the clear ([#57](https://github.com/jimichi-org/jimichi/issues/57)).
+- The tests of wire and link are what keeps the content of the transcript right. The interface
+  guarantees only that no key can be derived without a transcript, not that the transcript holds
+  everything it should. There is no formal model of the setup and the handshake
+  ([#61](https://github.com/jimichi-org/jimichi/issues/61)).
+- The key schedule is not Noise. The setup and the link follow the shape of the N, NN and NK
+  exchanges and bind the transcript to every key, but an agreement returns the output of a KDF
+  rather than the raw Diffie-Hellman result, so the published Noise test vectors do not apply.
+  The scheme has vectors of its own (CRYPTO, section "Key derivation").
+- There is no negotiation of the key scheme version: sides on different versions are not
+  compatible, and a link handshake between them ends at the confirmation frame with no cause
+  named. Nodes and clients are updated together.
+- Link keys and hop keys do not change while the link and the circuit live, and there is no
+  bound on the frames per key other than the counter limit. Rotation inside links and circuits
+  is planned ([#58](https://github.com/jimichi-org/jimichi/issues/58)).
 - The baseline without node authentication (-auth=false) extends a circuit to any address named
   in the setup cell, and its links between nodes are anonymous: they hide headers from a passive
   observer only. Its client takes the unverified keys of every hop from the entry alone, and a
