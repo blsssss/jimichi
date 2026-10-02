@@ -8,6 +8,7 @@ set -euo pipefail
 STATS_PORT_BASE="${STATS_PORT_BASE:-19100}"
 
 relay_list=$(relays)
+ports_fit "$relay_list"
 place=0
 for relay in $relay_list; do
   place=$((place + 1))

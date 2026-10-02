@@ -661,12 +661,26 @@ finds by the label of their deployments (app=relay).
   pki.Verify against the roster's anchor and the roster address. The cache holds public data and
   lives in memory only.
 - The node fetches an entry again once its wall-clock age reaches half of its descriptor's
-  lifetime. Its timer sleeps until the nearest such moment, at most 1 min and at least 5 s;
-  while a peer is missing, or due and not answering, the node asks every 5 s. An entry ends at
-  the expires of its descriptor. A bundle that cannot be fetched or does not verify is not
-  taken, and the entry held so far stays until it expires. The log gets one line per kind of
-  cause: no answer, the status code or the check that failed, and nothing the peer sent. No
-  request and no circuit setup triggers a fetch.
+  lifetime: from then on the entry is due. Its timer sleeps until the nearest such moment, at
+  most 1 min and at least 5 s. A pass asks every peer that is missing or due and no other, one
+  after another, each with one request under the 5 s timeout, and while such a peer is left the
+  next pass starts 5 s after this one ends. A due entry stays due until a fetch brings a
+  descriptor signed later, so with a 5 s pause between passes the node keeps asking a peer that
+  does not answer, a peer whose bundle does not verify and a peer that still serves the
+  descriptor it has not signed again. The last is routine: it starts at the middle of the
+  descriptor's lifetime and ends with the first pass after that peer has signed its descriptor
+  again. The peer's timer does that within one period, min(ttl/4, 1 min), when the wall clocks
+  of the two nodes agree, and a rotation of its onion key does it at once, whichever comes
+  first (section "Key lifetime and revocation"). A descriptor whose expires is cut to the
+  certificate's not_after is due at half of the shortened lifetime, while its peer signs again
+  when its age reaches half of -descriptor-ttl or its onion key rotates: for such a descriptor
+  the window lasts until the peer's timer finds that age, until the peer rotates its onion key
+  or until the descriptor expires, whichever comes first, and once the certificate has expired
+  the peer answers 503 and is asked as a missing one. An entry ends at the expires of its
+  descriptor. A bundle that cannot be fetched or does not verify is not taken, and the entry
+  held so far stays until it expires. The log gets one line per kind of cause: no answer, the
+  status code or the check that failed, and nothing the peer sent. No request and no circuit
+  setup triggers a fetch.
 - A circuit is extended from this cache alone: the next address must be a roster node with a
   valid entry, and the link to it is authenticated with the link key of that entry. A node with
   -auth extends nowhere until its roster arrives.
@@ -690,8 +704,10 @@ finds by the label of their deployments (app=relay).
   cannot alter them.
 - A node run with -auth=false takes no roster. It lists itself in /descriptors under -advertise
   together with the unsigned bundles of the nodes named in -peers, read without verification,
-  and extends circuits to any address. Without -advertise it answers /descriptors with 503 and
-  names the two flags.
+  and extends circuits to any address. It keeps those bundles by passes of the same kind: each
+  is fetched again one minute after its last fetch, with the same 5 s pause while a peer is
+  missing or its fetch fails, and these entries never expire. Without -advertise it answers
+  /descriptors with 503 and names the two flags.
 - scripts/e2e.sh checks that a client asks its entry alone. It waits until two passes in a row
   show every relay with all its roster peers and unchanged counts of descriptor_requests, then
   runs the clients. Between two readings of the counters mirror_requests must have grown at one
@@ -723,9 +739,9 @@ finds by the label of their deployments (app=relay).
 - The descriptor is signed when the certificate is installed, at every rotation of the onion key
   and otherwise only by the timer; a /descriptor request serves the ready bundle and never
   triggers a signature. The timer fires
-  every min(ttl/4, 1 min) and signs again once the descriptor's wall-clock age reaches half its
-  lifetime or the certificate state changes. The wall clock matters because the timer runs on
-  the monotonic clock, which stands still while the host sleeps.
+  every min(ttl/4, 1 min), where ttl is -descriptor-ttl, and signs again once the descriptor's
+  wall-clock age reaches half of ttl or the certificate state changes. The wall clock matters
+  because the timer runs on the monotonic clock, which stands still while the host sleeps.
 - After the descriptor's expires or the certificate's not_after the node answers 503. A node
   whose certificate expired comes back only through a restart and a new issuance.
 

@@ -13,6 +13,16 @@ relays() {
   printf '%s\n' "$names"
 }
 
+# a script forwards a relay to the local port base + its place in the list,
+# and the bases are 100 apart (19100 for the counters, 19200 and 19300 for
+# enrollment), so the ranges of up to 99 relays do not meet
+ports_fit() {
+  if [ "$(printf '%s\n' "$1" | wc -l)" -gt 99 ]; then
+    echo "more than 99 relays: their local ports would run into the next port base" >&2
+    return 1
+  fi
+}
+
 # the address a relay advertises and its certificate carries; a relay is named
 # after its deployment and its service
 relay_addr() {
