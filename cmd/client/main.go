@@ -29,6 +29,9 @@ const (
 	fetchPause    = time.Second
 )
 
+// 1 is any other failure and 2 is what the flag package exits with
+const exitRefused = 3
+
 var (
 	errNoBundle = errors.New("the entry holds no bundle for it")
 	errTooFew   = errors.New("the entry leaves out too many nodes")
@@ -136,10 +139,10 @@ func main() {
 		logger.Fatalf("dial: %s", sel.cause(err))
 	}
 	// Fatal would skip a deferred Close and leave the circuit keys unzeroed
-	fail := func(format string, args ...any) {
+	exit := func(code int, line string) {
 		_ = c.Close()
-		logger.Printf(format, args...)
-		os.Exit(1)
+		logger.Print(line)
+		os.Exit(code)
 	}
 	defer c.Close()
 
@@ -148,14 +151,19 @@ func main() {
 	for i := 0; *count == 0 || i < *count; i++ {
 		start := time.Now()
 		if err := c.Send([]byte(*message)); err != nil {
-			fail("send: %s", sel.cause(err))
+			// the class is set before the link closes, so a send that failed on
+			// that close is reported as the refusal it follows
+			if refused := c.Refused(); refused != nil {
+				exit(ending(refused))
+			}
+			exit(1, "send: "+sel.cause(err))
 		}
 		select {
 		case reply, open := <-c.Replies():
 			if !open {
 				// a dead circuit would otherwise swallow every message silently;
 				// exiting lets the orchestrator restart the client on a fresh one
-				fail("circuit closed")
+				exit(ending(c.Refused()))
 			}
 			logger.Printf("round trip %d bytes in %s", len(reply), time.Since(start).Round(time.Microsecond))
 		case <-time.After(5 * time.Second):
@@ -165,6 +173,15 @@ func main() {
 			time.Sleep(*interval)
 		}
 	}
+}
+
+// the line of a refusal names the check the reply failed and nothing of the
+// circuit; the plain line is any other end and does not mean an honest path
+func ending(refused error) (code int, line string) {
+	if refused != nil {
+		return exitRefused, "circuit closed: " + refused.Error()
+	}
+	return 1, "circuit closed"
 }
 
 func splitList(s string) []string {

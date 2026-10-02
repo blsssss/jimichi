@@ -837,3 +837,23 @@ func TestFailureClassNamesNoAddress(t *testing.T) {
 		}
 	}
 }
+
+// the line and the code of a refusal are fixed texts: they name the check the
+// reply failed and nothing of the circuit
+func TestEndingOfACircuit(t *testing.T) {
+	for _, c := range []struct {
+		refused error
+		code    int
+		line    string
+	}{
+		{nil, 1, "circuit closed"},
+		{client.ErrReplyHeader, 3, "circuit closed: client: reply refused: bad header"},
+		{client.ErrReplyNotOpened, 3, "circuit closed: client: reply refused: did not open"},
+		{client.ErrReplyOutOfTurn, 3, "circuit closed: client: reply refused: out of turn"},
+		{client.ErrReplyUnsolicited, 3, "circuit closed: client: reply refused: more replies than cells written"},
+	} {
+		if code, line := ending(c.refused); code != c.code || line != c.line {
+			t.Errorf("ending(%v) = %d, %q, want %d, %q", c.refused, code, line, c.code, c.line)
+		}
+	}
+}
