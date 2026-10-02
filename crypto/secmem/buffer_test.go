@@ -2,6 +2,7 @@ package secmem_test
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 
 	"github.com/jimichi-org/jimichi/crypto/secmem"
@@ -98,6 +99,44 @@ func TestEqual(t *testing.T) {
 	gone.Release()
 	if a.Equal(gone) || gone.Equal(a) || gone.Equal(gone) {
 		t.Fatal("a released buffer compares equal")
+	}
+}
+
+// under the protected policy a release unmaps the pages, so a comparison that
+// read them after it would fault; both orders of the pair run against both
+// releases, which would also show two locks taken in opposite orders
+func TestEqualAgainstAConcurrentRelease(t *testing.T) {
+	for round := 0; round < 200; round++ {
+		a, err := secmem.New(32)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		b, err := secmem.New(32)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		run := func(f func()) {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				f()
+			}()
+		}
+		for i := 0; i < 4; i++ {
+			run(func() { a.Equal(b) })
+			run(func() { b.Equal(a) })
+			run(func() { a.Equal(a) })
+		}
+		run(a.Release)
+		run(b.Release)
+		close(start)
+		wg.Wait()
+		if a.Equal(b) || b.Equal(a) || a.Equal(a) {
+			t.Fatal("a released buffer compares equal")
+		}
 	}
 }
 
