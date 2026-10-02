@@ -646,11 +646,12 @@ finds by the label of their deployments (app=relay).
   does not answer, a peer whose bundle does not verify and a peer that still serves the
   descriptor it has not signed again. The last is routine: it starts at the middle of the
   descriptor's lifetime and ends with the first pass after that peer has signed its descriptor
-  again on its own timer, which happens within one period of that timer, min(ttl/4, 1 min),
-  when the wall clocks of the two nodes agree (section "Key lifetime and revocation"). A
-  descriptor whose expires is cut to the certificate's not_after is due at half of the
-  shortened lifetime, while its peer signs again only when its age reaches half of
-  -descriptor-ttl: for such a descriptor the window lasts until the peer's timer finds that age
+  again. The peer's timer does that within one period, min(ttl/4, 1 min), when the wall clocks
+  of the two nodes agree, and a rotation of its onion key does it at once, whichever comes
+  first (section "Key lifetime and revocation"). A descriptor whose expires is cut to the
+  certificate's not_after is due at half of the shortened lifetime, while its peer signs again
+  when its age reaches half of -descriptor-ttl or its onion key rotates: for such a descriptor
+  the window lasts until the peer's timer finds that age, until the peer rotates its onion key
   or until the descriptor expires, whichever comes first, and once the certificate has expired
   the peer answers 503 and is asked as a missing one. An entry ends at the expires of its
   descriptor. A bundle that cannot be fetched or does not verify is not taken, and the entry

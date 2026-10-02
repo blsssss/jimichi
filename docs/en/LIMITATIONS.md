@@ -88,9 +88,12 @@ English | [Русский](../ru/LIMITATIONS.md)
   GET for /descriptor to port -peer-info-port of every roster address when its entry is due,
   and goes on asking, with a 5 s pause between passes, for as long as the peer is missing or the
   entry stays due, which includes a peer that still serves the descriptor it has not signed
-  again. A pass asks such peers in turn, each within the 5 s fetch timeout, so no host is asked
-  more often than once in 5 s. The addresses are IP literals and DNS names only, and an answer
-  counts only if it verifies under the roster's anchor.
+  again. A pass asks such peers in turn, each within the 5 s fetch timeout, so no roster address
+  is asked more often than once in 5 s. The bound is per address and not per host: a host named
+  by several roster addresses, which may differ in the port alone, or by several names that
+  resolve to it gets one request per such address in a pass, and an address whose answer does
+  not verify is asked in every pass. The addresses are IP literals and DNS names only, and an
+  answer counts only if it verifies under the roster's anchor.
 - A link is covered by own-clock sending only if the node sending on it has the measure turned on.
   The client cannot check that the nodes of its chain do: a node without the measure carries the
   timing onwards, and the protection is gone on its outgoing links.
