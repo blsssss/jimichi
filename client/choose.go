@@ -55,6 +55,12 @@ func ChooseRest(entry, n, hops int, rnd io.Reader) ([]int, error) {
 	return path, nil
 }
 
+// how many of the n listed nodes the mirror of an entry may lack for a chain
+// of hops nodes: at most missing, and never so many that fewer than hops stay
+func MaxAbsent(n, hops, missing int) int {
+	return min(missing, n-hops)
+}
+
 // a 64-bit value reduced modulo m favours the low remainders unless the first
 // 2^64 mod m values are thrown away, which leaves a whole number of cycles
 func below(rnd io.Reader, m int) (int, error) {

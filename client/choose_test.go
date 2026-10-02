@@ -65,6 +65,18 @@ func TestChooseRefusesAnImpossibleChoice(t *testing.T) {
 	}
 }
 
+// five nodes for chains of three spare two, so the mirror may lack what
+// -missing says up to two; three nodes for chains of three spare none
+func TestMaxAbsentIsMissingUpToTheNodesBeyondTheChain(t *testing.T) {
+	for _, c := range []struct{ n, hops, missing, want int }{
+		{5, 3, 0, 0}, {5, 3, 1, 1}, {5, 3, 2, 2}, {5, 3, 4, 2}, {3, 3, 1, 0}, {6, 2, 3, 3}, {5, 1, 9, 4},
+	} {
+		if got := client.MaxAbsent(c.n, c.hops, c.missing); got != c.want {
+			t.Errorf("MaxAbsent(%d, %d, %d) = %d, want %d", c.n, c.hops, c.missing, got, c.want)
+		}
+	}
+}
+
 // a stream that runs out gives no path: two draws are there, the third is cut
 func TestChooseFailsWhenTheStreamEnds(t *testing.T) {
 	short := io.MultiReader(words(7, 6), bytes.NewReader([]byte{0, 0, 0}))

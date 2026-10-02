@@ -336,7 +336,7 @@ func (s selection) enough(at []int, entry int) error {
 			absent++
 		}
 	}
-	allowed := min(s.missing, len(s.addrs)-s.hops)
+	allowed := client.MaxAbsent(len(s.addrs), s.hops, s.missing)
 	if absent > allowed {
 		return fmt.Errorf("%w: %d of %d listed nodes, at most %d may be left out", errTooFew, absent, len(s.addrs), allowed)
 	}
