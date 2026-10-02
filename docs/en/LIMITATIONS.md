@@ -44,8 +44,9 @@ English | [Русский](../ru/LIMITATIONS.md)
   service.
 - A link is authenticated in one direction, to the node it leads to. The responder does not
   authenticate the initiator: a node cannot tell a roster node from a client or from anyone else
-  who connects to its cell port. Authenticating the initiator is planned
-  ([#56](https://github.com/jimichi-org/jimichi/issues/56)).
+  who connects to its cell port. Authenticating the initiator on links between nodes is planned
+  ([#56](https://github.com/jimichi-org/jimichi/issues/56)); a client stays unauthenticated to
+  its entry.
 - The transcript binds keys, not the identity of a node: the certificate hash and the address of
   the node are not part of it. A node that publishes another node's link key byte for byte in
   its own descriptor is not detected by this: the chain check compares the addresses, the

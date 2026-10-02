@@ -223,7 +223,8 @@ the whole transcript: if a single byte of it differs between the sides, the fram
 The key pair check at node start, exchange `relay/keycheck`: the node generates a one-time pair
 and, under a context made of its published link key and the one-time public key, agrees a secret
 from both sides. The two secrets must be equal; no key is derived from them and both are released
-at once. A node whose published key is not the public half of its private key does not start:
+at once. A node whose published key does not agree with its private key (the public key of
+another pair, or one the agreement refuses) does not start:
 it would otherwise confirm no authenticated link and, without -onion-rotate, where the link key
 also serves as the onion key, open no setup. The pairs of the onion key ring are not checked this
 way.
