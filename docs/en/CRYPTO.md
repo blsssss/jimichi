@@ -323,9 +323,10 @@ and has no primitives of its own.
   with -harden=false and a -keymem without lock.
 - In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start and refuses
   to run below 64 KiB, or when locking was asked for and failed. A rotating node holds one locked
-  page per onion key, two at most, and four more that it gives back right before it makes the
-  next key: one for the key, three for its key pair check. It does not take a new onion key whose
-  page is not locked.
+  page per onion key, two at most, and, when memory allows, four more that it gives back right
+  before it makes the next key: one for the key, three for its key pair check. It takes them after
+  each rotation and, if there was no room then, again once the replaced key is released. It does
+  not take a new onion key whose page is not locked.
 - Every measure is switched by configuration, so its contribution can be measured:
 
 | Flag | What it turns on |

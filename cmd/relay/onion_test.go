@@ -953,6 +953,40 @@ func TestRotationGivesItsHeldPageToTheNewKey(t *testing.T) {
 	}
 }
 
+// a rotation that found no room to hold pages for the next one leaves none;
+// the release of the replaced key takes them again
+func TestReleaseTakesThePagesARotationCouldNot(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	inner := f.p
+	ring := f.rotating(t, 3*time.Hour)
+	f.enroll(t, t0.Add(72*time.Hour))
+	f.clock.advance(3 * time.Hour)
+	f.n.rotateIfDue()
+	f.n.mu.Lock()
+	f.n.onion.letGo()
+	grace := f.n.onion.grace
+	f.n.mu.Unlock()
+
+	f.clock.advance(grace - time.Second)
+	f.n.rotateIfDue()
+	if f.n.onion.reserve != nil {
+		t.Fatal("pages taken while the replaced key is still held")
+	}
+	f.clock.advance(time.Second)
+	f.n.rotateIfDue()
+	held := f.n.onion.reserve
+	if held == nil || held.Bytes() == nil {
+		t.Fatal("the release of the replaced key took no pages for the next rotation")
+	}
+
+	f.n.p = &tightProvider{CryptoProvider: inner, room: func() bool { return held.Bytes() == nil }}
+	f.clock.advance(3*time.Hour - grace)
+	f.n.rotateIfDue()
+	if epoch, _ := ring.Current(); epoch != 2 {
+		t.Fatalf("epoch %d: the pages taken at the release were not given to the next key: %q", epoch, f.log.String())
+	}
+}
+
 // fails with one error at whichever step the test names, as a node short of
 // locked memory does at a different step from one attempt to the next
 type shortProvider struct {

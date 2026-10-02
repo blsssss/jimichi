@@ -356,8 +356,9 @@ Onion key epochs:
 - A rotation that fails, because there is no memory for the new key, its page cannot be
   locked or its key pair check (CRYPTO) does not pass, leaves the published key in place. The
   node tries again every second and counts the attempts (onion_rotate_failed). Between rotations
-  it holds four key pages and gives them back right before the next key is made, so that the key
-  and its pair check find room when locked memory is used up.
+  it holds four key pages when memory allows and gives them back right before the next key is
+  made, so that the key and its pair check find room when locked memory is used up. It takes them
+  after each rotation and, if there was no room then, again once the replaced key is released.
 - A circuit that is already built does not notice a rotation: its cell keys come from its setup
   and live until the circuit is torn down.
 - -onion-rotate 0 is the measurement baseline: the link key opens the setup layers as well, for
