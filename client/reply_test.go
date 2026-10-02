@@ -1,10 +1,13 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -340,6 +343,11 @@ func (s *scriptedChain) close() {
 
 func dialScripted(t *testing.T, p jcrypto.CryptoProvider) (*Client, *scriptedChain) {
 	t.Helper()
+	return dialScriptedThrough(t, p, nil)
+}
+
+func dialScriptedThrough(t *testing.T, p jcrypto.CryptoProvider, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (*Client, *scriptedChain) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +375,7 @@ func dialScripted(t *testing.T, p jcrypto.CryptoProvider) (*Client, *scriptedCha
 		s, err := acceptScripted(ln, p, privs)
 		got <- accepted{s, err}
 	}()
-	cl, err := Dial(Config{Provider: p, Chain: nodes})
+	cl, err := Dial(Config{Provider: p, Chain: nodes, Dial: dial})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -597,35 +605,47 @@ func TestCloseWithoutARefusedReplyLeavesNoClass(t *testing.T) {
 	}
 }
 
+// the client's socket, which reports what the client had on record at its
+// first Close: no Send fails on the refusal before that moment
+type closeWatch struct {
+	net.Conn
+	client  atomic.Pointer[Client]
+	once    sync.Once
+	atClose chan error
+}
+
+func (w *closeWatch) Close() error {
+	w.once.Do(func() {
+		if cl := w.client.Load(); cl != nil {
+			w.atClose <- cl.Refused()
+		}
+	})
+	return w.Conn.Close()
+}
+
 // the class is on record before the link closes, so a Send that fails on that
 // close already finds it
 func TestClassIsOnRecordWhenASendFailsOnTheRefusal(t *testing.T) {
-	cl, s := dialScripted(t, replyProvider(t, jcrypto.SuiteC25519))
-	type failure struct{ send, refused error }
-	failed := make(chan failure, 1)
-	go func() {
-		for {
-			if err := cl.Send([]byte("ping")); err != nil {
-				failed <- failure{err, cl.Refused()}
-				return
-			}
+	watch := &closeWatch{atClose: make(chan error, 1)}
+	cl, s := dialScriptedThrough(t, replyProvider(t, jcrypto.SuiteC25519), func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		raw, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
 		}
-	}()
-	s.read(t, 1)
-	// a writer the chain stopped reading would block instead of failing
-	go func() {
-		var c wire.Cell
-		for s.conn.ReadCell(&c) == nil {
-		}
-	}()
+		watch.Conn = raw
+		return watch, nil
+	})
+	watch.client.Store(cl)
+	write(t, cl, s, 1)
 	s.send(t, 0, s.unsealed(t, 0))
 
 	select {
-	case f := <-failed:
-		if f.refused != ErrReplyNotOpened {
-			t.Fatalf("Send failed with %v and found Refused = %v, want %v", f.send, f.refused, ErrReplyNotOpened)
+	case got := <-watch.atClose:
+		if got != ErrReplyNotOpened {
+			t.Fatalf("Refused = %v as the client closed its link, want %v", got, ErrReplyNotOpened)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Send kept going through after a refused reply")
+		t.Fatal("the client kept its link open")
 	}
 }
