@@ -158,21 +158,28 @@ func main() {
 	suiteName := flag.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
 	nodes := flag.Int("nodes", 5, "paths set: nodes a chain of -hops is drawn from")
 	rogue := flag.Int("rogue", 2, "paths set: how many of -nodes the adversary holds")
-	samples := flag.Int("samples", 100000, "paths set: chains to draw")
+	samples := flag.Int("samples", 100000, "paths set: attempts to draw a chain")
+	missing := flag.Int("missing", 1, "paths set: listed nodes the client lets an entry leave out of its mirror, as -missing of the client")
+	leftOut := flag.Int("leftout", 0, "paths set: honest nodes a rogue entry leaves out of its mirror")
+	withhold := flag.Int("withhold", 0, "paths set: rogue nodes that keep their descriptors from the honest nodes")
 	flag.Parse()
 
 	if *set == "paths" {
 		if *rev == "unknown" {
 			fmt.Fprintln(os.Stderr, "warning: no -rev given, rows cannot be traced to a revision")
 		}
-		res, err := samplePaths(*nodes, *hops, *rogue, *samples, *seed)
+		res, err := samplePaths(pathsConfig{
+			nodes: *nodes, hops: *hops, rogue: *rogue,
+			missing: *missing, leftOut: *leftOut, withheld: *withhold,
+			samples: *samples, seed: *seed,
+		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
 		res.Rev = *rev
 		printPaths(os.Stdout, res)
-		if err := write(*out, "paths-"+time.Now().UTC().Format("20060102-150405"), []pathsResult{res}); err != nil {
+		if err := write(*out, pathsReportName(res, time.Now()), []pathsResult{res}); err != nil {
 			fmt.Fprintf(os.Stderr, "report: %v\n", err)
 			os.Exit(1)
 		}
