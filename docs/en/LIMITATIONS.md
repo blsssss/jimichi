@@ -86,9 +86,11 @@ English | [Русский](../ru/LIMITATIONS.md)
   that bundle has expired.
 - Whoever installs a roster chooses which hosts a node polls on the info port: the node sends a
   GET for /descriptor to port -peer-info-port of every roster address when its entry is due,
-  and every 5 s for as long as the peer is missing or the entry stays due, which includes a
-  peer that still serves the descriptor it has not signed again. The addresses are IP literals
-  and DNS names only, and an answer counts only if it verifies under the roster's anchor.
+  and goes on asking, with a 5 s pause between passes, for as long as the peer is missing or the
+  entry stays due, which includes a peer that still serves the descriptor it has not signed
+  again. A pass asks such peers in turn, each within the 5 s fetch timeout, so no host is asked
+  more often than once in 5 s. The addresses are IP literals and DNS names only, and an answer
+  counts only if it verifies under the roster's anchor.
 - A link is covered by own-clock sending only if the node sending on it has the measure turned on.
   The client cannot check that the nodes of its chain do: a node without the measure carries the
   timing onwards, and the protection is gone on its outgoing links.
