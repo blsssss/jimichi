@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -145,64 +146,82 @@ func variantSet(name string) []variant {
 }
 
 func main() {
-	flows := flag.Int("flows", 6, "concurrent flows")
-	hops := flag.Int("hops", 3, "relays in the chain")
-	duration := flag.Duration("duration", 20*time.Second, "length of one run")
-	send := flag.Duration("send", 200*time.Millisecond, "mean gap between messages of one flow")
-	binList := flag.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
-	repeats := flag.Int("repeats", 1, "runs per configuration")
-	out := flag.String("out", "artifacts", "directory for the json report")
-	set := flag.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic")
-	rev := flag.String("rev", "unknown", "code revision recorded in every row")
-	seed := flag.Int64("seed", 1, "base seed; every repeat derives its own from it")
-	suiteName := flag.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
-	nodes := flag.Int("nodes", 5, "paths set: nodes a chain of -hops is drawn from")
-	rogue := flag.Int("rogue", 2, "paths set: how many of -nodes the adversary holds")
-	samples := flag.Int("samples", 100000, "paths set: chains to draw")
-	flag.Parse()
+	os.Exit(command(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func command(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("lab", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	flows := fs.Int("flows", 6, "concurrent flows")
+	hops := fs.Int("hops", 3, "relays in the chain")
+	duration := fs.Duration("duration", 20*time.Second, "length of one run")
+	send := fs.Duration("send", 200*time.Millisecond, "mean gap between messages of one flow")
+	binList := fs.String("bins", "100ms", "comma-separated observation windows, each scored on the same runs")
+	repeats := fs.Int("repeats", 1, "runs per configuration")
+	out := fs.String("out", "artifacts", "directory for the json report")
+	set := fs.String("set", "main", "main: cover strategies, rates: constant rate at several speeds, paced: relays on their own clocks, paths: the choice of a chain among -nodes with -rogue of them rogue, no traffic")
+	rev := fs.String("rev", "unknown", "code revision recorded in every row")
+	seed := fs.Int64("seed", 1, "base seed; every repeat derives its own from it")
+	suiteName := fs.String("suite", "c25519", "primitive suite for every node and client: gost or c25519")
+	nodes := fs.Int("nodes", 5, "paths set: nodes a chain of -hops is drawn from")
+	rogue := fs.Int("rogue", 2, "paths set: how many of -nodes the adversary holds")
+	samples := fs.Int("samples", 100000, "paths set: attempts to draw a chain")
+	missing := fs.Int("missing", 1, "paths set: listed nodes the client lets an entry leave out of its mirror, as -missing of the client")
+	leftOut := fs.Int("leftout", 0, "paths set: honest nodes a rogue entry leaves out of its mirror")
+	withhold := fs.Int("withhold", 0, "paths set: rogue nodes that keep their descriptors from the honest nodes")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
 
 	if *set == "paths" {
 		if *rev == "unknown" {
-			fmt.Fprintln(os.Stderr, "warning: no -rev given, rows cannot be traced to a revision")
+			fmt.Fprintln(stderr, "warning: no -rev given, rows cannot be traced to a revision")
 		}
-		res, err := samplePaths(*nodes, *hops, *rogue, *samples, *seed)
+		res, err := samplePaths(pathsConfig{
+			nodes: *nodes, hops: *hops, rogue: *rogue,
+			missing: *missing, leftOut: *leftOut, withheld: *withhold,
+			samples: *samples, seed: *seed,
+		})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
+			fmt.Fprintln(stderr, err)
+			return 2
 		}
 		res.Rev = *rev
-		printPaths(os.Stdout, res)
-		if err := write(*out, "paths-"+time.Now().UTC().Format("20060102-150405"), []pathsResult{res}); err != nil {
-			fmt.Fprintf(os.Stderr, "report: %v\n", err)
-			os.Exit(1)
+		printPaths(stdout, res)
+		if err := write(stdout, *out, pathsReportName(res, time.Now()), []pathsResult{res}); err != nil {
+			fmt.Fprintf(stderr, "report: %v\n", err)
+			return 1
 		}
-		return
+		return 0
 	}
 
 	if *flows < 2 || *hops < 2 {
-		fmt.Fprintln(os.Stderr, "need at least 2 flows and 2 hops: the attack pairs flows seen before and after a relay")
-		os.Exit(2)
+		fmt.Fprintln(stderr, "need at least 2 flows and 2 hops: the attack pairs flows seen before and after a relay")
+		return 2
 	}
 	if *rev == "unknown" {
-		fmt.Fprintln(os.Stderr, "warning: no -rev given, rows cannot be traced to a revision")
+		fmt.Fprintln(stderr, "warning: no -rev given, rows cannot be traced to a revision")
 	}
 
 	chosen, err := suite.Parse(*suiteName)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, err)
+		return 2
 	}
 	bins, err := parseBins(*binList)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bins: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "bins: %v\n", err)
+		return 2
 	}
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	details := make([]detail, 0)
 	variants := variantSet(*set)
 	results := make([]result, 0, len(variants)*(*repeats)*len(bins))
-	fmt.Printf("%-11s %6s %6s %11s %8s %24s %7s %6s %7s %9s %9s\n",
+	fmt.Fprintf(stdout, "%-11s %6s %6s %11s %8s %24s %7s %6s %7s %9s %9s\n",
 		"traffic", "bin", "cells", "multiplier", "relay-x", "auc [95% ci]", "tpr@1%", "top1", "drops", "p50", "p95")
 
 	for _, v := range variants {
@@ -218,12 +237,12 @@ func main() {
 			before := loadavg()
 			run, err := lab.Execute(cfg)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "run failed: %v\n", err)
-				os.Exit(1)
+				fmt.Fprintf(stderr, "run failed: %v\n", err)
+				return 1
 			}
 			if run.Sent == 0 {
-				fmt.Fprintf(os.Stderr, "%s: no message was sent, nothing to score\n", v.label)
-				os.Exit(1)
+				fmt.Fprintf(stderr, "%s: no message was sent, nothing to score\n", v.label)
+				return 1
 			}
 			after := loadavg()
 			closed := 0
@@ -233,7 +252,7 @@ func main() {
 				}
 			}
 			if run.RelayBroken > 0 || run.BrokenFlows > 0 || closed > 0 {
-				fmt.Fprintf(os.Stderr, "%s: relays closed %d circuits, clients %d, and %d flows saw their circuit close during the run\n",
+				fmt.Fprintf(stderr, "%s: relays closed %d circuits, clients %d, and %d flows saw their circuit close during the run\n",
 					v.label, run.RelayBroken, run.BrokenFlows, closed)
 			}
 			for _, bin := range bins {
@@ -245,7 +264,7 @@ func main() {
 				if r == 0 {
 					details = append(details, d)
 				}
-				fmt.Printf("%-11s %6s %6d %11.2f %8.2f     %.3f [%.3f, %.3f] %7.3f %6.3f %7.3f %9s %9s\n",
+				fmt.Fprintf(stdout, "%-11s %6s %6d %11.2f %8.2f     %.3f [%.3f, %.3f] %7.3f %6.3f %7.3f %9s %9s\n",
 					res.Traffic, res.Bin, res.Cells, res.Multiplier, res.RelayMultiplier,
 					res.AUC, res.AUCLow, res.AUCHigh, res.TPR, res.TopOne,
 					res.DropRate, res.P50, res.P95)
@@ -253,20 +272,21 @@ func main() {
 		}
 	}
 
-	if err := write(*out, "detail-"+*set+"-"+stamp, details); err != nil {
-		fmt.Fprintf(os.Stderr, "detail: %v\n", err)
-		os.Exit(1)
+	if err := write(stdout, *out, "detail-"+*set+"-"+stamp, details); err != nil {
+		fmt.Fprintf(stderr, "detail: %v\n", err)
+		return 1
 	}
-	if err := write(*out, "correlation-"+*set+"-"+stamp, results); err != nil {
-		fmt.Fprintf(os.Stderr, "report: %v\n", err)
-		os.Exit(1)
+	if err := write(stdout, *out, "correlation-"+*set+"-"+stamp, results); err != nil {
+		fmt.Fprintf(stderr, "report: %v\n", err)
+		return 1
 	}
 	sum := summarise(results)
-	printSummary(os.Stdout, sum)
-	if err := write(*out, "summary-"+*set+"-"+stamp, sum); err != nil {
-		fmt.Fprintf(os.Stderr, "summary: %v\n", err)
-		os.Exit(1)
+	printSummary(stdout, sum)
+	if err := write(stdout, *out, "summary-"+*set+"-"+stamp, sum); err != nil {
+		fmt.Fprintf(stderr, "summary: %v\n", err)
+		return 1
 	}
+	return 0
 }
 
 // runs of one configuration at one window, reduced to the median and the range
@@ -543,7 +563,7 @@ func modeName(m client.Mode) string {
 	return "immediate"
 }
 
-func write(dir, base string, v any) error {
+func write(stdout io.Writer, dir, base string, v any) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -558,6 +578,6 @@ func write(dir, base string, v any) error {
 	if err := enc.Encode(v); err != nil {
 		return err
 	}
-	fmt.Printf("\nreport: %s\n", name)
+	fmt.Fprintf(stdout, "\nreport: %s\n", name)
 	return nil
 }

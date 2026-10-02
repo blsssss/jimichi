@@ -58,13 +58,17 @@ English | [Русский](../ru/LIMITATIONS.md)
   the rest. On the testbed (five nodes, chains of three, two rogue nodes) both ends of a chain
   are rogue with probability 2/5 x 1/4 = 0.1 when no node is left out, and 2/5 x 1/3 = 2/15 when
   a rogue entry leaves out one honest node: the exit is then drawn among three nodes, one of them
-  rogue. The entry also sees when a client prepares a circuit: the request for the descriptors
-  precedes the setup.
-- A node that withholds its descriptor from the others removes itself from their mirrors. When
-  more nodes do so than -missing allows, the mirrors of honest nodes no longer satisfy a client
-  and only the mirrors of the withholding nodes do, so -missing has to be at least the number of
-  nodes assumed to misbehave, and a larger value gives a rogue entry more room to steer. There is
-  no directory signed by several parties that would settle which nodes exist.
+  rogue. Both values are computed and sampled (EXPERIMENT, block 3). The entry also sees when a
+  client prepares a circuit: the request for the descriptors precedes the setup.
+- A node that withholds its descriptor from the others removes itself from their mirrors, and
+  they extend no circuit to it. When more nodes do so than -missing allows, the mirrors of honest
+  nodes no longer satisfy a client and only the mirrors of the withholding nodes do: with two
+  such nodes of five and -missing 1 three attempts of five are refused, one in ten chooses a
+  chain that fails at setup, with an honest node before the other withholding node, and every
+  chain that comes up enters through one of the two and ends at an honest node (EXPERIMENT,
+  block 3). So -missing has to be at least the number of nodes assumed to misbehave, and a
+  larger value gives a rogue entry more room to steer. There is no directory signed by several
+  parties that would settle which nodes exist.
 - A node can serve a different validly signed onion key to each of the other nodes. The key that
   opens a setup cell then tells it whose mirror the client used, so a rogue exit can learn the
   entry of a circuit and with it the whole chain of three.
@@ -213,8 +217,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   certify an identity of their own for any name and address and, with a position in the network,
   substitute nodes. How often a uniformly drawn chain meets such nodes is computed and sampled
   (EXPERIMENT, block 3); what they then learn from the traffic is yet to be measured in the lab
-  ([#117](https://github.com/jimichi-org/jimichi/issues/117)). Past circuits stay closed to such
-  a substitution.
+  ([#117](https://github.com/jimichi-org/jimichi/issues/117)), and so is what it costs them to
+  keep the pairs of honest nodes busy and how far that raises the share of chains their nodes
+  hold ([#125](https://github.com/jimichi-org/jimichi/issues/125),
+  the node limits below). Past circuits stay closed to such a substitution.
 - Nodes publish their descriptors themselves and there is no directory: a node can show
   different keys to different roster nodes, and so to the clients of different entries.
 - The clocks of nodes and clients must agree within 2 minutes (the Skew allowance). kind nodes run
@@ -237,6 +243,23 @@ English | [Русский](../ru/LIMITATIONS.md)
   with bursts of 10. One client can use it up for every other client whose chain crosses the
   same two nodes in the same order. The testbed runs one client, so the allowance does not bind
   there.
+- One address can keep several such ordered pairs of nodes busy at once. Its own allowance is
+  counted at every node separately, so it has the whole of it at each node it enters through.
+  The length of its chains is its own choice, not -hops of the clients: a node checks only that
+  its own place in a chain is below 8, and the setup cell holds four hops on c25519 and three on
+  GOST, so one chain crosses up to three ordered pairs on c25519 and two on GOST. Its 32
+  circuits held open through the same nodes in the same order fill the link allowance of every
+  pair on that path; or one setup every 5 s along the same path spends the setup allowance of
+  those pairs as fast as it refills. On an otherwise idle network that is, through N entries, up
+  to 3N of the N(N - 1) ordered pairs on c25519 and 2N on GOST: 15 and 10 of 20 with five nodes.
+  Where the circuits of other clients already take part of a pair's allowance, the address only
+  tops it up and can split its own allowance at one entry over several paths, so it keeps more
+  pairs busy than that. A chain that crosses a busy pair fails at setup, and the client exits
+  and draws another, so the address influences which chains survive. A holder of the CA key with
+  rogue nodes in the roster can keep the pairs between honest nodes busy and leave the pairs
+  through its own nodes free. What that costs in addresses and circuits, and how far it raises
+  the share of surviving chains the rogue nodes hold, is not measured: the measurement is
+  planned (EXPERIMENT, block 3, [#125](https://github.com/jimichi-org/jimichi/issues/125)).
 - A circuit is torn down after the idle timeout and after its lifetime. The client does not
   rebuild it: the client process exits and builds a new circuit at its next start, on the testbed
   when the orchestrator restarts the pod. The moment depends only on the node parameters and the
