@@ -71,8 +71,12 @@ func BenchmarkNewContext(b *testing.B) {
 			b.Fatal(err)
 		}
 		priv.Release()
+		// written out: setupContext calls b.Helper, whose cost would be timed with
+		// the hash and is not small next to SHA-256 over 120 bytes
 		for b.Loop() {
-			setupContext(b, p, pub)
+			if _, err := jcrypto.NewContext(p, "setup", []byte{2}, []byte{0}, make([]byte, 8), pub, pub); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 }

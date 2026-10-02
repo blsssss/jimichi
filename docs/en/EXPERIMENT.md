@@ -294,8 +294,9 @@ hold. It will be reported as a measured boundary, not passed over.
 ### Block 6. Performance and primitive cost
 
 Status: partly implemented. go test -bench covers key generation, key agreement, signing,
-verification and one AEAD layer of a cell on both suites (crypto/suite) and sealing a cell and
-layer stripping on c25519 (wire). The lab reports round-trip latency for chains of two and more
+verification, one AEAD layer of a cell, the transcript hash, the derivation of the hop keys and
+the chaining of two agreements on both suites (crypto/suite) and sealing a cell and layer
+stripping on c25519 (wire). The lab reports round-trip latency for chains of two and more
 nodes. Planned ([#118](https://github.com/jimichi-org/jimichi/issues/118)): the setup benchmark
 at a node with one and two onion keys, node throughput at saturation, goodput per client, latency
 for a chain of one node (the lab takes no fewer than two hops) and the cost of memory locking (the
@@ -314,8 +315,9 @@ The binding of every derived key to the transcript, the suite and the scheme ver
 switch, like the setup replay tag and the link confirmation frame: a build without it would be a
 second key schedule, that is, a downgrade path. No block measures its contribution. The
 benchmarks of crypto/suite time its parts apart: the hash of a setup transcript
-(BenchmarkNewContext; a client makes one per hop, a node one per onion key it holds, each side of
-a link one per handshake), the agreement under a context (BenchmarkAgree), the five values a hop
+(BenchmarkNewContext; a client makes one per hop, a node one per onion key it holds; a link
+handshake hashes a transcript of its own, of another length, which is not timed apart), the
+agreement under a context (BenchmarkAgree), the five values a hop
 derives after the agreement: the setup key, the cell key, the replay tag and the two counter
 offsets (BenchmarkDeriveHopKeys), and the chaining of two agreements on an authenticated link
 (BenchmarkMixKey). Release v0.2.0, the last one without the binding, has only the agreement
