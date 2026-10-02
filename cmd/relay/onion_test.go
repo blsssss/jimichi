@@ -993,8 +993,8 @@ func TestRotatingNodeReleasesItsKeys(t *testing.T) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.keys) != 4 {
-		t.Fatalf("%d keys made, want the static, the onion and the identity key and the one of the key pair check", len(p.keys))
+	if len(p.keys) != 5 {
+		t.Fatalf("%d keys made, want the static, the onion and the identity key and one for each of the two key pair checks", len(p.keys))
 	}
 	for i, k := range p.keys {
 		if k.Bytes() != nil {

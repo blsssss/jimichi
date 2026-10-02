@@ -1,7 +1,9 @@
 package relay_test
 
 import (
+	"bytes"
 	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -539,48 +541,137 @@ func TestRingReleasesEveryBuffer(t *testing.T) {
 }
 
 func TestRingRefusesABadKey(t *testing.T) {
-	p := c25519.New()
-	priv, pub, err := p.GenerateEphemeral()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer priv.Release()
-	for name, c := range map[string]struct {
-		priv  *secmem.Buffer
-		pub   []byte
-		cache int
-	}{
-		"no private key":       {nil, pub, 0},
-		"short public key":     {priv, pub[1:], 0},
-		"negative cache":       {priv, pub, -1},
-		"cache over the bound": {priv, pub, relay.MaxSetupCache + 1},
-	} {
-		if _, err := relay.NewOnionRing(p, c.priv, c.pub, c.cache); err == nil {
-			t.Errorf("NewOnionRing accepted %s", name)
+	onEverySuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if priv.Bytes() == nil {
-		t.Fatal("a refused NewOnionRing released the caller's key")
-	}
+		defer priv.Release()
+		other, otherPub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Release()
+		refused := make([]byte, len(pub))
+		for name, c := range map[string]struct {
+			priv  *secmem.Buffer
+			pub   []byte
+			cache int
+			key   bool
+		}{
+			"no private key":                   {nil, pub, 0, true},
+			"short public key":                 {priv, pub[1:], 0, true},
+			"the public key of another pair":   {priv, otherPub, 0, true},
+			"a key that the agreement refuses": {priv, refused, 0, true},
+			"negative cache":                   {priv, pub, -1, false},
+			"cache over the bound":             {priv, pub, relay.MaxSetupCache + 1, false},
+		} {
+			ring, err := relay.NewOnionRing(p, c.priv, c.pub, c.cache)
+			if err == nil {
+				ring.Close()
+				t.Fatalf("NewOnionRing accepted %s", name)
+			}
+			if errors.Is(err, relay.ErrOnionKey) != c.key {
+				t.Errorf("NewOnionRing with %s = %v", name, err)
+			}
+		}
+		if priv.Bytes() == nil {
+			t.Fatal("a refused NewOnionRing released the caller's key")
+		}
 
-	ring, first := newRing(t, p, 0)
-	other, otherPub, err := p.GenerateEphemeral()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Release()
-	for name, c := range map[string]ringKey{
-		"no private key":   {nil, otherPub},
-		"short public key": {other, otherPub[1:]},
-		"the current key":  {other, first.pub},
-	} {
-		if _, err := ring.Rotate(c.priv, c.pub); !errors.Is(err, relay.ErrOnionKey) {
-			t.Errorf("Rotate with %s = %v, want %v", name, err, relay.ErrOnionKey)
+		ring, first := newRing(t, p, 0)
+		for name, c := range map[string]ringKey{
+			"no private key":                   {nil, otherPub},
+			"short public key":                 {other, otherPub[1:]},
+			"the public key of another pair":   {other, pub},
+			"a key that the agreement refuses": {other, refused},
+			"the current key":                  first,
+		} {
+			if _, err := ring.Rotate(c.priv, c.pub); !errors.Is(err, relay.ErrOnionKey) {
+				t.Errorf("Rotate with %s = %v, want %v", name, err, relay.ErrOnionKey)
+			}
 		}
-	}
-	if epoch, _ := ring.Current(); epoch != 0 || other.Bytes() == nil {
-		t.Fatalf("refused rotations moved the ring to epoch %d or released the caller's key", epoch)
-	}
+		if epoch, _ := ring.Current(); epoch != 0 || other.Bytes() == nil || first.released() {
+			t.Fatalf("refused rotations moved the ring to epoch %d or released a key", epoch)
+		}
+		if err := opens(t, p, ring, setupFor(t, p, first.pub)); err != nil {
+			t.Fatalf("a setup for the current key after the refused rotations: %v", err)
+		}
+	})
+}
+
+// the ring opens setups under the bytes it was given, whatever the caller does
+// to its slice afterwards
+func TestRingKeepsItsOwnCopyOfThePublicKey(t *testing.T) {
+	onEverySuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		holds := func(ring *relay.OnionRing, epoch uint32, published, passed []byte) {
+			t.Helper()
+			passed[0] ^= 1
+			passed[len(passed)-1] ^= 1
+			if got, pub := ring.Current(); got != epoch || !bytes.Equal(pub, published) {
+				t.Fatalf("epoch %d: the ring follows the caller's slice", got)
+			}
+			if err := opens(t, p, ring, setupFor(t, p, published)); err != nil {
+				t.Fatalf("epoch %d: a setup for the published key once the caller changed its slice: %v", epoch, err)
+			}
+		}
+
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		published := bytes.Clone(pub)
+		ring, err := relay.NewOnionRing(p, priv, pub, 0)
+		if err != nil {
+			t.Fatalf("NewOnionRing: %v", err)
+		}
+		defer ring.Close()
+		holds(ring, 0, published, pub)
+
+		priv, pub, err = p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		published = bytes.Clone(pub)
+		if _, err := ring.Rotate(priv, pub); err != nil {
+			t.Fatalf("Rotate: %v", err)
+		}
+		holds(ring, 1, published, pub)
+	})
+}
+
+// the same for the link key: the node confirms an authenticated link and, with
+// no ring of its own, opens a setup under the bytes it was started with
+func TestRelayKeepsItsOwnCopyOfThePublicKey(t *testing.T) {
+	onEverySuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer priv.Release()
+		published := bytes.Clone(pub)
+		r, err := relay.New(relay.Config{
+			Provider: p, StaticPriv: priv, StaticPub: pub,
+			Deliver: func(_ uint64, payload []byte) []byte { return payload },
+		})
+		if err != nil {
+			t.Fatalf("relay.New: %v", err)
+		}
+		pub[0] ^= 1
+		pub[len(pub)-1] ^= 1
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() { _ = r.Serve(ln) }()
+		defer func() {
+			r.Close()
+			_ = ln.Close()
+		}()
+		if !echoes(t, p, []client.Node{{Addr: ln.Addr().String(), StaticPub: published, LinkPub: published}}) {
+			t.Fatal("no round trip under the published key once the caller changed its slice")
+		}
+	})
 }
 
 // without a ring of its own a relay opens setups with the link key and leaves

@@ -353,10 +353,11 @@ Onion key epochs:
   then rotates once. A wall clock set back postpones neither moment: the running time still
   brings it. A wall clock set forwards brings both early, which costs clients a refused setup and
   no secrecy. A descriptor is always signed for the key that is current at that moment.
-- A rotation that fails, because there is no memory for the new key or its page cannot be
-  locked, leaves the published key in place. The node tries again every second and counts the
-  attempts (onion_rotate_failed). Between rotations it holds one key page and gives it back right
-  before the next key is made, so that the key finds room when locked memory is used up.
+- A rotation that fails, because there is no memory for the new key, its page cannot be
+  locked or its key pair check (CRYPTO) does not pass, leaves the published key in place. The
+  node tries again every second and counts the attempts (onion_rotate_failed). Between rotations
+  it holds four key pages and gives them back right before the next key is made, so that the key
+  and its pair check find room when locked memory is used up.
 - A circuit that is already built does not notice a rotation: its cell keys come from its setup
   and live until the circuit is torn down.
 - -onion-rotate 0 is the measurement baseline: the link key opens the setup layers as well, for

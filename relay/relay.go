@@ -209,12 +209,12 @@ func New(cfg Config) (*Relay, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkKeyPair(cfg.Provider, cfg.StaticPriv, cfg.StaticPub); err != nil {
+	if err := checkKeyPair(cfg.Provider, cfg.StaticPriv, cfg.StaticPub, ErrStaticPair); err != nil {
 		return nil, err
 	}
 	onion := cfg.Onion
 	if onion == nil {
-		onion = staticRing(cfg.StaticPriv, cfg.StaticPub, cfg.SetupCache)
+		onion = staticRing(cfg.Provider, cfg.StaticPriv, cfg.StaticPub, cfg.SetupCache)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Relay{
@@ -232,35 +232,6 @@ func New(cfg Config) (*Relay, error) {
 	}, nil
 }
 
-// peers put StaticPub into their transcripts, so a public key that is not the
-// half of StaticPriv would leave a node that confirms no authenticated link and
-// opens no setup, with nothing but failures at its neighbours to show for it
-func checkKeyPair(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte) error {
-	ephPriv, ephPub, err := p.GenerateEphemeral()
-	if err != nil {
-		return err
-	}
-	defer ephPriv.Release()
-	ctx, err := jcrypto.NewContext(p, exchangeKeyCheck, pub, ephPub)
-	if err != nil {
-		return err
-	}
-	theirs, err := p.Agree(ephPriv, pub, ctx)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrStaticPair, err)
-	}
-	defer theirs.Release()
-	ours, err := p.Agree(priv, ephPub, ctx)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrStaticPair, err)
-	}
-	defer ours.Release()
-	if !theirs.Equal(ours) {
-		return ErrStaticPair
-	}
-	return nil
-}
-
 // bounds how long a silent next hop can hold a dial or a handshake open, so
 // neither can keep Close from reaching the keys
 const onwardTimeout = 5 * time.Second
@@ -269,9 +240,6 @@ const onwardTimeout = 5 * time.Second
 // with the map overhead, so this keeps a cache near 36 MiB and the two of a
 // node between a rotation and the release of the old key inside a 128 MiB pod
 const MaxSetupCache = 1 << 20
-
-// no key leaves the check, so its secrets share an exchange with nothing else
-const exchangeKeyCheck = "relay/keycheck"
 
 var (
 	ErrStaticPubSize = errors.New("relay: static public key of the wrong size")

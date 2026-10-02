@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -54,9 +55,9 @@ type onionKeys struct {
 	rotateAt deadline
 	// not pending while no replaced key is held
 	retireAt deadline
-	// a key page held between rotations and given back right before the next
-	// key is made, so that key finds room when the locked memory is used up;
-	// nothing keeps another allocation from taking the room in between
+	// pages held between rotations and given back right before the next key is
+	// made, so the key and its pair check find room when the locked memory is
+	// used up; nothing keeps another allocation from taking the room in between
 	reserve *secmem.Buffer
 	closed  bool
 	// the last failure, so one that repeats every second is one line
@@ -84,9 +85,13 @@ func newOnionKeys(ring *relay.OnionRing, every, ttl time.Duration, lock bool, no
 	return o
 }
 
-// best effort: without the page the next key is made all the same
+// the new key, the one-time key of its pair check and the two secrets the check
+// compares
+const rotationPages = 4
+
+// best effort: without the pages the next key is made all the same
 func (o *onionKeys) hold() {
-	if b, err := secmem.New(1); err == nil {
+	if b, err := secmem.New(rotationPages * os.Getpagesize()); err == nil {
 		o.reserve = b
 	}
 }

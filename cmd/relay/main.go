@@ -310,7 +310,7 @@ func splitList(s string) []string {
 }
 
 // a setup holds a handful of key pages at once, the static and identity keys
-// one more each, and a rotating node two onion keys, the page it keeps for the
+// one more each, and a rotating node two onion keys, the pages it keeps for the
 // next one and one more page per setup while both keys are tried; below this
 // the node would start and then fail its first circuits
 const minMemlock = 64 << 10

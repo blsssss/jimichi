@@ -220,14 +220,16 @@ Link, both agreements under one context:
 The frame keys: DeriveKey with `link/i2r` and `link/r2i`. The responder's first frame confirms
 the whole transcript: if a single byte of it differs between the sides, the frame does not open.
 
-The key pair check at node start, exchange `relay/keycheck`: the node generates a one-time pair
-and, under a context made of its published link key and the one-time public key, agrees a secret
-from both sides. The two secrets must be equal; no key is derived from them and both are released
-at once. A node whose published key does not agree with its private key (the public key of
-another pair, or one the agreement refuses) does not start:
-it would otherwise confirm no authenticated link and, without -onion-rotate, where the link key
-also serves as the onion key, open no setup. The pairs of the onion key ring are not checked this
-way.
+The key pair check, exchange `relay/keycheck`: the node generates a one-time pair and, under a
+context made of the public key being checked and the one-time public key, agrees a secret from
+both sides. The two secrets must be equal; no key is derived from them and both are released at
+once. The link key is checked at node start, every onion key before the ring takes it: the first
+one at start, the next ones at each rotation. A node whose published link key does not agree with
+its private key (the public key of another pair, or one the agreement refuses) does not start:
+it would otherwise confirm no authenticated link and, with -onion-rotate 0, where the link key
+also serves as the onion key, open no setup. An onion pair that does not agree is refused the
+same way, since the node would open no setup under it: at start the node does not run, at a
+rotation the published key stays in place and the attempt is counted as a failed rotation.
 
 ### Rules for changes
 
@@ -319,8 +321,9 @@ and has no primitives of its own.
   with -harden=false and a -keymem without lock.
 - In a container mlock is bounded by RLIMIT_MEMLOCK. A node checks the budget at start and refuses
   to run below 64 KiB, or when locking was asked for and failed. A rotating node holds one locked
-  page per onion key, two at most, and one more that it gives back right before it makes the
-  next key. It does not take a new onion key whose page is not locked.
+  page per onion key, two at most, and four more that it gives back right before it makes the
+  next key: one for the key, three for its key pair check. It does not take a new onion key whose
+  page is not locked.
 - Every measure is switched by configuration, so its contribution can be measured:
 
 | Flag | What it turns on |
@@ -372,10 +375,10 @@ some of them live long:
 |---|---|---|
 | x/crypto chacha20poly1305 | the AEAD working key, copied into the cipher struct | the whole life of the circuit or link, never wiped; building the AEAD state per call from the secmem key is planned ([#39](https://github.com/jimichi-org/jimichi/issues/39)) |
 | crypto/ecdh | the X25519 scalar, the node's link and onion keys included, and the shared secret | until the freed heap memory is reused, which can be after the onion key itself was released |
-| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block | until the heap memory is reused; the provider zeroes its own copy of the PRK |
+| x/crypto hkdf, crypto/hmac | the HMAC pads (key XOR a constant) holding the PRK, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key; the SHA-256 state holding the X25519 shared secret and the second secret of MixKey; the last derived block | until the heap memory is reused; the provider zeroes its own copy of the PRK unless zeroing is off (-keymem none or a list without zero) |
 | Ed25519 generation and signing | the SHA-512 state with the seed or the nonce prefix, a copy of the scalar in edwards25519 | until the heap memory is reused; generation and signing always wipe their own scalars and digests, -keymem none included |
 | gogost, Kuznyechik | the round keys in the cipher struct, the first two being the key itself | the whole life of the circuit or link; Destroy wipes them unless zeroing is off (-keymem none or a list without zero) |
-| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK and of every Agree, MixKey and DeriveKey output | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and zeroes the slices the library returns, not the buffers inside it |
+| gogost, KDF | the HMAC-Streebog pads holding the VKO secret, the circuit secret, the link secret (ee or the MixKey output) and the MixKey chain key; the Streebog message buffer holding the second secret of MixKey; the last block Streebog computed, kept in the working buffer of the hash and in a temporary block after Sum, half of which is the output: a copy of the KEK and of every Agree, MixKey and DeriveKey output | until the heap memory is reused; the provider assembles the MixKey seed in a secmem buffer and, unless zeroing is off (-keymem none or a list without zero), zeroes the slices the library returns, not the buffers inside it |
 | gogost, GOST R 34.10 and VKO | the scalar as math/big and intermediate points, the node's link and onion keys included | until the heap memory is reused, which can be after the onion key itself was released; the provider wipes the number unless zeroing is off (-keymem none or a list without zero), never the copies made inside the computation |
 | gogost, GOST R 34.10 signing | the CA or node signing scalar and the one-time number k as math/big, intermediate points; k and the signature give back the key | until the heap memory is reused; the copies reappear at every signature: the request, the certificate, every descriptor refresh |
 
