@@ -174,7 +174,7 @@ of the node, not measured as a share.
 | Middle and one edge node | the same, for comparison |
 | Inserted node with a valid certificate | fraction of intercepted sessions, fraction decrypted |
 | Choice of the chain with k rogue nodes among N | share of chains with a rogue entry and exit and share of chains with a rogue node, over the chains that come up among those drawn with the client's own choice, against the values the model gives: with full mirrors, with rogue entries that leave honest nodes out of their mirrors, and with rogue nodes that withhold their descriptors |
-| Ordered pairs of nodes kept busy from one address (planned) | share of the surviving chains with a rogue entry and exit and with a rogue node, against the addresses and circuits the adversary spends (LIMITATIONS, node limits) |
+| Ordered pairs of nodes kept busy from one address (planned, [#125](https://github.com/jimichi-org/jimichi/issues/125)) | share of the surviving chains with a rogue entry and exit and with a rogue node, against the addresses and circuits the adversary spends (LIMITATIONS, node limits) |
 | Replay and tampering | share of replayed, reordered or altered cells that go no further than the first node that sees them (a cell out of turn closes the circuit, an altered one is dropped), one hundred percent expected |
 
 The block is to conclude which share of the chain must be compromised to destroy the property,

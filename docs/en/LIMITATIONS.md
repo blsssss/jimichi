@@ -213,7 +213,8 @@ English | [Русский](../ru/LIMITATIONS.md)
   (EXPERIMENT, block 3); what they then learn from the traffic is yet to be measured in the lab
   ([#117](https://github.com/jimichi-org/jimichi/issues/117)), and so is what it costs them to
   keep the pairs of honest nodes busy and how far that raises the share of chains their nodes
-  hold (the node limits below). Past circuits stay closed to such a substitution.
+  hold ([#125](https://github.com/jimichi-org/jimichi/issues/125),
+  the node limits below). Past circuits stay closed to such a substitution.
 - Nodes publish their descriptors themselves and there is no directory: a node can show
   different keys to different roster nodes, and so to the clients of different entries.
 - The clocks of nodes and clients must agree within 2 minutes (the Skew allowance). kind nodes run
@@ -252,7 +253,7 @@ English | [Русский](../ru/LIMITATIONS.md)
   rogue nodes in the roster can keep the pairs between honest nodes busy and leave the pairs
   through its own nodes free. What that costs in addresses and circuits, and how far it raises
   the share of surviving chains the rogue nodes hold, is not measured: the measurement is
-  planned (EXPERIMENT, block 3, [#117](https://github.com/jimichi-org/jimichi/issues/117)).
+  planned (EXPERIMENT, block 3, [#125](https://github.com/jimichi-org/jimichi/issues/125)).
 - A circuit is torn down after the idle timeout and after its lifetime. The client does not
   rebuild it: the client process exits and builds a new circuit at its next start, on the testbed
   when the orchestrator restarts the pod. The moment depends only on the node parameters and the
