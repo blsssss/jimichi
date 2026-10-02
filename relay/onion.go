@@ -61,10 +61,11 @@ func NewOnionRing(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, cac
 
 // the link key in the onion role as well: the relay that builds this ring
 // never rotates or closes it, so the key stays with its owner
-func staticRing(priv *secmem.Buffer, cacheSize int) *OnionRing {
+func staticRing(priv *secmem.Buffer, pub []byte, cacheSize int) *OnionRing {
 	return &OnionRing{
+		pubSize:   len(pub),
 		cacheSize: cacheSize,
-		current:   &onionKey{priv: priv, setups: wire.NewSetupCache(cacheSize)},
+		current:   &onionKey{priv: priv, pub: bytes.Clone(pub), setups: wire.NewSetupCache(cacheSize)},
 	}
 }
 
@@ -127,6 +128,8 @@ func (g *OnionRing) Current() (epoch uint32, pub []byte) {
 
 // Open tries every live key, in one order and to the end even after one has
 // opened, so the time a setup takes does not tell which epoch its client used.
+// Each key is tried under a transcript that holds its own public half, so a
+// layer built for one epoch does not open under the key of another.
 // The tag is burned on first sight whatever happens to the setup next: one that
 // fails further on must not come back later on a fresh link either
 func (g *OnionRing) Open(p jcrypto.CryptoProvider, cell *wire.Cell) (*wire.SetupLayer, error) {
@@ -144,7 +147,7 @@ func (g *OnionRing) Open(p jcrypto.CryptoProvider, cell *wire.Cell) (*wire.Setup
 		if k == nil {
 			continue
 		}
-		layer, err := wire.OpenSetup(p, k.priv, cell)
+		layer, err := wire.OpenSetup(p, k.priv, k.pub, cell)
 		switch {
 		case err != nil:
 			if refused == nil {

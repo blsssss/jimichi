@@ -3,6 +3,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,9 @@ type Deliver func(circuit uint64, payload []byte) []byte
 type Config struct {
 	Provider   jcrypto.CryptoProvider
 	StaticPriv *secmem.Buffer
+	// the public half as the node publishes it: an initiator that authenticates
+	// the link, and a client when Onion is nil, bind their keys to these bytes
+	StaticPub []byte
 	// the keys that open setup layers, closed by the caller after Close; nil
 	// keeps StaticPriv, the link key, in that role as well for the life of the
 	// node
@@ -184,6 +188,14 @@ func New(cfg Config) (*Relay, error) {
 	if cfg.StaticPriv == nil {
 		return nil, errors.New("relay: no static key")
 	}
+	pubSize, err := wire.PublicKeySize(cfg.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.StaticPub) != pubSize {
+		return nil, fmt.Errorf("relay: static public key of %d bytes, want %d", len(cfg.StaticPub), pubSize)
+	}
+	cfg.StaticPub = bytes.Clone(cfg.StaticPub)
 	if cfg.QueueCells < 0 || cfg.QueueCells > maxQueueCells {
 		return nil, fmt.Errorf("relay: queue of %d cells outside 0..%d", cfg.QueueCells, maxQueueCells)
 	}
@@ -196,7 +208,7 @@ func New(cfg Config) (*Relay, error) {
 	}
 	onion := cfg.Onion
 	if onion == nil {
-		onion = staticRing(cfg.StaticPriv, cfg.SetupCache)
+		onion = staticRing(cfg.StaticPriv, cfg.StaticPub, cfg.SetupCache)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Relay{
@@ -344,7 +356,7 @@ func (r *Relay) handle(conn net.Conn, src netip.Addr) {
 	if r.lim.handshake > 0 {
 		_ = conn.SetDeadline(time.Now().Add(r.lim.handshake))
 	}
-	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv)
+	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv, r.cfg.StaticPub)
 	r.handshakeDone(src)
 	if err != nil {
 		r.stats.timeout(err)

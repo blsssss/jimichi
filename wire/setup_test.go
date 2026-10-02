@@ -35,13 +35,18 @@ func (p *trackingProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	return p.keep(priv), pub, err
 }
 
-func (p *trackingProvider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
-	b, err := p.CryptoProvider.Agree(priv, peerPub, ukm)
+func (p *trackingProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	b, err := p.CryptoProvider.Agree(priv, peerPub, ctx)
 	return p.keep(b), err
 }
 
-func (p *trackingProvider) DeriveKey(secret *secmem.Buffer, label []byte, size int) (*secmem.Buffer, error) {
-	b, err := p.CryptoProvider.DeriveKey(secret, label, size)
+func (p *trackingProvider) MixKey(chain, secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	b, err := p.CryptoProvider.MixKey(chain, secret, ctx)
+	return p.keep(b), err
+}
+
+func (p *trackingProvider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.Context, size int) (*secmem.Buffer, error) {
+	b, err := p.CryptoProvider.DeriveKey(secret, purpose, ctx, size)
 	return p.keep(b), err
 }
 
@@ -103,7 +108,7 @@ func TestOpenSetupReleasesEverythingButTheCellKey(t *testing.T) {
 		t.Cleanup(k.Release)
 	}
 
-	layer, err := wire.OpenSetup(tp, privs[0], setup.Cell)
+	layer, err := wire.OpenSetup(tp, privs[0], pubs[0], setup.Cell)
 	if err != nil {
 		t.Fatalf("OpenSetup: %v", err)
 	}
@@ -179,15 +184,15 @@ func TestOpenSetupRefusesAnImpossibleHopIndex(t *testing.T) {
 	for _, counter := range []uint64{wire.MaxHops, 1 << 40, 1 << 63, ^uint64(0)} {
 		cell := *setup.Cell
 		binary.BigEndian.PutUint64(cell[10:18], counter)
-		if _, err := wire.OpenSetup(provider(), privs[0], &cell); err == nil {
+		if _, err := wire.OpenSetup(provider(), privs[0], pubs[0], &cell); err == nil {
 			t.Fatalf("OpenSetup accepted hop index %d", counter)
 		}
 	}
 }
 
-func openTag(t *testing.T, priv *secmem.Buffer, cell *wire.Cell) wire.SetupTag {
+func openTag(t *testing.T, priv *secmem.Buffer, pub []byte, cell *wire.Cell) wire.SetupTag {
 	t.Helper()
-	layer, err := wire.OpenSetup(provider(), priv, cell)
+	layer, err := wire.OpenSetup(provider(), priv, pub, cell)
 	if err != nil {
 		t.Fatalf("OpenSetup: %v", err)
 	}
@@ -208,9 +213,9 @@ func TestSetupTagIsStablePerSetup(t *testing.T) {
 			t.Cleanup(k.Release)
 		}
 		cells[i] = setup.Cell
-		tags[i] = openTag(t, privs[0], setup.Cell)
+		tags[i] = openTag(t, privs[0], pubs[0], setup.Cell)
 	}
-	if again := openTag(t, privs[0], cells[0]); again != tags[0] {
+	if again := openTag(t, privs[0], pubs[0], cells[0]); again != tags[0] {
 		t.Fatal("one setup opened twice gave two tags")
 	}
 	if tags[0] == tags[1] {
@@ -218,9 +223,10 @@ func TestSetupTagIsStablePerSetup(t *testing.T) {
 	}
 }
 
-// X25519 drops the top bit of a point, so a copy with that bit flipped opens
-// the same layer; a tag taken from the wire bytes would let it through
-func TestSetupTagSurvivesAnotherEncodingOfTheKey(t *testing.T) {
+// an exact copy of a setup opens again under the same tag, which the cache
+// then refuses; a copy changed in the way change says must not open at all
+func refusesChangedCopy(t *testing.T, change func(cell *wire.Cell, at, pubLen int)) {
+	t.Helper()
 	privs, pubs := staticKeys(t, provider(), hops)
 	setup, err := wire.BuildSetup(provider(), chainTo(pubs))
 	if err != nil {
@@ -229,14 +235,31 @@ func TestSetupTagSurvivesAnotherEncodingOfTheKey(t *testing.T) {
 	for _, k := range setup.CellKeys {
 		t.Cleanup(k.Release)
 	}
-	want := openTag(t, privs[0], setup.Cell)
-
-	flipped := *setup.Cell
-	pubLen := len(pubs[0])
-	flipped[wire.CellSize-wire.BodySize+pubLen-1] ^= 0x80
-	if got := openTag(t, privs[0], &flipped); got != want {
-		t.Fatal("another encoding of the same key gave another tag")
+	cache := wire.NewSetupCache(0)
+	if err := cache.Add(openTag(t, privs[0], pubs[0], setup.Cell)); err != nil {
+		t.Fatalf("first copy: %v", err)
 	}
+	same := *setup.Cell
+	if err := cache.Add(openTag(t, privs[0], pubs[0], &same)); !errors.Is(err, wire.ErrSetupReplay) {
+		t.Fatalf("exact copy: %v, want ErrSetupReplay", err)
+	}
+
+	changed := *setup.Cell
+	change(&changed, wire.CellSize-wire.BodySize, len(pubs[0]))
+	if changed == *setup.Cell {
+		t.Fatal("the copy was not changed")
+	}
+	if _, err := wire.OpenSetup(provider(), privs[0], pubs[0], &changed); !errors.Is(err, jcrypto.ErrOpen) {
+		t.Fatalf("changed copy: %v, want ErrOpen", err)
+	}
+}
+
+// X25519 drops the top bit of a point, so a copy with that bit flipped names
+// the same point; its bytes are in the transcript, so the layer does not open
+func TestSetupRefusesAnotherEncodingOfTheKey(t *testing.T) {
+	refusesChangedCopy(t, func(cell *wire.Cell, at, pubLen int) {
+		cell[at+pubLen-1] ^= 0x80
+	})
 }
 
 func TestSetupCache(t *testing.T) {
@@ -261,30 +284,77 @@ func TestSetupCache(t *testing.T) {
 }
 
 // adding the point of order two maps u to 1/u, and the clamped X25519 scalar is
-// a multiple of eight, so this is one more key with the same secret
-func TestSetupTagSurvivesASmallOrderShift(t *testing.T) {
-	privs, pubs := staticKeys(t, provider(), hops)
-	setup, err := wire.BuildSetup(provider(), chainTo(pubs))
-	if err != nil {
-		t.Fatalf("BuildSetup: %v", err)
-	}
-	for _, k := range setup.CellKeys {
-		t.Cleanup(k.Release)
-	}
-	want := openTag(t, privs[0], setup.Cell)
+// a multiple of eight, so this is one more key with the same X25519 output; the
+// transcript holds other bytes, so the layer does not open
+func TestSetupRefusesASmallOrderShift(t *testing.T) {
+	refusesChangedCopy(t, func(cell *wire.Cell, at, pubLen int) {
+		u := new(big.Int).SetBytes(reversed(cell[at : at+pubLen]))
+		prime := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(19))
+		inv := new(big.Int).ModInverse(u, prime)
+		if inv == nil {
+			t.Fatal("ephemeral key has no inverse")
+		}
+		copy(cell[at:at+pubLen], reversed(inv.FillBytes(make([]byte, pubLen))))
+	})
+}
 
-	pubLen := len(pubs[0])
-	at := wire.CellSize - wire.BodySize
-	u := new(big.Int).SetBytes(reversed(setup.Cell[at : at+pubLen]))
-	prime := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(19))
-	inv := new(big.Int).ModInverse(u, prime)
-	if inv == nil {
-		t.Fatal("ephemeral key has no inverse")
+// the onion key, the hop index and the link identifier are parts of the
+// transcript: a layer opens only at the node, the position and the link it was
+// built for
+func TestOpenSetupIsBoundToKeyIndexAndLink(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			p, err := suite.New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			privs, pubs := staticKeys(t, p, hops)
+			setup, err := wire.BuildSetup(p, chainTo(pubs))
+			if err != nil {
+				t.Fatalf("BuildSetup: %v", err)
+			}
+			for _, k := range setup.CellKeys {
+				t.Cleanup(k.Release)
+			}
+
+			// the private key is the right one, the public key named with it is not
+			if _, err := wire.OpenSetup(p, privs[0], pubs[1], setup.Cell); !errors.Is(err, jcrypto.ErrOpen) {
+				t.Fatalf("another public key of the right length: %v, want ErrOpen", err)
+			}
+			for _, pub := range [][]byte{nil, pubs[0][:len(pubs[0])-1], append(append([]byte{}, pubs[0]...), 0)} {
+				if _, err := wire.OpenSetup(p, privs[0], pub, setup.Cell); !errors.Is(err, jcrypto.ErrBadPublicKey) {
+					t.Fatalf("public key of %d bytes: %v, want ErrBadPublicKey", len(pub), err)
+				}
+			}
+
+			moved := *setup.Cell
+			binary.BigEndian.PutUint64(moved[10:18], 1)
+			if _, err := wire.OpenSetup(p, privs[0], pubs[0], &moved); !errors.Is(err, jcrypto.ErrOpen) {
+				t.Fatalf("another hop index: %v, want ErrOpen", err)
+			}
+			relinked := *setup.Cell
+			binary.BigEndian.PutUint64(relinked[2:10], 201)
+			if _, err := wire.OpenSetup(p, privs[0], pubs[0], &relinked); !errors.Is(err, jcrypto.ErrOpen) {
+				t.Fatalf("another link identifier: %v, want ErrOpen", err)
+			}
+
+			layer, err := wire.OpenSetup(p, privs[0], pubs[0], setup.Cell)
+			if err != nil {
+				t.Fatalf("the unchanged cell: %v", err)
+			}
+			layer.CellKey.Release()
+		})
 	}
-	shifted := *setup.Cell
-	copy(shifted[at:at+pubLen], reversed(inv.FillBytes(make([]byte, pubLen))))
-	if got := openTag(t, privs[0], &shifted); got != want {
-		t.Fatal("a key shifted by a point of small order gave another tag")
+}
+
+func TestBuildSetupRefusesAKeyOfAnotherLength(t *testing.T) {
+	_, pubs := staticKeys(t, provider(), hops)
+	for _, pub := range [][]byte{nil, pubs[1][:31], append(append([]byte{}, pubs[1]...), 0)} {
+		chain := chainTo(pubs)
+		chain[1].StaticPub = pub
+		if _, err := wire.BuildSetup(provider(), chain); !errors.Is(err, jcrypto.ErrBadPublicKey) {
+			t.Fatalf("hop key of %d bytes: %v, want ErrBadPublicKey", len(pub), err)
+		}
 	}
 }
 
@@ -375,7 +445,7 @@ func TestMaxLayersIsWhatASetupCellCarries(t *testing.T) {
 			}
 			cell := setup.Cell
 			for i := 0; i < n; i++ {
-				layer, err := wire.OpenSetup(p, privs[i], cell)
+				layer, err := wire.OpenSetup(p, privs[i], pubs[i], cell)
 				if err != nil {
 					t.Fatalf("OpenSetup %d of %d: %v", i, n, err)
 				}
@@ -416,7 +486,7 @@ func TestSetupHandsBothSidesTheSameOffsets(t *testing.T) {
 			}
 			cell := setup.Cell
 			for i := 0; i < hops; i++ {
-				layer, err := wire.OpenSetup(p, privs[i], cell)
+				layer, err := wire.OpenSetup(p, privs[i], pubs[i], cell)
 				if err != nil {
 					t.Fatalf("OpenSetup %d: %v", i, err)
 				}

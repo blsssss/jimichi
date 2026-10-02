@@ -18,10 +18,10 @@ const cellLimit = uint64(1) << 60
 // same counter value
 type Offsets [2]uint64
 
-func deriveOffsets(p jcrypto.CryptoProvider, secret *secmem.Buffer) (Offsets, error) {
+func deriveOffsets(p jcrypto.CryptoProvider, secret *secmem.Buffer, ctx jcrypto.Context) (Offsets, error) {
 	var out Offsets
-	for dir, label := range [...]string{Forward: LabelCounterForward, Backward: LabelCounterBackward} {
-		b, err := p.DeriveKey(secret, []byte(label), 8)
+	for dir, purpose := range [...]string{Forward: purposeCounterForward, Backward: purposeCounterBackward} {
+		b, err := p.DeriveKey(secret, purpose, ctx, 8)
 		if err != nil {
 			return Offsets{}, err
 		}

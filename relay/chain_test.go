@@ -41,7 +41,7 @@ func startRelay(t *testing.T, p jcrypto.CryptoProvider, cfg relay.Config) *node 
 	}
 	t.Cleanup(priv.Release)
 
-	cfg.Provider, cfg.StaticPriv = p, priv
+	cfg.Provider, cfg.StaticPriv, cfg.StaticPub = p, priv, pub
 	r, err := relay.New(cfg)
 	if err != nil {
 		t.Fatalf("relay.New: %v", err)
@@ -548,13 +548,13 @@ func TestSecondCircuitOnOneLinkIsRefused(t *testing.T) {
 
 func TestQueueSizeIsBounded(t *testing.T) {
 	p := c25519.New()
-	priv, _, err := p.GenerateEphemeral()
+	priv, pub, err := p.GenerateEphemeral()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer priv.Release()
 	for _, n := range []int{-1, 4097} {
-		if _, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, QueueCells: n}); err == nil {
+		if _, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub, QueueCells: n}); err == nil {
 			t.Fatalf("relay.New accepted a queue of %d cells", n)
 		}
 	}
@@ -1058,13 +1058,13 @@ func TestFullSetupCacheRefusesNewCircuits(t *testing.T) {
 
 func TestSetupCacheSizeIsBounded(t *testing.T) {
 	p := c25519.New()
-	priv, _, err := p.GenerateEphemeral()
+	priv, pub, err := p.GenerateEphemeral()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer priv.Release()
 	for _, size := range []int{-1, relay.MaxSetupCache + 1} {
-		if _, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, SetupCache: size}); err == nil {
+		if _, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub, SetupCache: size}); err == nil {
 			t.Fatalf("relay.New accepted a setup cache of %d", size)
 		}
 	}
@@ -1109,7 +1109,7 @@ func TestForwardedSetupReplayIsRefusedByTheMiddle(t *testing.T) {
 			k.Release()
 		}
 	}()
-	layer, err := wire.OpenSetup(p, entryPriv, setup.Cell)
+	layer, err := wire.OpenSetup(p, entryPriv, entryPub, setup.Cell)
 	if err != nil {
 		t.Fatalf("OpenSetup: %v", err)
 	}
@@ -1257,7 +1257,7 @@ func TestFailedSetupCannotComeBack(t *testing.T) {
 			k.Release()
 		}
 	}()
-	layer, err := wire.OpenSetup(p, entryPriv, setup.Cell)
+	layer, err := wire.OpenSetup(p, entryPriv, entryPub, setup.Cell)
 	if err != nil {
 		t.Fatalf("OpenSetup: %v", err)
 	}
@@ -1324,7 +1324,7 @@ func (lt *linkTap) dial(ctx context.Context, network, addr string) (net.Conn, er
 }
 
 func (lt *linkTap) run(far, up net.Conn) {
-	in, err := link.Accept(far, lt.p, nil)
+	in, err := link.Accept(far, lt.p, nil, nil)
 	if err != nil {
 		_ = far.Close()
 		_ = up.Close()
@@ -1733,7 +1733,7 @@ func startScriptedExit(t *testing.T, p jcrypto.CryptoProvider) *scriptedExit {
 		if err != nil {
 			return
 		}
-		conn, err := link.Accept(raw, p, nil)
+		conn, err := link.Accept(raw, p, nil, nil)
 		if err != nil {
 			_ = raw.Close()
 			return
@@ -1748,7 +1748,7 @@ func startScriptedExit(t *testing.T, p jcrypto.CryptoProvider) *scriptedExit {
 			_ = conn.Close()
 			return
 		}
-		layer, err := wire.OpenSetup(p, priv, &cell)
+		layer, err := wire.OpenSetup(p, priv, pub, &cell)
 		if err != nil {
 			_ = conn.Close()
 			return

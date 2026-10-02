@@ -17,7 +17,7 @@ import (
 func pacedPipe(t *testing.T, period time.Duration, size int) (*pacer, net.Conn, *Stats) {
 	t.Helper()
 	p := c25519.New()
-	priv, _, err := p.GenerateEphemeral()
+	priv, pub, err := p.GenerateEphemeral()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func pacedPipe(t *testing.T, period time.Duration, size int) (*pacer, net.Conn, 
 	a, b := net.Pipe()
 	accepted := make(chan error, 1)
 	go func() {
-		_, err := link.Accept(b, p, priv)
+		_, err := link.Accept(b, p, priv, pub)
 		accepted <- err
 	}()
 	out, err := link.Dial(a, p, nil)

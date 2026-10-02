@@ -197,9 +197,9 @@ type workProvider struct {
 	agreed, tried atomic.Int64
 }
 
-func (w *workProvider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
+func (w *workProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	w.agreed.Add(1)
-	return w.CryptoProvider.Agree(priv, peerPub, ukm)
+	return w.CryptoProvider.Agree(priv, peerPub, ctx)
 }
 
 func (w *workProvider) NewAEAD(key *secmem.Buffer) (jcrypto.AEAD, error) {
@@ -288,12 +288,12 @@ type gateProvider struct {
 	release chan struct{}
 }
 
-func (g *gateProvider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
+func (g *gateProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	g.once.Do(func() {
 		close(g.entered)
 		<-g.release
 	})
-	return g.CryptoProvider.Agree(priv, peerPub, ukm)
+	return g.CryptoProvider.Agree(priv, peerPub, ctx)
 }
 
 func TestNoKeyIsReleasedUnderASetup(t *testing.T) {
@@ -447,12 +447,16 @@ func (p *trackingProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	return priv, pub, err
 }
 
-func (p *trackingProvider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
-	return p.track(p.CryptoProvider.Agree(priv, peerPub, ukm))
+func (p *trackingProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	return p.track(p.CryptoProvider.Agree(priv, peerPub, ctx))
 }
 
-func (p *trackingProvider) DeriveKey(secret *secmem.Buffer, label []byte, size int) (*secmem.Buffer, error) {
-	return p.track(p.CryptoProvider.DeriveKey(secret, label, size))
+func (p *trackingProvider) MixKey(chain, secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	return p.track(p.CryptoProvider.MixKey(chain, secret, ctx))
+}
+
+func (p *trackingProvider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.Context, size int) (*secmem.Buffer, error) {
+	return p.track(p.CryptoProvider.DeriveKey(secret, purpose, ctx, size))
 }
 
 func (p *trackingProvider) live() int {
@@ -588,7 +592,7 @@ func TestRelayWithoutARingKeepsTheLinkKeyWithItsOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer priv.Release()
-	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv})
+	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,9 +600,43 @@ func TestRelayWithoutARingKeepsTheLinkKeyWithItsOwner(t *testing.T) {
 	if priv.Bytes() == nil {
 		t.Fatal("Close released the link key, which the relay does not own")
 	}
-	if _, err := p.Agree(priv, pub, []byte("still usable")); err != nil {
+	ctx, err := jcrypto.NewContext(p, "test", []byte("still usable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := p.Agree(priv, pub, ctx)
+	if err != nil {
 		t.Fatalf("the link key after Close: %v", err)
 	}
+	secret.Release()
+}
+
+// the public half goes into the transcripts of the link and, without a ring,
+// of the setup: a relay that does not know it would confirm no authenticated
+// link and open no setup
+func TestRelayNeedsItsPublicKey(t *testing.T) {
+	onEverySuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer priv.Release()
+		for name, bad := range map[string][]byte{
+			"no public key":      nil,
+			"a short public key": pub[1:],
+			"a long public key":  append(append([]byte{}, pub...), 0),
+		} {
+			if r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: bad}); err == nil {
+				r.Close()
+				t.Errorf("relay.New accepted %s", name)
+			}
+		}
+		r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub})
+		if err != nil {
+			t.Fatalf("relay.New with the key pair: %v", err)
+		}
+		r.Close()
+	})
 }
 
 type rotating struct {

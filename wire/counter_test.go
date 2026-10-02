@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"math/rand/v2"
 	"testing"
@@ -12,21 +13,32 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
-// shared secret 40 41 .. 5f; the offset is the first 8 bytes of the KDF output,
-// big endian, with the top two bits cleared. Computed outside this code:
+// shared secret 40 41 .. 5f, hop 0, link 200, onion key 80 81 .., ephemeral
+// key 00 01 .. (32 bytes each on c25519, 64 on gost). The offset is the first 8
+// bytes of the KDF output, big endian, with the top two bits cleared. Computed
+// outside this code:
 //
-//	c25519, HKDF-Expand(SHA-256, secret, label, 8) = HMAC-SHA256(secret, label || 01)[:8]
-//	  fwd ca719545fdd0bc6c -> 0a719545fdd0bc6c, bwd e7442998c5b0b339 -> 27442998c5b0b339
-//	gost, KDF_GOSTR3411_2012_256 (R 50.1.113) =
-//	  HMAC-Streebog256(secret, 01 || label || 00 || 01 00)[:8]
-//	  fwd b7a6a05760e0c351 -> 37a6a05760e0c351, bwd 07a3af1f57ab20fd -> 07a3af1f57ab20fd
+//	T = "jimichi/v1/<suite>/transcript/setup" || 00 || 05
+//	    || 0001 02 || 0001 00 || 0008 00000000000000c8
+//	    || u16be(len) onion || u16be(len) ephemeral
+//	  120 bytes on c25519, 182 on gost
+//	c25519, th = SHA-256(T) = bf598864..fc43aeb7
+//	  HMAC-SHA256(secret, "jimichi/v1/c25519/counter/fwd" || 00 || th || 01)[:8]
+//	  fwd bdeca6ae015c8e00 -> 3deca6ae015c8e00, bwd 29b99d95ce52c6cc -> 29b99d95ce52c6cc
+//	gost, th = Streebog-256(T) = 89a0d93b..2a2b5f1c, KDF_GOSTR3411_2012_256 (RFC 7836, 4.5) =
+//	  HMAC-Streebog256(secret, 01 || "jimichi/v1/gost/counter/fwd" || 00 || th || 01 00)[:8]
+//	  fwd 2f610511654c3e3a -> 2f610511654c3e3a, bwd bf3555cb42b9c5ed -> 3f3555cb42b9c5ed
 func TestCounterOffsetKnownAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		p        jcrypto.CryptoProvider
+		pub      int
+		th       string
 		fwd, bwd uint64
 	}{
-		{c25519.New(), 0x0a719545fdd0bc6c, 0x27442998c5b0b339},
-		{gost.New(), 0x37a6a05760e0c351, 0x07a3af1f57ab20fd},
+		{c25519.New(), 32, "bf5988647af2c8b161b8992b8015c2bea0aed5837cc53e37b60450f5fc43aeb7",
+			0x3deca6ae015c8e00, 0x29b99d95ce52c6cc},
+		{gost.New(), 64, "89a0d93bcff53a1914892c6fdf5b8cad7a726f6678cb09c01d91aa532a2b5f1c",
+			0x2f610511654c3e3a, 0x3f3555cb42b9c5ed},
 	} {
 		t.Run(tc.p.Suite().String(), func(t *testing.T) {
 			secret, err := secmem.New(32)
@@ -37,7 +49,18 @@ func TestCounterOffsetKnownAnswer(t *testing.T) {
 			for i := range secret.Bytes() {
 				secret.Bytes()[i] = byte(0x40 + i)
 			}
-			off, err := deriveOffsets(tc.p, secret)
+			onion, eph := make([]byte, tc.pub), make([]byte, tc.pub)
+			for i := range onion {
+				onion[i], eph[i] = byte(0x80+i), byte(i)
+			}
+			ctx, err := setupContext(tc.p, 0, 200, onion, eph)
+			if err != nil {
+				t.Fatalf("setupContext: %v", err)
+			}
+			if got := hex.EncodeToString(ctx.Sum()); got != tc.th {
+				t.Fatalf("setup transcript hash %s, want %s", got, tc.th)
+			}
+			off, err := deriveOffsets(tc.p, secret, ctx)
 			if err != nil {
 				t.Fatalf("deriveOffsets: %v", err)
 			}
@@ -190,12 +213,16 @@ func exitSetup(t *testing.T, p jcrypto.CryptoProvider, nodePub []byte, link, fir
 	if err != nil {
 		t.Fatal(err)
 	}
-	secret, err := p.Agree(ephPriv, nodePub, linkUKM(link))
+	ctx, err := setupContext(p, 0, link, nodePub, ephPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := p.Agree(ephPriv, nodePub, ctx)
 	ephPriv.Release()
 	if err != nil {
 		t.Fatal(err)
 	}
-	setupKey, err := p.DeriveKey(secret, []byte(LabelSetup), p.KeySize())
+	setupKey, err := p.DeriveKey(secret, purposeSetup, ctx, p.KeySize())
 	secret.Release()
 	if err != nil {
 		t.Fatal(err)
@@ -234,7 +261,7 @@ func TestOpenSetupRefusesAFirstCounterPastTheLimit(t *testing.T) {
 	}
 	defer priv.Release()
 
-	layer, err := OpenSetup(p, priv, exitSetup(t, p, pub, 77, counterLimit-1))
+	layer, err := OpenSetup(p, priv, pub, exitSetup(t, p, pub, 77, counterLimit-1))
 	if err != nil {
 		t.Fatalf("OpenSetup with the last valid first counter: %v", err)
 	}
@@ -243,7 +270,7 @@ func TestOpenSetupRefusesAFirstCounterPastTheLimit(t *testing.T) {
 		t.Fatalf("exit layer: first %#x, next %q %d", layer.First, layer.NextAddr, layer.NextCircuit)
 	}
 	for _, first := range []uint64{counterLimit, ^uint64(0)} {
-		if _, err := OpenSetup(p, priv, exitSetup(t, p, pub, 78, first)); !errors.Is(err, ErrFraming) {
+		if _, err := OpenSetup(p, priv, pub, exitSetup(t, p, pub, 78, first)); !errors.Is(err, ErrFraming) {
 			t.Fatalf("first counter %#x: %v, want ErrFraming", first, err)
 		}
 	}

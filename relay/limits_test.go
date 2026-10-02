@@ -32,7 +32,7 @@ func serveOn(t *testing.T, p jcrypto.CryptoProvider, cfg Config, ln net.Listener
 		t.Fatal(err)
 	}
 	t.Cleanup(priv.Release)
-	cfg.Provider, cfg.StaticPriv = p, priv
+	cfg.Provider, cfg.StaticPriv, cfg.StaticPub = p, priv, pub
 	r, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -63,9 +63,9 @@ func (c *countingProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	return c.CryptoProvider.GenerateEphemeral()
 }
 
-func (c *countingProvider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
+func (c *countingProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	c.agreements.Add(1)
-	return c.CryptoProvider.Agree(priv, peerPub, ukm)
+	return c.CryptoProvider.Agree(priv, peerPub, ctx)
 }
 
 func serveCounted(t *testing.T, cfg Config) (*served, *countingProvider) {
@@ -325,7 +325,7 @@ func startStalledHop(t *testing.T) *stalledHop {
 		if tcp, ok := raw.(*net.TCPConn); ok {
 			_ = tcp.SetReadBuffer(1)
 		}
-		lc, err := link.Accept(raw, p, priv)
+		lc, err := link.Accept(raw, p, priv, pub)
 		if err != nil {
 			return
 		}
@@ -712,20 +712,20 @@ func TestOldCircuitExpires(t *testing.T) {
 
 func TestSourceLimitsMustBeValid(t *testing.T) {
 	p := c25519.New()
-	priv, _, err := p.GenerateEphemeral()
+	priv, pub, err := p.GenerateEphemeral()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer priv.Release()
 	for _, rate := range []float64{math.NaN(), math.Inf(1)} {
-		if _, err := New(Config{Provider: p, StaticPriv: priv, SourceLinkRate: rate}); err == nil {
+		if _, err := New(Config{Provider: p, StaticPriv: priv, StaticPub: pub, SourceLinkRate: rate}); err == nil {
 			t.Fatalf("New accepted a link rate of %v", rate)
 		}
 	}
 	// a negative rate turns a limit off; a negative burst would silently mean
 	// the default instead
 	for _, cfg := range []Config{{SourceLinkBurst: -1}, {SourceSetupBurst: -1}} {
-		cfg.Provider, cfg.StaticPriv = p, priv
+		cfg.Provider, cfg.StaticPriv, cfg.StaticPub = p, priv, pub
 		if _, err := New(cfg); err == nil {
 			t.Fatalf("New accepted a negative burst: %+v", cfg)
 		}
