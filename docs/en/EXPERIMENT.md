@@ -313,11 +313,13 @@ lab and the benchmarks have no switch for the key-memory measures).
 The binding of every derived key to the transcript, the suite and the scheme version has no
 switch, like the setup replay tag and the link confirmation frame: a build without it would be a
 second key schedule, that is, a downgrade path. No block measures its contribution. The
-benchmarks of crypto/suite time its parts apart: the transcript hash (BenchmarkNewContext, once
-per hop on each side and once per link handshake), the agreement under a context
-(BenchmarkAgree), the keys of one hop (BenchmarkDeriveHopKeys) and the chaining of two agreements
-on an authenticated link (BenchmarkMixKey). Release v0.2.0, the last one without the binding,
-has only the agreement benchmark to compare with.
+benchmarks of crypto/suite time its parts apart: the hash of a setup transcript
+(BenchmarkNewContext; a client makes one per hop, a node one per onion key it holds, each side of
+a link one per handshake), the agreement under a context (BenchmarkAgree), the five values a hop
+derives after the agreement: the setup key, the cell key, the replay tag and the two counter
+offsets (BenchmarkDeriveHopKeys), and the chaining of two agreements on an authenticated link
+(BenchmarkMixKey). Release v0.2.0, the last one without the binding, has only the agreement
+benchmark to compare with.
 
 ## Statistics
 
