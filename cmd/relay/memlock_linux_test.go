@@ -3,16 +3,23 @@
 package main
 
 import (
+	"bufio"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/jimichi-org/jimichi/client"
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/pki"
 	"github.com/jimichi-org/jimichi/relay"
 )
 
@@ -129,5 +136,173 @@ func TestHeldPagesCoverARotationWithLockedMemoryUsedUp(t *testing.T) {
 			n.rotateIfDue()
 			rotated(2, "the rotation after the release, with no page left again")
 		})
+	}
+}
+
+const asBoundNode = "JIMICHI_TEST_AS_BOUND_NODE"
+
+// the binary's minimum is enough for a rotating node to go through a rotation
+// and serve a circuit with each of its two keys. The node runs in a process of
+// its own, so the bound counts its pages alone and not those of the clients
+func TestRotatingNodeRunsAtTheMemlockMinimum(t *testing.T) {
+	if name := os.Getenv(asBoundNode); name != "" {
+		runBoundNode(t, name)
+		return
+	}
+	var lim unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &lim); err != nil {
+		t.Fatal(err)
+	}
+	if lim.Max < minMemlock {
+		t.Skipf("RLIMIT_MEMLOCK hard limit %d is below the minimum %d", lim.Max, minMemlock)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			p, err := suite.New(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out logBuffer
+			cmd := exec.Command(self, "-test.run=^TestRotatingNodeRunsAtTheMemlockMinimum$", "-test.v")
+			cmd.Env = append(os.Environ(), asBoundNode+"="+s.String())
+			cmd.Stdout, cmd.Stderr = &out, &out
+			input, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			exited := make(chan error, 1)
+			go func() { exited <- cmd.Wait() }()
+			defer func() {
+				_ = input.Close()
+				select {
+				case err := <-exited:
+					if err != nil {
+						t.Errorf("the node process: %v\n%s", err, out.String())
+					}
+				case <-time.After(10 * time.Second):
+					_ = cmd.Process.Kill()
+					t.Errorf("the node process did not stop:\n%s", out.String())
+				}
+			}()
+
+			logged := func(what string, found func(string) bool) {
+				t.Helper()
+				for limit := time.Now().Add(10 * time.Second); !found(out.String()); time.Sleep(10 * time.Millisecond) {
+					if strings.Contains(out.String(), "--- SKIP") {
+						t.Skipf("the node process skipped:\n%s", out.String())
+					}
+					if time.Now().After(limit) {
+						t.Fatalf("%s:\n%s", what, out.String())
+					}
+				}
+			}
+			logged("the node did not start", listening.MatchString)
+			addrs := listening.FindStringSubmatch(out.String())
+			cells, info := addrs[1], addrs[2]
+			read := func() pki.Verified {
+				t.Helper()
+				code, bundle := call(t, http.MethodGet, "http://"+info+"/descriptor", nil)
+				if code != http.StatusOK {
+					t.Fatalf("GET /descriptor = %d", code)
+				}
+				nodes, err := pki.Unverified(p, []string{cells}, [][]byte{bundle})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return nodes[0]
+			}
+
+			first := read()
+			if _, err := io.WriteString(input, "\n"); err != nil {
+				t.Fatal(err)
+			}
+			logged("the node did not rotate", func(log string) bool {
+				return strings.Contains(log, "onion key rotated epoch=1\n") || strings.Contains(log, "onion key rotation: ")
+			})
+			var next pki.Verified
+			for wait := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				if next = read(); next.Epoch == 1 {
+					break
+				}
+				if time.Now().After(wait) {
+					t.Fatalf("the node serves epoch %d after its rotation:\n%s", next.Epoch, out.String())
+				}
+			}
+			for _, onion := range [][]byte{next.OnionPub, first.OnionPub} {
+				cl, err := client.Dial(client.Config{Provider: p, Chain: []client.Node{{Addr: cells, StaticPub: onion, LinkPub: next.LinkPub}}})
+				if err != nil {
+					t.Fatalf("Dial: %v\n%s", err, out.String())
+				}
+				_ = cl.Send([]byte("ping"))
+				select {
+				case reply, open := <-cl.Replies():
+					if !open || string(reply) != "ping" {
+						t.Fatalf("no echo at the minimum:\n%s", out.String())
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("the circuit neither answered nor closed:\n%s", out.String())
+				}
+				cl.Close()
+			}
+			if strings.Contains(out.String(), "secmem: ") || strings.Contains(out.String(), "onion key rotation: ") {
+				t.Fatalf("the node ran short of locked memory:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// a line on standard input moves the clock of the node by an hour, the end of
+// the input stops it
+func runBoundNode(t *testing.T, name string) {
+	s, err := suite.Parse(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := suite.New(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secmem.SetPolicy(secmem.Protected); err != nil {
+		t.Fatal(err)
+	}
+	var lim unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &lim); err != nil {
+		t.Fatal(err)
+	}
+	lim.Cur = minMemlock
+	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &lim); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	probe, err := secmem.New(minMemlock + 1)
+	if err == nil {
+		probe.Release()
+		t.Skip("locked memory is not bounded by RLIMIT_MEMLOCK here")
+	}
+
+	clk := &clock{now: time.Now()}
+	stop := make(chan os.Signal, 1)
+	go func() {
+		in := bufio.NewScanner(os.Stdin)
+		for in.Scan() {
+			clk.advance(time.Hour)
+		}
+		stop <- os.Interrupt
+	}()
+	cfg := config{
+		listen: "127.0.0.1:0", info: "127.0.0.1:0", stats: "127.0.0.1:0", echo: true,
+		descriptorTTL: time.Hour, onionRotate: time.Hour, lock: true, now: clk.Now,
+	}
+	if err := serveNode(p, cfg, log.New(os.Stdout, "", 0), stop); err != nil {
+		t.Fatalf("serveNode: %v", err)
 	}
 }

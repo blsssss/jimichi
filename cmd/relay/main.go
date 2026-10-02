@@ -310,10 +310,10 @@ func splitList(s string) []string {
 }
 
 // a setup holds a handful of key pages at once, the static and identity keys
-// one more each, and a rotating node two onion keys, the pages it keeps for the
-// next one and one more page per setup while both keys are tried; below this
-// the node would start and then fail its first circuits
-const minMemlock = 64 << 10
+// one more each, and a rotating node two onion keys, the rotationPages it keeps
+// for the next one and one more page per setup while both keys are tried; below
+// this the node would start and then fail its first circuits
+const minMemlock = 80 << 10
 
 func checkMemlock() error {
 	budget, err := secmem.MemlockBudget()
