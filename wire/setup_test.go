@@ -136,18 +136,41 @@ func TestBuildSetupReleasesKeysOnError(t *testing.T) {
 	}
 }
 
-// hops before the failing one already hold keys, and those must go too
+// hops before the failing one already hold keys, and those must go too. A short
+// key is refused before the hop makes any buffer; all zeroes at the right
+// length (a point of small order on c25519, a point off the curve on GOST) is
+// refused inside the agreement, when the hop already holds its ephemeral key
 func TestBuildSetupReleasesEarlierHopsWhenOneFails(t *testing.T) {
-	tp := &trackingProvider{CryptoProvider: provider()}
-	_, pubs := staticKeys(t, provider(), hops)
-	chain := chainTo(pubs)
-	chain[hops-1].StaticPub = chain[hops-1].StaticPub[:5]
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		p, err := suite.New(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, pubs := staticKeys(t, p, hops)
+		for name, bad := range map[string][]byte{
+			"a short key":                 pubs[hops-1][:5],
+			"a key the agreement refuses": make([]byte, len(pubs[0])),
+		} {
+			t.Run(s.String()+"/"+name, func(t *testing.T) {
+				tp := &trackingProvider{CryptoProvider: p}
+				chain := chainTo(pubs)
+				chain[hops-1].StaticPub = bad
 
-	if _, err := wire.BuildSetup(tp, chain); err == nil {
-		t.Fatal("BuildSetup accepted a malformed public key")
-	}
-	if n := tp.live(); n != 0 {
-		t.Fatalf("%d key buffers still held after a failed BuildSetup, want 0", n)
+				if _, err := wire.BuildSetup(tp, chain); err == nil {
+					t.Fatal("BuildSetup accepted a malformed public key")
+				}
+				tp.mu.Lock()
+				made := len(tp.bufs)
+				tp.mu.Unlock()
+				// an ephemeral key, a secret, two keys and two offsets per whole hop
+				if whole := 6 * (hops - 1); (len(bad) == len(pubs[0])) != (made > whole) {
+					t.Fatalf("%d buffers made, %d by the hops before the failing one", made, whole)
+				}
+				if n := tp.live(); n != 0 {
+					t.Fatalf("%d key buffers still held after a failed BuildSetup, want 0", n)
+				}
+			})
+		}
 	}
 }
 
@@ -298,9 +321,10 @@ func TestSetupRefusesASmallOrderShift(t *testing.T) {
 	})
 }
 
-// the onion key, the hop index and the link identifier are parts of the
-// transcript: a layer opens only at the node, the position and the link it was
-// built for
+// a layer opens only at the node, the position and the link it was built for.
+// The onion key is held by the transcript alone; the index is also in the AAD
+// and the link identifier in the nonce, so their place in the transcript is
+// pinned by TestSetupKeyScheduleByHand and TestCounterOffsetKnownAnswer
 func TestOpenSetupIsBoundToKeyIndexAndLink(t *testing.T) {
 	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
 		t.Run(s.String(), func(t *testing.T) {

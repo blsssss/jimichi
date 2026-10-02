@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"testing"
 
@@ -13,34 +14,48 @@ import (
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 )
 
-// shared secret 40 41 .. 5f, hop 0, link 200, onion key 80 81 .., ephemeral
-// key 00 01 .. (32 bytes each on c25519, 64 on gost). The offset is the first 8
-// bytes of the KDF output, big endian, with the top two bits cleared. Computed
-// outside this code:
+// shared secret 40 41 .. 5f, onion key 80 81 .., ephemeral key 00 01 .. (32
+// bytes each on c25519, 64 on gost); once for hop 0 on link 200 and once for
+// hop 2 on link 0102030405060708, so every byte of the index and of the
+// identifier is pinned. The offset is the first 8 bytes of the KDF output, big
+// endian, with the top two bits cleared. Computed outside this code, with
+// openssl dgst (sha256, and md_gost12_256 of gost-engine) over these bytes:
 //
 //	T = "jimichi/v1/<suite>/transcript/setup" || 00 || 05
-//	    || 0001 02 || 0001 00 || 0008 00000000000000c8
+//	    || 0001 02 || 0001 <index> || 0008 <link>
 //	    || u16be(len) onion || u16be(len) ephemeral
 //	  120 bytes on c25519, 182 on gost
-//	c25519, th = SHA-256(T) = bf598864..fc43aeb7
+//	c25519, th = SHA-256(T)
 //	  HMAC-SHA256(secret, "jimichi/v1/c25519/counter/fwd" || 00 || th || 01)[:8]
-//	  fwd bdeca6ae015c8e00 -> 3deca6ae015c8e00, bwd 29b99d95ce52c6cc -> 29b99d95ce52c6cc
-//	gost, th = Streebog-256(T) = 89a0d93b..2a2b5f1c, KDF_GOSTR3411_2012_256 (RFC 7836, 4.5) =
+//	  hop 0, link 200: th bf598864..fc43aeb7
+//	    fwd bdeca6ae015c8e00 -> 3deca6ae015c8e00, bwd 29b99d95ce52c6cc -> 29b99d95ce52c6cc
+//	  hop 2, link 0102030405060708: th 326feeeb..32820754
+//	    fwd b4a2a8953d9bb042 -> 34a2a8953d9bb042, bwd cddc0d304f148184 -> 0ddc0d304f148184
+//	gost, th = Streebog-256(T), KDF_GOSTR3411_2012_256 (RFC 7836, 4.5) =
 //	  HMAC-Streebog256(secret, 01 || "jimichi/v1/gost/counter/fwd" || 00 || th || 01 00)[:8]
-//	  fwd 2f610511654c3e3a -> 2f610511654c3e3a, bwd bf3555cb42b9c5ed -> 3f3555cb42b9c5ed
+//	  hop 0, link 200: th 89a0d93b..2a2b5f1c
+//	    fwd 2f610511654c3e3a -> 2f610511654c3e3a, bwd bf3555cb42b9c5ed -> 3f3555cb42b9c5ed
+//	  hop 2, link 0102030405060708: th 8b87e344..50014095
+//	    fwd 27dc77a5bfb21df6 -> 27dc77a5bfb21df6, bwd b607180bb3b60dd0 -> 3607180bb3b60dd0
 func TestCounterOffsetKnownAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		p        jcrypto.CryptoProvider
 		pub      int
+		index    int
+		link     uint64
 		th       string
 		fwd, bwd uint64
 	}{
-		{c25519.New(), 32, "bf5988647af2c8b161b8992b8015c2bea0aed5837cc53e37b60450f5fc43aeb7",
+		{c25519.New(), 32, 0, 200, "bf5988647af2c8b161b8992b8015c2bea0aed5837cc53e37b60450f5fc43aeb7",
 			0x3deca6ae015c8e00, 0x29b99d95ce52c6cc},
-		{gost.New(), 64, "89a0d93bcff53a1914892c6fdf5b8cad7a726f6678cb09c01d91aa532a2b5f1c",
+		{c25519.New(), 32, 2, 0x0102030405060708, "326feeeb234c925784cde16f4c9d59551914af0237b3ee8c5da7697032820754",
+			0x34a2a8953d9bb042, 0x0ddc0d304f148184},
+		{gost.New(), 64, 0, 200, "89a0d93bcff53a1914892c6fdf5b8cad7a726f6678cb09c01d91aa532a2b5f1c",
 			0x2f610511654c3e3a, 0x3f3555cb42b9c5ed},
+		{gost.New(), 64, 2, 0x0102030405060708, "8b87e34457c514232ff8fe0519f5b55954af93fff4e7a73399917a3f50014095",
+			0x27dc77a5bfb21df6, 0x3607180bb3b60dd0},
 	} {
-		t.Run(tc.p.Suite().String(), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%v/hop %d", tc.p.Suite(), tc.index), func(t *testing.T) {
 			secret, err := secmem.New(32)
 			if err != nil {
 				t.Fatal(err)
@@ -53,7 +68,7 @@ func TestCounterOffsetKnownAnswer(t *testing.T) {
 			for i := range onion {
 				onion[i], eph[i] = byte(0x80+i), byte(i)
 			}
-			ctx, err := setupContext(tc.p, 0, 200, onion, eph)
+			ctx, err := setupContext(tc.p, tc.index, tc.link, onion, eph)
 			if err != nil {
 				t.Fatalf("setupContext: %v", err)
 			}

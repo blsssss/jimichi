@@ -402,8 +402,10 @@ func TestResponderNamingAnotherKeyIsNotConfirmed(t *testing.T) {
 	})
 }
 
-// the mode byte is part of the transcript: a hello moved to the other mode on
-// the way is answered under keys the initiator does not derive
+// a hello moved to the other mode on the way is answered under keys the
+// initiator does not derive: the two sides then differ in the number of
+// agreements as well as in the transcript. That the mode byte itself is a part
+// of the transcript is held by the one written out in handResponder
 func TestFlippedModeByteFailsTheHandshake(t *testing.T) {
 	eachMode(t, func(t *testing.T, p jcrypto.CryptoProvider, auth bool) {
 		priv, pub := keyPair(t, p)
@@ -503,14 +505,18 @@ const (
 	keyedByEphemeralOnly
 )
 
-// what a responder writes: its public key and frame 0 carrying the given cell.
-// The transcript is assembled here byte by byte, a second record of the layout
+// the keys of a responder made by hand: it reads the hello, picks its ephemeral
+// key and derives both frame keys under the purposes written out here.
+// The transcript is assembled byte by byte, a second record of the layout
 // next to the one in link:
 //
 //	"jimichi/v1/<suite>/transcript/link" || 00 || u8(parts)
 //	  || 0001 version || 0001 mode || u16be(len) initiator key
 //	  || u16be(len) responder key [ || u16be(len) responder link key, mode 01 ]
-func answerWith(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub []byte, how keying, first *wire.Cell) {
+//
+// send seals what the responder writes ("link/r2i"), recv opens what the
+// initiator writes ("link/i2r")
+func handResponder(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub []byte, how keying) (pub []byte, send, recv jcrypto.AEAD, ok bool) {
 	t.Helper()
 	n, _ := link.InitiatorHandshakeSize(p)
 	hello := make([]byte, n)
@@ -578,20 +584,99 @@ func answerWith(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPri
 			secret = es
 		}
 	}
-	key, err := p.DeriveKey(secret, "link/r2i", ctx, p.KeySize())
-	if err != nil {
-		t.Error(err)
+	var aeads [2]jcrypto.AEAD
+	for i, purpose := range []string{"link/r2i", "link/i2r"} {
+		key, err := p.DeriveKey(secret, purpose, ctx, p.KeySize())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		aeads[i], err = p.NewAEAD(key)
+		key.Release()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+	return pub, aeads[0], aeads[1], true
+}
+
+// what a responder writes: its public key and frame 0 carrying the given cell
+func answerWith(t *testing.T, p jcrypto.CryptoProvider, conn net.Conn, staticPriv *secmem.Buffer, staticPub []byte, how keying, first *wire.Cell) {
+	t.Helper()
+	pub, send, recv, ok := handResponder(t, p, conn, staticPriv, staticPub, how)
+	if !ok {
 		return
 	}
-	defer key.Release()
-	aead, err := p.NewAEAD(key)
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer aead.Destroy()
-	frame := aead.Seal(nil, make([]byte, aead.NonceSize()), first[:], nil)
+	defer send.Destroy()
+	defer recv.Destroy()
+	frame := send.Seal(nil, make([]byte, send.NonceSize()), first[:], nil)
 	_, _ = conn.Write(append(pub, frame...))
+}
+
+// each direction has its own key: what the initiator writes opens under the
+// key derived by hand for "link/i2r" and not under the one for "link/r2i", so
+// the two streams never meet under one key with the same frame numbers
+func TestDirectionsHaveSeparateKeys(t *testing.T) {
+	eachMode(t, func(t *testing.T, p jcrypto.CryptoProvider, auth bool) {
+		frameSize, _ := link.FrameSize(p)
+		priv, pub := keyPair(t, p)
+		var static []byte
+		if auth {
+			static = pub
+		}
+		a, b := net.Pipe()
+		defer a.Close()
+		defer b.Close()
+		_ = a.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = b.SetDeadline(time.Now().Add(5 * time.Second))
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			eph, send, recv, ok := handResponder(t, p, b, priv, pub, keyedInFull)
+			if !ok {
+				return
+			}
+			defer send.Destroy()
+			defer recv.Destroy()
+			zero := make([]byte, send.NonceSize())
+			confirm := send.Seal(nil, zero, wire.NewPadding()[:], nil)
+			if _, err := b.Write(append(eph, confirm...)); err != nil {
+				t.Errorf("answer: %v", err)
+				return
+			}
+			frame := make([]byte, frameSize)
+			if _, err := io.ReadFull(b, frame); err != nil {
+				t.Errorf("the initiator's first frame: %v", err)
+				return
+			}
+			if _, err := send.Open(nil, zero, frame, nil); err == nil {
+				t.Error("the initiator's frame opens under the responder's sending key")
+			}
+			plain, err := recv.Open(nil, zero, frame, nil)
+			if err != nil {
+				t.Errorf("the initiator's frame under the key derived for link/i2r: %v", err)
+				return
+			}
+			if !bytes.Equal(plain, sample(7)[:]) {
+				t.Error("the initiator's frame carries another cell")
+			}
+			if bytes.Equal(frame, send.Seal(nil, zero, sample(7)[:], nil)) {
+				t.Error("frame 0 of both directions is sealed under one key")
+			}
+		}()
+
+		client, err := link.Dial(a, p, static)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		defer client.Close()
+		if err := client.WriteCell(sample(7)); err != nil {
+			t.Fatalf("WriteCell: %v", err)
+		}
+		<-done
+	})
 }
 
 func TestHandshakeNeedsTheConfirmation(t *testing.T) {

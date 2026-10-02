@@ -215,6 +215,21 @@ func TestTranscriptBytes(t *testing.T) {
 	if err != nil || !bytes.Equal(got, g1) {
 		t.Fatalf("T(G1) = %x, %v", got, err)
 	}
+
+	// parts past 255 bytes: the length takes both of its bytes, high one first
+	for _, tc := range []struct {
+		size   int
+		length []byte
+	}{{0x0100, []byte{0x01, 0x00}}, {0x0102, []byte{0x01, 0x02}}, {0xffff, []byte{0xff, 0xff}}} {
+		long := seq(0x00, tc.size)
+		want := append([]byte("jimichi/v1/gost/transcript/test"), 0x00, 0x02)
+		want = append(append(want, tc.length...), long...)
+		want = append(want, 0x00, 0x01, 0xee)
+		got, err := jcrypto.TranscriptBytes(jcrypto.SuiteGOST, "test", long, []byte{0xee})
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("a part of %d bytes: %v, the transcript is not the one written out with the length %x", tc.size, err, tc.length)
+		}
+	}
 }
 
 // the same bytes cut at different places are different transcripts
