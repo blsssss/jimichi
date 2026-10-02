@@ -12,9 +12,12 @@ import (
 )
 
 var (
-	ErrOnionKey   = errors.New("relay: onion key missing, of the wrong size or already in the ring")
+	ErrOnionKey   = errors.New("relay: onion key missing, of the wrong size, not a pair or already in the ring")
 	errRingClosed = errors.New("relay: onion keys released")
 )
+
+// no key leaves the check, so its secrets share an exchange with nothing else
+const exchangeKeyCheck = "relay/keycheck"
 
 type onionKey struct {
 	epoch uint32
@@ -29,6 +32,7 @@ type onionKey struct {
 // and, for a grace period after a rotation, the one before it. A setup cell
 // recorded earlier stops opening once its key is released
 type OnionRing struct {
+	provider  jcrypto.CryptoProvider
 	pubSize   int
 	cacheSize int
 
@@ -40,7 +44,9 @@ type OnionRing struct {
 
 // the ring owns priv once it is returned without an error and releases it on
 // Retire or Close; cacheSize bounds the setups remembered per key, zero picks
-// the default
+// the default. pub, here and in Rotate, must be byte for byte what the node
+// publishes for priv: it is a part of the setup transcript, so under any other
+// bytes the key opens no setup, and a pair that does not agree is refused
 func NewOnionRing(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, cacheSize int) (*OnionRing, error) {
 	if cacheSize < 0 || cacheSize > MaxSetupCache {
 		return nil, fmt.Errorf("relay: setup cache of %d entries outside 0..%d", cacheSize, MaxSetupCache)
@@ -52,7 +58,11 @@ func NewOnionRing(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, cac
 	if priv == nil || len(pub) != size {
 		return nil, ErrOnionKey
 	}
+	if err := checkKeyPair(p, priv, pub, ErrOnionKey); err != nil {
+		return nil, err
+	}
 	return &OnionRing{
+		provider:  p,
 		pubSize:   size,
 		cacheSize: cacheSize,
 		current:   &onionKey{priv: priv, pub: bytes.Clone(pub), setups: wire.NewSetupCache(cacheSize)},
@@ -61,10 +71,12 @@ func NewOnionRing(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, cac
 
 // the link key in the onion role as well: the relay that builds this ring
 // never rotates or closes it, so the key stays with its owner
-func staticRing(priv *secmem.Buffer, cacheSize int) *OnionRing {
+func staticRing(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, cacheSize int) *OnionRing {
 	return &OnionRing{
+		provider:  p,
+		pubSize:   len(pub),
 		cacheSize: cacheSize,
-		current:   &onionKey{priv: priv, setups: wire.NewSetupCache(cacheSize)},
+		current:   &onionKey{priv: priv, pub: bytes.Clone(pub), setups: wire.NewSetupCache(cacheSize)},
 	}
 }
 
@@ -72,13 +84,20 @@ func staticRing(priv *secmem.Buffer, cacheSize int) *OnionRing {
 // replaces as the previous one; the one held as previous until now is released.
 // On an error the caller still owns priv
 func (g *OnionRing) Rotate(priv *secmem.Buffer, pub []byte) (uint32, error) {
+	if priv == nil || len(pub) != g.pubSize {
+		return 0, ErrOnionKey
+	}
+	// before the lock: setups do not wait for the two agreements of the check
+	if err := checkKeyPair(g.provider, priv, pub, ErrOnionKey); err != nil {
+		return 0, err
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
 		return 0, errRingClosed
 	}
 	// two slots under one key would let one setup open twice
-	if priv == nil || len(pub) != g.pubSize || bytes.Equal(pub, g.current.pub) {
+	if bytes.Equal(pub, g.current.pub) {
 		return 0, ErrOnionKey
 	}
 	if g.previous != nil {
@@ -127,6 +146,8 @@ func (g *OnionRing) Current() (epoch uint32, pub []byte) {
 
 // Open tries every live key, in one order and to the end even after one has
 // opened, so the time a setup takes does not tell which epoch its client used.
+// Each key is tried under a transcript that holds its own public half, so a
+// layer built for one epoch does not open under the key of another.
 // The tag is burned on first sight whatever happens to the setup next: one that
 // fails further on must not come back later on a fresh link either
 func (g *OnionRing) Open(p jcrypto.CryptoProvider, cell *wire.Cell) (*wire.SetupLayer, error) {
@@ -144,7 +165,7 @@ func (g *OnionRing) Open(p jcrypto.CryptoProvider, cell *wire.Cell) (*wire.Setup
 		if k == nil {
 			continue
 		}
-		layer, err := wire.OpenSetup(p, k.priv, cell)
+		layer, err := wire.OpenSetup(p, k.priv, k.pub, cell)
 		switch {
 		case err != nil:
 			if refused == nil {
@@ -164,4 +185,42 @@ func (g *OnionRing) Open(p jcrypto.CryptoProvider, cell *wire.Cell) (*wire.Setup
 		return nil, err
 	}
 	return opened, nil
+}
+
+// peers put the public key into their transcripts, so one that is not the half
+// of the private key would leave a node that confirms no authenticated link or
+// opens no setup, with nothing but failures at its neighbours to show for it;
+// such a pair gives mismatch. Any other failure, memory above all, comes back
+// as it is, so a node that cannot lock a page does not report a bad key
+func checkKeyPair(p jcrypto.CryptoProvider, priv *secmem.Buffer, pub []byte, mismatch error) error {
+	ephPriv, ephPub, err := p.GenerateEphemeral()
+	if err != nil {
+		return err
+	}
+	defer ephPriv.Release()
+	ctx, err := jcrypto.NewContext(p, exchangeKeyCheck, pub, ephPub)
+	if err != nil {
+		return err
+	}
+	theirs, err := p.Agree(ephPriv, pub, ctx)
+	if err != nil {
+		return refusedKey(err, mismatch)
+	}
+	defer theirs.Release()
+	ours, err := p.Agree(priv, ephPub, ctx)
+	if err != nil {
+		return refusedKey(err, mismatch)
+	}
+	defer ours.Release()
+	if !theirs.Equal(ours) {
+		return mismatch
+	}
+	return nil
+}
+
+func refusedKey(err, mismatch error) error {
+	if errors.Is(err, jcrypto.ErrBadPublicKey) || errors.Is(err, jcrypto.ErrBadKeySize) {
+		return fmt.Errorf("%w: %v", mismatch, err)
+	}
+	return err
 }

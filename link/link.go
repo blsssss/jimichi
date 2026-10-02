@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	labelI2R = "jimichi/link/i2r"
-	labelR2I = "jimichi/link/r2i"
+	exchangeLink = "link"
+
+	purposeI2R = "link/i2r"
+	purposeR2I = "link/r2i"
 
 	// the initiator has the responder's long-term key only where it comes from a
 	// verified descriptor
@@ -109,6 +111,9 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 
 	mode := byte(modeAnonymous)
 	if peerStatic != nil {
+		if len(peerStatic) != len(ephPub) {
+			return nil, fmt.Errorf("%w: %w", ErrHandshake, jcrypto.ErrBadPublicKey)
+		}
 		mode = modeAuthenticated
 	}
 	hello := append([]byte{mode}, ephPub...)
@@ -121,19 +126,16 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
 
-	secret, err := combine(func() (*secmem.Buffer, error) {
-		return p.Agree(ephPriv, peerEph, ephPub)
-	}, func() (*secmem.Buffer, error) {
-		if peerStatic == nil {
-			return nil, nil
-		}
-		return p.Agree(ephPriv, peerStatic, ephPub)
-	})
+	ctx, err := handshakeContext(p, mode, ephPub, peerEph, peerStatic)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
+	}
+	secret, err := chainKey(p, ctx, mode, ephPriv, peerStatic, ephPriv, peerEph)
 	if err != nil {
 		return nil, err
 	}
 	defer secret.Release()
-	c, err := newConn(raw, p, secret, labelI2R, labelR2I)
+	c, err := newConn(raw, p, secret, ctx, purposeI2R, purposeR2I)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +151,10 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 	return c, nil
 }
 
-func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer) (*Conn, error) {
+// staticPub is the link key as the responder published it: an initiator in the
+// authenticated mode put the same bytes into the transcript. A responder
+// without a link key takes anonymous links only
+func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte) (*Conn, error) {
 	n, err := pubSize(p)
 	if err != nil {
 		return nil, err
@@ -159,7 +164,14 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer) (
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
 	mode, peerEph := hello[0], hello[1:]
-	if mode != modeAnonymous && mode != modeAuthenticated {
+	switch mode {
+	case modeAnonymous:
+		staticPriv, staticPub = nil, nil
+	case modeAuthenticated:
+		if staticPriv == nil || len(staticPub) != n {
+			return nil, ErrHandshake
+		}
+	default:
 		return nil, ErrHandshake
 	}
 
@@ -172,19 +184,16 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer) (
 		return nil, err
 	}
 
-	secret, err := combine(func() (*secmem.Buffer, error) {
-		return p.Agree(ephPriv, peerEph, peerEph)
-	}, func() (*secmem.Buffer, error) {
-		if mode == modeAnonymous {
-			return nil, nil
-		}
-		return p.Agree(staticPriv, peerEph, peerEph)
-	})
+	ctx, err := handshakeContext(p, mode, peerEph, ephPub, staticPub)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
+	}
+	secret, err := chainKey(p, ctx, mode, staticPriv, peerEph, ephPriv, peerEph)
 	if err != nil {
 		return nil, err
 	}
 	defer secret.Release()
-	c, err := newConn(raw, p, secret, labelR2I, labelI2R)
+	c, err := newConn(raw, p, secret, ctx, purposeR2I, purposeI2R)
 	if err != nil {
 		return nil, err
 	}
@@ -197,39 +206,49 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer) (
 	return c, nil
 }
 
-// the ephemeral secret gives forward secrecy, the static one binds the channel
-// to the node the client chose; both go through one KDF so neither alone is enough
-func combine(eph, static func() (*secmem.Buffer, error)) (*secmem.Buffer, error) {
-	e, err := eph()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
+// version, mode, both ephemeral keys as they crossed the wire and, in the
+// authenticated mode, the responder's link key
+func handshakeContext(p jcrypto.CryptoProvider, mode byte, initiatorEph, responderEph, responderStatic []byte) (jcrypto.Context, error) {
+	parts := [][]byte{{wire.Version}, {mode}, initiatorEph, responderEph}
+	if mode == modeAuthenticated {
+		parts = append(parts, responderStatic)
 	}
-	defer e.Release()
-	s, err := static()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
-	}
-	if s == nil {
-		return e.Clone()
-	}
-	defer s.Release()
-
-	joined, err := secmem.New(e.Len() + s.Len())
-	if err != nil {
-		return nil, err
-	}
-	copy(joined.Bytes(), e.Bytes())
-	copy(joined.Bytes()[e.Len():], s.Bytes())
-	return joined, nil
+	return jcrypto.NewContext(p, exchangeLink, parts...)
 }
 
-func newConn(raw net.Conn, p jcrypto.CryptoProvider, secret *secmem.Buffer, sendLabel, recvLabel string) (*Conn, error) {
-	sendKey, err := p.DeriveKey(secret, []byte(sendLabel), p.KeySize())
+// the ephemeral secret gives forward secrecy, the static one binds the channel
+// to the node the initiator chose; chained, so neither alone gives the frame
+// keys. esPriv and esPeer are this side's halves of the agreement that involves
+// the responder's link key: the initiator brings its ephemeral key to it, the
+// responder its link key
+func chainKey(p jcrypto.CryptoProvider, ctx jcrypto.Context, mode byte, esPriv *secmem.Buffer, esPeer []byte, ephPriv *secmem.Buffer, ephPeer []byte) (*secmem.Buffer, error) {
+	if mode != modeAuthenticated {
+		ee, err := p.Agree(ephPriv, ephPeer, ctx)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
+		}
+		return ee, nil
+	}
+	es, err := p.Agree(esPriv, esPeer, ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
+	}
+	defer es.Release()
+	ee, err := p.Agree(ephPriv, ephPeer, ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
+	}
+	defer ee.Release()
+	return p.MixKey(es, ee, ctx)
+}
+
+func newConn(raw net.Conn, p jcrypto.CryptoProvider, secret *secmem.Buffer, ctx jcrypto.Context, sendPurpose, recvPurpose string) (*Conn, error) {
+	sendKey, err := p.DeriveKey(secret, sendPurpose, ctx, p.KeySize())
 	if err != nil {
 		return nil, err
 	}
 	defer sendKey.Release()
-	recvKey, err := p.DeriveKey(secret, []byte(recvLabel), p.KeySize())
+	recvKey, err := p.DeriveKey(secret, recvPurpose, ctx, p.KeySize())
 	if err != nil {
 		return nil, err
 	}

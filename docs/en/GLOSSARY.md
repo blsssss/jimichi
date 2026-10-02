@@ -13,7 +13,9 @@ English | [Русский](../ru/GLOSSARY.md)
 | Rogue node | a node the adversary holds: a compromised one or one inserted with a valid certificate |
 | Fixed chain | the first nodes of the list in the listed order instead of a random choice, for measurements that need a known path |
 | Ephemeral key | a key that lives for one session; its buffer is zeroed afterwards, while the copies the libraries made stay on the heap until that memory is reused (CRYPTO, "Known gaps") |
-| UKM | the value binding an agreed secret to a session |
+| UKM | the VKO factor binding an agreed secret to a session; in the GOST suite it is the first 8 bytes of the transcript hash |
+| Transcript | the public data of one key exchange in an unambiguous layout: the version, the parameters of the exchange and the public keys of both sides (CRYPTO, "Key derivation") |
+| Key context | the transcript hash together with the suite (Context); it enters every agreement and every key derivation, and the provider derives no key without it |
 | AEAD | authenticated encryption with associated data |
 | Cover traffic | cells with no payload, sent to mask when a real message leaves: on top of the messages or in the empty slots of a constant-rate schedule; how much they mask is measured, not assumed (EXPERIMENT, block 1) |
 | Link padding | a frame a node sends to its neighbour on an empty tick of its schedule; the neighbour drops it |

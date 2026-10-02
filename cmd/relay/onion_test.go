@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -697,11 +698,11 @@ func TestKeepOnionRotatesWhenThePeriodIsOver(t *testing.T) {
 
 func TestRotatingNodeGivesTheRelayItsRing(t *testing.T) {
 	f := newFixture(t, jcrypto.SuiteC25519)
-	if rc := relayConfig(f.p, nil, config{auth: true}, f.n); rc.Onion != nil {
+	if rc := relayConfig(f.p, nil, nil, config{auth: true}, f.n); rc.Onion != nil {
 		t.Fatal("a node without rotation must leave the relay its link key as the onion key")
 	}
 	ring := f.rotating(t, time.Hour)
-	if rc := relayConfig(f.p, nil, config{auth: true}, f.n); rc.Onion != ring {
+	if rc := relayConfig(f.p, nil, nil, config{auth: true}, f.n); rc.Onion != ring {
 		t.Fatal("the relay of a rotating node does not get the ring the node rotates")
 	}
 }
@@ -952,6 +953,124 @@ func TestRotationGivesItsHeldPageToTheNewKey(t *testing.T) {
 	}
 }
 
+// a rotation that found no room to hold pages for the next one leaves none;
+// the release of the replaced key takes them again
+func TestReleaseTakesThePagesARotationCouldNot(t *testing.T) {
+	f := newFixture(t, jcrypto.SuiteC25519)
+	inner := f.p
+	ring := f.rotating(t, 3*time.Hour)
+	f.enroll(t, t0.Add(72*time.Hour))
+	f.clock.advance(3 * time.Hour)
+	f.n.rotateIfDue()
+	f.n.mu.Lock()
+	f.n.onion.letGo()
+	grace := f.n.onion.grace
+	f.n.mu.Unlock()
+
+	f.clock.advance(grace - time.Second)
+	f.n.rotateIfDue()
+	if f.n.onion.reserve != nil {
+		t.Fatal("pages taken while the replaced key is still held")
+	}
+	f.clock.advance(time.Second)
+	f.n.rotateIfDue()
+	held := f.n.onion.reserve
+	if held == nil || held.Bytes() == nil {
+		t.Fatal("the release of the replaced key took no pages for the next rotation")
+	}
+
+	f.n.p = &tightProvider{CryptoProvider: inner, room: func() bool { return held.Bytes() == nil }}
+	f.clock.advance(3*time.Hour - grace)
+	f.n.rotateIfDue()
+	if epoch, _ := ring.Current(); epoch != 2 {
+		t.Fatalf("epoch %d: the pages taken at the release were not given to the next key: %q", epoch, f.log.String())
+	}
+}
+
+// fails with one error at whichever step the test names, as a node short of
+// locked memory does at a different step from one attempt to the next
+type shortProvider struct {
+	jcrypto.CryptoProvider
+	mu   sync.Mutex
+	step string
+}
+
+var errNoRoom = errors.New("no room to lock a page")
+
+func (p *shortProvider) failAt(step string) {
+	p.mu.Lock()
+	p.step = step
+	p.mu.Unlock()
+}
+
+func (p *shortProvider) fails(step string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.step == step
+}
+
+func (p *shortProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
+	if p.fails("generate") {
+		return nil, nil, errNoRoom
+	}
+	return p.CryptoProvider.GenerateEphemeral()
+}
+
+func (p *shortProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	if p.fails("agree") {
+		return nil, errNoRoom
+	}
+	return p.CryptoProvider.Agree(priv, peerPub, ctx)
+}
+
+// one cause is one line, whether the key or the secret of its pair check found
+// no room
+func TestShortMemoryIsOneLineWhereverItStrikes(t *testing.T) {
+	for _, s := range []jcrypto.Suite{jcrypto.SuiteC25519, jcrypto.SuiteGOST} {
+		t.Run(s.String(), func(t *testing.T) {
+			f := newFixture(t, s)
+			p := &shortProvider{CryptoProvider: f.p}
+			priv, pub, err := f.p.GenerateEphemeral()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ring, err := relay.NewOnionRing(p, priv, pub, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.n.mu.Lock()
+			f.n.p = p
+			f.n.link = f.pub
+			f.n.onion = newOnionKeys(ring, time.Hour, f.n.ttl, false, f.clock.Now())
+			f.n.mu.Unlock()
+			t.Cleanup(f.n.closeOnion)
+
+			f.clock.advance(time.Hour)
+			for range 2 {
+				for _, step := range []string{"generate", "agree"} {
+					p.failAt(step)
+					f.n.rotateIfDue()
+				}
+			}
+			if epoch, _ := ring.Current(); epoch != 0 || f.n.onionFailures() != 4 {
+				t.Fatalf("epoch %d after %d failed attempts, want 0 after 4", epoch, f.n.onionFailures())
+			}
+			lines := strings.Count(f.log.String(), "onion key rotation: ")
+			if lines != 1 || !strings.Contains(f.log.String(), "onion key rotation: "+errNoRoom.Error()+"\n") {
+				t.Fatalf("%d lines for one cause, want one naming it: %q", lines, f.log.String())
+			}
+			if strings.Contains(f.log.String(), relay.ErrOnionKey.Error()) {
+				t.Fatalf("a memory failure logged as a bad key: %q", f.log.String())
+			}
+			p.failAt("")
+			f.n.rotateIfDue()
+			if epoch, _ := ring.Current(); epoch != 1 {
+				t.Fatalf("epoch %d once there is room, want 1", epoch)
+			}
+		})
+	}
+}
+
 // a rotating node makes one key more, the first onion key, and lets go of it
 // like the others when it stops
 func TestRotatingNodeReleasesItsKeys(t *testing.T) {
@@ -993,8 +1112,8 @@ func TestRotatingNodeReleasesItsKeys(t *testing.T) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.keys) != 3 {
-		t.Fatalf("%d keys made, want the static, the onion and the identity key", len(p.keys))
+	if len(p.keys) != 5 {
+		t.Fatalf("%d keys made, want the static, the onion and the identity key and one for each of the two key pair checks", len(p.keys))
 	}
 	for i, k := range p.keys {
 		if k.Bytes() != nil {

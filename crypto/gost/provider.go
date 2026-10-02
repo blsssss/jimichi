@@ -3,6 +3,7 @@ package gost
 import (
 	"crypto/cipher"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -22,7 +23,10 @@ const (
 	tagSize = 16
 	// MGM takes a nonce of one Kuznyechik block
 	nonceSize = 16
+	ukmSize   = 8
 )
+
+var errUKMSize = errors.New("gost: ukm must be 8 bytes")
 
 // tc26 paramSetA: the 256-bit twisted Edwards curve TC26 recommends for new
 // protocols; its cofactor of 4 is cleared inside VKO
@@ -78,14 +82,22 @@ func generate(c *gost3410.Curve) (*secmem.Buffer, []byte, error) {
 	return priv, pub.Raw(), nil
 }
 
-// ukm goes in twice: as the VKO factor, which is how the standard binds the
-// secret to a session, and as the KDF seed next to the label
-func (p *Provider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
+// the transcript hash goes in twice: its first 8 bytes as the VKO factor, which
+// is how the standard binds the secret to a session, and whole as the KDF seed
+func (p *Provider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	c := curve()
 	if priv == nil || priv.Len() != c.PointSize() {
 		return nil, jcrypto.ErrBadKeySize
 	}
-	kek, err := vko(c, priv.Bytes(), peerPub, ukm)
+	if !p.owns(ctx) {
+		return nil, jcrypto.ErrBadContext
+	}
+	label, err := jcrypto.Label(p.Suite(), "agree")
+	if err != nil {
+		return nil, err
+	}
+	th := ctx.Sum()
+	kek, err := vko(c, priv.Bytes(), peerPub, th[:ukmSize])
 	if err != nil {
 		return nil, err
 	}
@@ -97,8 +109,41 @@ func (p *Provider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buff
 	if err != nil {
 		return nil, err
 	}
-	derive(out.Bytes(), kek, []byte("jimichi/agree"), ukm)
+	derive(out.Bytes(), kek, label, th)
 	return out, nil
+}
+
+// the same KDF with the second secret in the seed position, after the
+// transcript hash: HMAC keyed with chain acts as a PRF over it
+func (p *Provider) MixKey(chain, secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	if chain == nil || chain.Len() != keySize || secret == nil || secret.Len() != keySize {
+		return nil, jcrypto.ErrBadKeySize
+	}
+	if !p.owns(ctx) {
+		return nil, jcrypto.ErrBadContext
+	}
+	label, err := jcrypto.Label(p.Suite(), "mix")
+	if err != nil {
+		return nil, err
+	}
+	seed, err := secmem.New(jcrypto.ContextSize + keySize)
+	if err != nil {
+		return nil, err
+	}
+	defer seed.Release()
+	copy(seed.Bytes(), ctx.Sum())
+	copy(seed.Bytes()[jcrypto.ContextSize:], secret.Bytes())
+
+	out, err := secmem.New(keySize)
+	if err != nil {
+		return nil, err
+	}
+	derive(out.Bytes(), chain.Bytes(), label, seed.Bytes())
+	return out, nil
+}
+
+func (p *Provider) owns(ctx jcrypto.Context) bool {
+	return ctx.Valid() && ctx.Suite() == p.Suite()
 }
 
 // VKO GOST R 34.10-2012 with the 256-bit Streebog output (RFC 7836); the peer
@@ -114,27 +159,29 @@ func vko(c *gost3410.Curve, priv, peerPub, ukm []byte) ([]byte, error) {
 	}
 	defer wipe(prv.Key)
 
-	kek, err := prv.KEK2012256(pub, vkoFactor(ukm))
+	u, err := vkoFactor(ukm)
+	if err != nil {
+		return nil, err
+	}
+	kek, err := prv.KEK2012256(pub, u)
 	if err != nil {
 		return nil, fmt.Errorf("gost: vko: %w", err)
 	}
 	return kek, nil
 }
 
-// RFC 7836 takes a 64-bit UKM; a longer one, such as the link handshake's
-// public key, would turn the factor into a 512-bit number and double the cost,
-// so it is hashed down first. The full value still seeds the KDF
-func vkoFactor(ukm []byte) *big.Int {
-	short := ukm
-	if len(short) > 8 {
-		short = streebog(ukm)[:8]
+// a 64-bit factor: RFC 7836 allows up to half the public key size, and a wider
+// one would lengthen the scalar multiplication. Zero becomes one, as in KEG
+// (RFC 9189, 8.3.1), since VKO takes a non-zero UKM
+func vkoFactor(ukm []byte) (*big.Int, error) {
+	if len(ukm) != ukmSize {
+		return nil, errUKMSize
 	}
-	u := gost3410.NewUKM(short)
-	// RFC 7836 replaces a zero factor by one
+	u := gost3410.NewUKM(ukm)
 	if u.Sign() == 0 {
 		u.SetInt64(1)
 	}
-	return u
+	return u, nil
 }
 
 // an off-curve point would let a peer run the static key through a weaker
@@ -163,26 +210,31 @@ func publicKey(c *gost3410.Curve, raw []byte) (*gost3410.PublicKey, error) {
 	return pub, nil
 }
 
-// KDF_GOSTR3411_2012_256 (R 50.1.113-2016) gives 32 bytes; a shorter size, such
+// KDF_GOSTR3411_2012_256 (RFC 7836, 4.5) gives 32 bytes; a shorter size, such
 // as the setup replay tag, is its prefix
-func (p *Provider) DeriveKey(secret *secmem.Buffer, label []byte, size int) (*secmem.Buffer, error) {
-	if secret == nil || secret.Len() == 0 {
+func (p *Provider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.Context, size int) (*secmem.Buffer, error) {
+	if secret == nil || secret.Len() != keySize {
 		return nil, jcrypto.ErrBadKeySize
 	}
 	if size <= 0 || size > keySize {
 		return nil, jcrypto.ErrBadKeySize
 	}
+	if !p.owns(ctx) {
+		return nil, jcrypto.ErrBadContext
+	}
+	label, err := jcrypto.DeriveLabel(p.Suite(), purpose)
+	if err != nil {
+		return nil, err
+	}
 	out, err := secmem.New(size)
 	if err != nil {
 		return nil, err
 	}
-	var full [keySize]byte
-	derive(full[:], secret.Bytes(), label, nil)
-	copy(out.Bytes(), full[:size])
-	secmem.Zero(full[:])
+	derive(out.Bytes(), secret.Bytes(), label, ctx.Sum())
 	return out, nil
 }
 
+// a dst shorter than the output takes its prefix
 func derive(dst, key, label, seed []byte) {
 	kdf := gost34112012256.NewKDF(key)
 	sum := kdf.Derive(nil, label, seed)

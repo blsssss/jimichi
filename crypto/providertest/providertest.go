@@ -18,119 +18,22 @@ func Run(t *testing.T, newProvider func() jcrypto.CryptoProvider) {
 	t.Helper()
 
 	t.Run("AgreeMatches", func(t *testing.T) { testAgreeMatches(t, newProvider()) })
-	t.Run("AgreeUKMSeparates", func(t *testing.T) { testAgreeUKM(t, newProvider()) })
+	t.Run("AgreeContextSeparates", func(t *testing.T) { testAgreeContext(t, newProvider()) })
 	t.Run("AgreeRejectsBadInput", func(t *testing.T) { testAgreeBadInput(t, newProvider()) })
-	t.Run("DeriveKeyLabelSeparates", func(t *testing.T) { testDeriveKey(t, newProvider()) })
+	t.Run("DeriveKeyPurposeSeparates", func(t *testing.T) { testDeriveKey(t, newProvider()) })
+	t.Run("DeriveKeyRejectsBadInput", func(t *testing.T) { testDeriveKeyBadInput(t, newProvider()) })
+	t.Run("MixKey", func(t *testing.T) { testMixKey(t, newProvider()) })
+	t.Run("MixKeyRejectsBadInput", func(t *testing.T) { testMixKeyBadInput(t, newProvider()) })
+	t.Run("TranscriptSeparates", func(t *testing.T) { testTranscriptSeparates(t, newProvider()) })
+	t.Run("GoldenTranscript", func(t *testing.T) { testGoldenTranscript(t, newProvider()) })
+	t.Run("GoldenDeriveKey", func(t *testing.T) { testGoldenDeriveKey(t, newProvider()) })
+	t.Run("GoldenMixKey", func(t *testing.T) { testGoldenMixKey(t, newProvider()) })
+	t.Run("GoldenAgree", func(t *testing.T) { testGoldenAgree(t, newProvider()) })
 	t.Run("AEADRoundTrip", func(t *testing.T) { testAEADRoundTrip(t, newProvider()) })
 	t.Run("AEADDetectsTampering", func(t *testing.T) { testAEADTamper(t, newProvider()) })
 	t.Run("AEADIsSafeForConcurrentUse", func(t *testing.T) { testAEADConcurrent(t, newProvider()) })
 	t.Run("Signatures", func(t *testing.T) { testSignatures(t, newProvider()) })
 	t.Run("HashIsStable", func(t *testing.T) { testHash(t, newProvider()) })
-}
-
-func testAgreeMatches(t *testing.T, p jcrypto.CryptoProvider) {
-	aPriv, aPub := mustEphemeral(t, p)
-	defer aPriv.Release()
-	bPriv, bPub := mustEphemeral(t, p)
-	defer bPriv.Release()
-
-	ukm := []byte("session-1")
-
-	aSecret, err := p.Agree(aPriv, bPub, ukm)
-	if err != nil {
-		t.Fatalf("Agree(a): %v", err)
-	}
-	defer aSecret.Release()
-
-	bSecret, err := p.Agree(bPriv, aPub, ukm)
-	if err != nil {
-		t.Fatalf("Agree(b): %v", err)
-	}
-	defer bSecret.Release()
-
-	if !bytes.Equal(aSecret.Bytes(), bSecret.Bytes()) {
-		t.Fatal("both sides must agree on the same secret")
-	}
-	if allZero(aSecret.Bytes()) {
-		t.Fatal("shared secret is all zeroes")
-	}
-}
-
-func testAgreeUKM(t *testing.T, p jcrypto.CryptoProvider) {
-	aPriv, aPub := mustEphemeral(t, p)
-	defer aPriv.Release()
-	bPriv, bPub := mustEphemeral(t, p)
-	defer bPriv.Release()
-	_ = aPub
-
-	first, err := p.Agree(aPriv, bPub, []byte("session-1"))
-	if err != nil {
-		t.Fatalf("Agree: %v", err)
-	}
-	defer first.Release()
-
-	second, err := p.Agree(aPriv, bPub, []byte("session-2"))
-	if err != nil {
-		t.Fatalf("Agree: %v", err)
-	}
-	defer second.Release()
-
-	if bytes.Equal(first.Bytes(), second.Bytes()) {
-		t.Fatal("different ukm must produce different secrets")
-	}
-}
-
-func testAgreeBadInput(t *testing.T, p jcrypto.CryptoProvider) {
-	priv, pub := mustEphemeral(t, p)
-	defer priv.Release()
-
-	if _, err := p.Agree(nil, pub, nil); err == nil {
-		t.Fatal("Agree(nil private key) must fail")
-	}
-	if _, err := p.Agree(priv, []byte{1, 2, 3}, nil); err == nil {
-		t.Fatal("Agree(short public key) must fail")
-	}
-}
-
-func testDeriveKey(t *testing.T, p jcrypto.CryptoProvider) {
-	secret := mustSharedSecret(t, p)
-	defer secret.Release()
-
-	forward, err := p.DeriveKey(secret, []byte("forward"), p.KeySize())
-	if err != nil {
-		t.Fatalf("DeriveKey: %v", err)
-	}
-	defer forward.Release()
-
-	backward, err := p.DeriveKey(secret, []byte("backward"), p.KeySize())
-	if err != nil {
-		t.Fatalf("DeriveKey: %v", err)
-	}
-	defer backward.Release()
-
-	if forward.Len() != p.KeySize() {
-		t.Fatalf("derived key size = %d, want %d", forward.Len(), p.KeySize())
-	}
-	if bytes.Equal(forward.Bytes(), backward.Bytes()) {
-		t.Fatal("different labels must produce different keys")
-	}
-
-	if _, err := p.DeriveKey(secret, []byte("forward"), 0); err == nil {
-		t.Fatal("DeriveKey(size 0) must fail")
-	}
-
-	// wire derives a 16-byte replay tag; every size up to KeySize must work
-	short, err := p.DeriveKey(secret, []byte("replay"), 16)
-	if err != nil {
-		t.Fatalf("DeriveKey(size 16): %v", err)
-	}
-	defer short.Release()
-	if short.Len() != 16 {
-		t.Fatalf("derived size = %d, want 16", short.Len())
-	}
-	if bytes.Equal(short.Bytes(), forward.Bytes()[:16]) {
-		t.Fatal("different labels must produce different outputs at a short size too")
-	}
 }
 
 func testAEADRoundTrip(t *testing.T, p jcrypto.CryptoProvider) {
@@ -334,7 +237,7 @@ func mustSharedSecret(t *testing.T, p jcrypto.CryptoProvider) *secmem.Buffer {
 	defer aPriv.Release()
 	_, bPub := mustEphemeral(t, p)
 
-	secret, err := p.Agree(aPriv, bPub, []byte("ukm"))
+	secret, err := p.Agree(aPriv, bPub, mustContext(t, p, "test", []byte("session-1")))
 	if err != nil {
 		t.Fatalf("Agree: %v", err)
 	}
@@ -346,7 +249,7 @@ func mustKey(t *testing.T, p jcrypto.CryptoProvider) *secmem.Buffer {
 	secret := mustSharedSecret(t, p)
 	defer secret.Release()
 
-	key, err := p.DeriveKey(secret, []byte("aead"), p.KeySize())
+	key, err := p.DeriveKey(secret, "aead", mustContext(t, p, "test", []byte("session-1")), p.KeySize())
 	if err != nil {
 		t.Fatalf("DeriveKey: %v", err)
 	}

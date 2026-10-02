@@ -1,10 +1,14 @@
 package secmem
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
+
+var created atomic.Uint64
 
 var (
 	ErrReleased  = errors.New("secmem: buffer released")
@@ -22,6 +26,8 @@ type Buffer struct {
 	// the policy the buffer was made under, so a later change cannot free it
 	// the wrong way
 	policy Policy
+	// order of creation, the order two buffers are locked in
+	seq uint64
 }
 
 // where locking is unavailable Locked() reports false, so a caller that must not
@@ -35,7 +41,7 @@ func New(size int) (*Buffer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Buffer{mem: mem, locked: locked, policy: p}, nil
+	return &Buffer{mem: mem, locked: locked, policy: p, seq: created.Add(1)}, nil
 }
 
 // zeroes src: it exists to move key material off the heap the moment a library
@@ -86,6 +92,33 @@ func (b *Buffer) Clone() (*Buffer, error) {
 	}
 	copy(c.mem, b.mem)
 	return c, nil
+}
+
+// constant time in the contents; a released buffer equals nothing
+func (b *Buffer) Equal(other *Buffer) bool {
+	if other == nil {
+		return false
+	}
+	if b == other {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		return !b.released
+	}
+	// both stay read-locked while the memory is read, so a release cannot unmap
+	// it under the comparison; one order for every pair, so two comparisons and
+	// two releases cannot wait on each other
+	first, second := b, other
+	if second.seq < first.seq {
+		first, second = second, first
+	}
+	first.mu.RLock()
+	defer first.mu.RUnlock()
+	second.mu.RLock()
+	defer second.mu.RUnlock()
+	if b.released || other.released {
+		return false
+	}
+	return subtle.ConstantTimeCompare(b.mem, other.mem) == 1
 }
 
 // safe to call twice: deferred cleanup often runs after an explicit release on

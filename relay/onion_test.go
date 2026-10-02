@@ -1,7 +1,11 @@
 package relay_test
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -197,9 +201,9 @@ type workProvider struct {
 	agreed, tried atomic.Int64
 }
 
-func (w *workProvider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
+func (w *workProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	w.agreed.Add(1)
-	return w.CryptoProvider.Agree(priv, peerPub, ukm)
+	return w.CryptoProvider.Agree(priv, peerPub, ctx)
 }
 
 func (w *workProvider) NewAEAD(key *secmem.Buffer) (jcrypto.AEAD, error) {
@@ -288,12 +292,12 @@ type gateProvider struct {
 	release chan struct{}
 }
 
-func (g *gateProvider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
+func (g *gateProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	g.once.Do(func() {
 		close(g.entered)
 		<-g.release
 	})
-	return g.CryptoProvider.Agree(priv, peerPub, ukm)
+	return g.CryptoProvider.Agree(priv, peerPub, ctx)
 }
 
 func TestNoKeyIsReleasedUnderASetup(t *testing.T) {
@@ -447,12 +451,16 @@ func (p *trackingProvider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	return priv, pub, err
 }
 
-func (p *trackingProvider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
-	return p.track(p.CryptoProvider.Agree(priv, peerPub, ukm))
+func (p *trackingProvider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	return p.track(p.CryptoProvider.Agree(priv, peerPub, ctx))
 }
 
-func (p *trackingProvider) DeriveKey(secret *secmem.Buffer, label []byte, size int) (*secmem.Buffer, error) {
-	return p.track(p.CryptoProvider.DeriveKey(secret, label, size))
+func (p *trackingProvider) MixKey(chain, secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	return p.track(p.CryptoProvider.MixKey(chain, secret, ctx))
+}
+
+func (p *trackingProvider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.Context, size int) (*secmem.Buffer, error) {
+	return p.track(p.CryptoProvider.DeriveKey(secret, purpose, ctx, size))
 }
 
 func (p *trackingProvider) live() int {
@@ -535,48 +543,137 @@ func TestRingReleasesEveryBuffer(t *testing.T) {
 }
 
 func TestRingRefusesABadKey(t *testing.T) {
-	p := c25519.New()
-	priv, pub, err := p.GenerateEphemeral()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer priv.Release()
-	for name, c := range map[string]struct {
-		priv  *secmem.Buffer
-		pub   []byte
-		cache int
-	}{
-		"no private key":       {nil, pub, 0},
-		"short public key":     {priv, pub[1:], 0},
-		"negative cache":       {priv, pub, -1},
-		"cache over the bound": {priv, pub, relay.MaxSetupCache + 1},
-	} {
-		if _, err := relay.NewOnionRing(p, c.priv, c.pub, c.cache); err == nil {
-			t.Errorf("NewOnionRing accepted %s", name)
+	onEverySuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if priv.Bytes() == nil {
-		t.Fatal("a refused NewOnionRing released the caller's key")
-	}
+		defer priv.Release()
+		other, otherPub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Release()
+		refused := make([]byte, len(pub))
+		for name, c := range map[string]struct {
+			priv  *secmem.Buffer
+			pub   []byte
+			cache int
+			key   bool
+		}{
+			"no private key":                   {nil, pub, 0, true},
+			"short public key":                 {priv, pub[1:], 0, true},
+			"the public key of another pair":   {priv, otherPub, 0, true},
+			"a key that the agreement refuses": {priv, refused, 0, true},
+			"negative cache":                   {priv, pub, -1, false},
+			"cache over the bound":             {priv, pub, relay.MaxSetupCache + 1, false},
+		} {
+			ring, err := relay.NewOnionRing(p, c.priv, c.pub, c.cache)
+			if err == nil {
+				ring.Close()
+				t.Fatalf("NewOnionRing accepted %s", name)
+			}
+			if errors.Is(err, relay.ErrOnionKey) != c.key {
+				t.Errorf("NewOnionRing with %s = %v", name, err)
+			}
+		}
+		if priv.Bytes() == nil {
+			t.Fatal("a refused NewOnionRing released the caller's key")
+		}
 
-	ring, first := newRing(t, p, 0)
-	other, otherPub, err := p.GenerateEphemeral()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Release()
-	for name, c := range map[string]ringKey{
-		"no private key":   {nil, otherPub},
-		"short public key": {other, otherPub[1:]},
-		"the current key":  {other, first.pub},
-	} {
-		if _, err := ring.Rotate(c.priv, c.pub); !errors.Is(err, relay.ErrOnionKey) {
-			t.Errorf("Rotate with %s = %v, want %v", name, err, relay.ErrOnionKey)
+		ring, first := newRing(t, p, 0)
+		for name, c := range map[string]ringKey{
+			"no private key":                   {nil, otherPub},
+			"short public key":                 {other, otherPub[1:]},
+			"the public key of another pair":   {other, pub},
+			"a key that the agreement refuses": {other, refused},
+			"the current key":                  first,
+		} {
+			if _, err := ring.Rotate(c.priv, c.pub); !errors.Is(err, relay.ErrOnionKey) {
+				t.Errorf("Rotate with %s = %v, want %v", name, err, relay.ErrOnionKey)
+			}
 		}
-	}
-	if epoch, _ := ring.Current(); epoch != 0 || other.Bytes() == nil {
-		t.Fatalf("refused rotations moved the ring to epoch %d or released the caller's key", epoch)
-	}
+		if epoch, _ := ring.Current(); epoch != 0 || other.Bytes() == nil || first.released() {
+			t.Fatalf("refused rotations moved the ring to epoch %d or released a key", epoch)
+		}
+		if err := opens(t, p, ring, setupFor(t, p, first.pub)); err != nil {
+			t.Fatalf("a setup for the current key after the refused rotations: %v", err)
+		}
+	})
+}
+
+// the ring opens setups under the bytes it was given, whatever the caller does
+// to its slice afterwards
+func TestRingKeepsItsOwnCopyOfThePublicKey(t *testing.T) {
+	onEverySuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		holds := func(ring *relay.OnionRing, epoch uint32, published, passed []byte) {
+			t.Helper()
+			passed[0] ^= 1
+			passed[len(passed)-1] ^= 1
+			if got, pub := ring.Current(); got != epoch || !bytes.Equal(pub, published) {
+				t.Fatalf("epoch %d: the ring follows the caller's slice", got)
+			}
+			if err := opens(t, p, ring, setupFor(t, p, published)); err != nil {
+				t.Fatalf("epoch %d: a setup for the published key once the caller changed its slice: %v", epoch, err)
+			}
+		}
+
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		published := bytes.Clone(pub)
+		ring, err := relay.NewOnionRing(p, priv, pub, 0)
+		if err != nil {
+			t.Fatalf("NewOnionRing: %v", err)
+		}
+		defer ring.Close()
+		holds(ring, 0, published, pub)
+
+		priv, pub, err = p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		published = bytes.Clone(pub)
+		if _, err := ring.Rotate(priv, pub); err != nil {
+			t.Fatalf("Rotate: %v", err)
+		}
+		holds(ring, 1, published, pub)
+	})
+}
+
+// the same for the link key: the node confirms an authenticated link and, with
+// no ring of its own, opens a setup under the bytes it was started with
+func TestRelayKeepsItsOwnCopyOfThePublicKey(t *testing.T) {
+	onEverySuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer priv.Release()
+		published := bytes.Clone(pub)
+		r, err := relay.New(relay.Config{
+			Provider: p, StaticPriv: priv, StaticPub: pub,
+			Deliver: func(_ uint64, payload []byte) []byte { return payload },
+		})
+		if err != nil {
+			t.Fatalf("relay.New: %v", err)
+		}
+		pub[0] ^= 1
+		pub[len(pub)-1] ^= 1
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() { _ = r.Serve(ln) }()
+		defer func() {
+			r.Close()
+			_ = ln.Close()
+		}()
+		if !echoes(t, p, []client.Node{{Addr: ln.Addr().String(), StaticPub: published, LinkPub: published}}) {
+			t.Fatal("no round trip under the published key once the caller changed its slice")
+		}
+	})
 }
 
 // without a ring of its own a relay opens setups with the link key and leaves
@@ -588,7 +685,7 @@ func TestRelayWithoutARingKeepsTheLinkKeyWithItsOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer priv.Release()
-	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv})
+	r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,9 +693,218 @@ func TestRelayWithoutARingKeepsTheLinkKeyWithItsOwner(t *testing.T) {
 	if priv.Bytes() == nil {
 		t.Fatal("Close released the link key, which the relay does not own")
 	}
-	if _, err := p.Agree(priv, pub, []byte("still usable")); err != nil {
+	ctx, err := jcrypto.NewContext(p, "test", []byte("still usable"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := p.Agree(priv, pub, ctx)
+	if err != nil {
 		t.Fatalf("the link key after Close: %v", err)
 	}
+	secret.Release()
+}
+
+// the public half goes into the transcripts of the link and, without a ring,
+// of the setup: a relay that does not know it would confirm no authenticated
+// link and open no setup
+func TestRelayNeedsItsPublicKey(t *testing.T) {
+	onEverySuite(t, func(t *testing.T, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer priv.Release()
+		for name, bad := range map[string][]byte{
+			"no public key":      nil,
+			"a short public key": pub[1:],
+			"a long public key":  append(append([]byte{}, pub...), 0),
+		} {
+			r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: bad})
+			if !errors.Is(err, relay.ErrStaticPubSize) {
+				if r != nil {
+					r.Close()
+				}
+				t.Errorf("relay.New with %s: %v, want ErrStaticPubSize", name, err)
+			}
+		}
+		other, otherPub, err := p.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		other.Release()
+		for name, bad := range map[string][]byte{
+			"the public key of another pair":   otherPub,
+			"a key that the agreement refuses": make([]byte, len(pub)),
+		} {
+			r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: bad})
+			if !errors.Is(err, relay.ErrStaticPair) {
+				if r != nil {
+					r.Close()
+				}
+				t.Errorf("relay.New with %s: %v, want ErrStaticPair", name, err)
+			}
+		}
+		r, err := relay.New(relay.Config{Provider: p, StaticPriv: priv, StaticPub: pub})
+		if err != nil {
+			t.Fatalf("relay.New with the key pair: %v", err)
+		}
+		r.Close()
+	})
+}
+
+// the agreement of a key pair check fails at the call given, as it does when
+// no page is left to lock for its secret
+type failingAgree struct {
+	jcrypto.CryptoProvider
+	at    int
+	err   error
+	calls int
+}
+
+func (p *failingAgree) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	p.calls++
+	if p.calls == p.at {
+		return nil, p.err
+	}
+	return p.CryptoProvider.Agree(priv, peerPub, ctx)
+}
+
+// only a refused key or a pair that does not agree is a bad pair; a failure of
+// memory comes back as it is, so the node logs it as such
+func TestKeyPairCheckReportsOtherFailuresAsTheyAre(t *testing.T) {
+	noRoom := errors.New("no room to lock a page")
+	onEverySuite(t, func(t *testing.T, inner jcrypto.CryptoProvider) {
+		priv, pub, err := inner.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer priv.Release()
+		next, nextPub, err := inner.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer next.Release()
+		p := &failingAgree{CryptoProvider: inner}
+		ring, err := relay.NewOnionRing(p, priv, pub, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ring.Close()
+		owned, ownedPub, err := inner.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer owned.Release()
+
+		checks := map[string]func() error{
+			"NewOnionRing": func() error {
+				_, err := relay.NewOnionRing(p, owned, ownedPub, 0)
+				return err
+			},
+			"Rotate": func() error {
+				_, err := ring.Rotate(next, nextPub)
+				return err
+			},
+			"relay.New": func() error {
+				r, err := relay.New(relay.Config{Provider: p, StaticPriv: owned, StaticPub: ownedPub})
+				if err == nil {
+					r.Close()
+				}
+				return err
+			},
+		}
+		mismatch := map[string]error{"NewOnionRing": relay.ErrOnionKey, "Rotate": relay.ErrOnionKey, "relay.New": relay.ErrStaticPair}
+		for name, check := range checks {
+			for _, at := range []int{1, 2} {
+				for _, c := range []struct {
+					err error
+					bad bool
+				}{
+					{noRoom, false},
+					{fmt.Errorf("%w: wrapped", noRoom), false},
+					{jcrypto.ErrBadPublicKey, true},
+					{jcrypto.ErrBadKeySize, true},
+				} {
+					p.at, p.err, p.calls = at, c.err, 0
+					err := check()
+					if c.bad && (!errors.Is(err, mismatch[name]) || !strings.HasSuffix(err.Error(), c.err.Error())) {
+						t.Errorf("%s with agreement %d failing with %q = %v, want %v with the cause", name, at, c.err, err, mismatch[name])
+					}
+					if !c.bad && (!errors.Is(err, c.err) || errors.Is(err, mismatch[name]) || err.Error() != c.err.Error()) {
+						t.Errorf("%s with agreement %d failing with %q = %v, want the failure as it is", name, at, c.err, err)
+					}
+				}
+			}
+		}
+		if epoch, _ := ring.Current(); epoch != 0 || next.Bytes() == nil || owned.Bytes() == nil {
+			t.Fatalf("failed checks moved the ring to epoch %d or released a key", epoch)
+		}
+	})
+}
+
+// holds the agreements made through it, once armed, until the test lets them go
+type heldCheck struct {
+	jcrypto.CryptoProvider
+	armed   atomic.Bool
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *heldCheck) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	if h.armed.Load() {
+		h.once.Do(func() { close(h.entered) })
+		<-h.release
+	}
+	return h.CryptoProvider.Agree(priv, peerPub, ctx)
+}
+
+func TestSetupsDoNotWaitForTheKeyPairCheckOfARotation(t *testing.T) {
+	onEverySuite(t, func(t *testing.T, inner jcrypto.CryptoProvider) {
+		h := &heldCheck{CryptoProvider: inner, entered: make(chan struct{}), release: make(chan struct{})}
+		ring, first := newRing(t, h, 0)
+		cell := setupFor(t, inner, first.pub)
+		priv, pub, err := inner.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		h.armed.Store(true)
+		rotated := make(chan error, 1)
+		go func() {
+			_, err := ring.Rotate(priv, pub)
+			rotated <- err
+		}()
+		<-h.entered
+		opened := make(chan error, 1)
+		go func() {
+			layer, err := ring.Open(inner, cell)
+			if err == nil {
+				layer.CellKey.Release()
+			}
+			opened <- err
+		}()
+		var waited bool
+		select {
+		case err := <-opened:
+			if err != nil {
+				t.Errorf("a setup during the key pair check: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			waited = true
+		}
+		close(h.release)
+		if err := <-rotated; err != nil {
+			t.Fatalf("Rotate: %v", err)
+		}
+		if waited {
+			<-opened
+			t.Fatal("a setup waited for the key pair check of a rotation")
+		}
+		if epoch, _ := ring.Current(); epoch != 1 {
+			t.Fatalf("epoch %d after the held check, want 1", epoch)
+		}
+	})
 }
 
 type rotating struct {

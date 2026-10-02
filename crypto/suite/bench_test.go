@@ -42,13 +42,96 @@ func BenchmarkAgree(b *testing.B) {
 			b.Fatal(err)
 		}
 		peer.Release()
-		ukm := []byte("circuit1")
+		ctx := setupContext(b, p, pub)
 		for b.Loop() {
-			s, err := p.Agree(priv, pub, ukm)
+			s, err := p.Agree(priv, pub, ctx)
 			if err != nil {
 				b.Fatal(err)
 			}
 			s.Release()
+		}
+	})
+}
+
+// the transcript of one hop of a circuit setup: version, hop index, link id,
+// onion key, ephemeral key
+func setupContext(b *testing.B, p jcrypto.CryptoProvider, pub []byte) jcrypto.Context {
+	b.Helper()
+	ctx, err := jcrypto.NewContext(p, "setup", []byte{2}, []byte{0}, make([]byte, 8), pub, pub)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return ctx
+}
+
+func BenchmarkNewContext(b *testing.B) {
+	each(b, func(b *testing.B, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			b.Fatal(err)
+		}
+		priv.Release()
+		// written out: setupContext calls b.Helper, whose cost would be timed with
+		// the hash and is not small next to SHA-256 over 120 bytes
+		for b.Loop() {
+			if _, err := jcrypto.NewContext(p, "setup", []byte{2}, []byte{0}, make([]byte, 8), pub, pub); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// what a hop pays after the agreement: the setup key, the cell key, the replay
+// tag and the two counter offsets
+func BenchmarkDeriveHopKeys(b *testing.B) {
+	each(b, func(b *testing.B, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer priv.Release()
+		ctx := setupContext(b, p, pub)
+		secret, err := p.Agree(priv, pub, ctx)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer secret.Release()
+		keys := []struct {
+			purpose string
+			size    int
+		}{{"setup", p.KeySize()}, {"cell", p.KeySize()}, {"setup/replay", 16}, {"counter/fwd", 8}, {"counter/bwd", 8}}
+		for b.Loop() {
+			for _, k := range keys {
+				key, err := p.DeriveKey(secret, k.purpose, ctx, k.size)
+				if err != nil {
+					b.Fatal(err)
+				}
+				key.Release()
+			}
+		}
+	})
+}
+
+// the chaining step of an authenticated link handshake
+func BenchmarkMixKey(b *testing.B) {
+	each(b, func(b *testing.B, p jcrypto.CryptoProvider) {
+		priv, pub, err := p.GenerateEphemeral()
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer priv.Release()
+		ctx := setupContext(b, p, pub)
+		secret, err := p.Agree(priv, pub, ctx)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer secret.Release()
+		for b.Loop() {
+			key, err := p.MixKey(secret, secret, ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			key.Release()
 		}
 	})
 }
@@ -61,12 +144,13 @@ func BenchmarkSealCell(b *testing.B) {
 			b.Fatal(err)
 		}
 		defer priv.Release()
-		secret, err := p.Agree(priv, pub, []byte("circuit1"))
+		ctx := setupContext(b, p, pub)
+		secret, err := p.Agree(priv, pub, ctx)
 		if err != nil {
 			b.Fatal(err)
 		}
 		defer secret.Release()
-		key, err := p.DeriveKey(secret, []byte("cell"), p.KeySize())
+		key, err := p.DeriveKey(secret, "cell", ctx, p.KeySize())
 		if err != nil {
 			b.Fatal(err)
 		}

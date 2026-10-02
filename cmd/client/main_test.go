@@ -1001,7 +1001,7 @@ func TestProcessExitsWithTheCodeOfTheCircuitEnd(t *testing.T) {
 						return err
 					}
 					defer raw.Close()
-					conn, err := link.Accept(raw, p, linkPriv)
+					conn, err := link.Accept(raw, p, linkPriv, linkPub)
 					if err != nil {
 						return err
 					}

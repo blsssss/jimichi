@@ -45,7 +45,7 @@ func linkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *link.C
 	a, b := net.Pipe()
 	done := make(chan *link.Conn, 1)
 	go func() {
-		c, err := link.Accept(b, p, nil)
+		c, err := link.Accept(b, p, nil, nil)
 		if err != nil {
 			done <- nil
 			return
@@ -123,12 +123,12 @@ func TestFailedForwardWriteBreaksTheCircuit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := c25519.New()
-			priv, _, err := p.GenerateEphemeral()
+			priv, pub, err := p.GenerateEphemeral()
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer priv.Release()
-			r, err := New(Config{Provider: p, StaticPriv: priv})
+			r, err := New(Config{Provider: p, StaticPriv: priv, StaticPub: pub})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -168,7 +168,7 @@ func tcpLinkPair(t *testing.T, p jcrypto.CryptoProvider) (dialled, accepted *lin
 			done <- nil
 			return
 		}
-		c, err := link.Accept(raw, p, nil)
+		c, err := link.Accept(raw, p, nil, nil)
 		if err != nil {
 			_ = raw.Close()
 			done <- nil

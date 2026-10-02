@@ -46,7 +46,31 @@ English | [Русский](../ru/LIMITATIONS.md)
   damages or a connection it breaks closes the circuit all the same. This is a denial of service.
 - A link is authenticated in one direction, to the node it leads to. The responder does not
   authenticate the initiator: a node cannot tell a roster node from a client or from anyone else
-  who connects to its cell port.
+  who connects to its cell port. Authenticating the initiator on links between nodes is planned
+  ([#56](https://github.com/jimichi-org/jimichi/issues/56)); a client stays unauthenticated to
+  its entry.
+- The transcript binds keys, not the identity of a node: the certificate hash and the address of
+  the node are not part of it. A node that publishes another node's link key byte for byte in
+  its own descriptor is not detected by this: the chain check compares the addresses, the
+  signing keys and the onion keys of the nodes, and does not compare the link keys.
+- The link handshake has no explicit confirmation from the initiator: the responder learns that
+  the initiator derived the same keys only when the first frame from it opens. The mode byte
+  crosses the wire in the clear ([#57](https://github.com/jimichi-org/jimichi/issues/57)).
+- The tests of wire and link are what keeps the content of the transcript right. The interface
+  guarantees only that no key can be derived without a transcript, not that the transcript holds
+  everything it should. There is no formal model of the setup or of the link handshake;
+  a model of the setup is planned ([#61](https://github.com/jimichi-org/jimichi/issues/61)).
+- The key schedule is not Noise. The setup and the link follow the shape of the N, NN and NK
+  exchanges and bind the transcript to every key, but an agreement returns the output of a KDF
+  rather than the raw Diffie-Hellman result, so the published Noise test vectors do not apply.
+  The scheme has vectors of its own (CRYPTO, section "Key derivation").
+- There is no negotiation of the key scheme version: sides on different versions are not
+  compatible, and a link handshake between them ends at the confirmation frame with no cause
+  named. Nodes and clients are updated together.
+- Frame keys of a link and hop keys do not change while the link and the circuit live. Cells
+  under a hop key are bounded only by the counter limit (2^60 per direction); frames under a
+  frame key are bounded by nothing but the 64-bit frame number. Rotation inside links and
+  circuits is planned ([#58](https://github.com/jimichi-org/jimichi/issues/58)).
 - The baseline without node authentication (-auth=false) extends a circuit to any address named
   in the setup cell, and its links between nodes are anonymous: they hide headers from a passive
   observer only. Its client takes the unverified keys of every hop from the entry alone, and a
@@ -145,9 +169,10 @@ English | [Русский](../ru/LIMITATIONS.md)
   is exceeded while the node cannot act: a sleeping host and a frozen process keep their memory
   until they run again, and a machine paused and resumed with neither clock moved forward keeps
   a key longer by the length of the pause.
-- The window holds only while rotations succeed. A node that cannot make its next key, or cannot
-  lock its page, keeps the published key, tries again every second and counts the attempts
-  (onion_rotate_failed); until one succeeds that key has no bound.
+- The window holds only while rotations succeed. A node that cannot make its next key, cannot
+  lock its page or whose key pair check (CRYPTO) does not pass keeps the published key, tries
+  again every second and counts the attempts (onion_rotate_failed); until one succeeds that key
+  has no bound.
 - Onion key rotation does not cover: the hop keys of circuits that are alive when memory is
   taken, which open the cells of those circuits, recorded ones included, for as long as the
   circuit lives (24 h at most by default); the link key, which lives as long as the process and

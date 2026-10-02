@@ -409,6 +409,7 @@ func startNode(provider jcrypto.CryptoProvider, period time.Duration, observed b
 	cfg := relay.Config{
 		Provider:   provider,
 		StaticPriv: priv,
+		StaticPub:  pub,
 		// the exit echoes, which is what lets a run measure delivery latency
 		Deliver: func(_ uint64, payload []byte) []byte { return payload },
 		Period:  period,

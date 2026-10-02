@@ -204,7 +204,7 @@ func serveNode(provider jcrypto.CryptoProvider, cfg config, logger *log.Logger, 
 		n.setPeers(cfg.peers, unverifiedPeer(provider))
 	}
 
-	r, err := relay.New(relayConfig(provider, staticPriv, cfg, n))
+	r, err := relay.New(relayConfig(provider, staticPriv, staticPub, cfg, n))
 	if err != nil {
 		return fmt.Errorf("relay: %w", err)
 	}
@@ -258,10 +258,11 @@ func untilStopped(stop <-chan os.Signal, served <-chan error, logger *log.Logger
 	}
 }
 
-func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cfg config, n *node) relay.Config {
+func relayConfig(provider jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte, cfg config, n *node) relay.Config {
 	rc := relay.Config{
 		Provider:   provider,
 		StaticPriv: staticPriv,
+		StaticPub:  staticPub,
 		// the payload is never logged: that would hand out exactly the metadata
 		// the node exists to withhold
 		Deliver: func(_ uint64, payload []byte) []byte {
@@ -309,10 +310,10 @@ func splitList(s string) []string {
 }
 
 // a setup holds a handful of key pages at once, the static and identity keys
-// one more each, and a rotating node two onion keys, the page it keeps for the
-// next one and one more page per setup while both keys are tried; below this
-// the node would start and then fail its first circuits
-const minMemlock = 64 << 10
+// one more each, and a rotating node two onion keys, the rotationPages it keeps
+// for the next one and one more page per setup while both keys are tried; below
+// this the node would start and then fail its first circuits
+const minMemlock = 80 << 10
 
 func checkMemlock() error {
 	budget, err := secmem.MemlockBudget()

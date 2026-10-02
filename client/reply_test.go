@@ -290,12 +290,12 @@ type scriptedChain struct {
 	raw  net.Conn
 }
 
-func acceptScripted(ln net.Listener, p jcrypto.CryptoProvider, privs []*secmem.Buffer) (*scriptedChain, error) {
+func acceptScripted(ln net.Listener, p jcrypto.CryptoProvider, privs []*secmem.Buffer, pubs [][]byte) (*scriptedChain, error) {
 	raw, err := ln.Accept()
 	if err != nil {
 		return nil, err
 	}
-	conn, err := link.Accept(raw, p, privs[0])
+	conn, err := link.Accept(raw, p, privs[0], pubs[0])
 	if err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -312,7 +312,7 @@ func acceptScripted(ln net.Listener, p jcrypto.CryptoProvider, privs []*secmem.B
 			s.close()
 			return nil, err
 		}
-		layer, err := wire.OpenSetup(p, priv, cell)
+		layer, err := wire.OpenSetup(p, priv, pubs[i], cell)
 		if err != nil {
 			s.close()
 			return nil, fmt.Errorf("setup layer %d: %w", i, err)
@@ -354,6 +354,7 @@ func dialScriptedThrough(t *testing.T, p jcrypto.CryptoProvider, dial func(ctx c
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	privs := make([]*secmem.Buffer, replyHops)
+	pubs := make([][]byte, replyHops)
 	nodes := make([]Node, replyHops)
 	for i := range nodes {
 		priv, pub, err := p.GenerateEphemeral()
@@ -362,6 +363,7 @@ func dialScriptedThrough(t *testing.T, p jcrypto.CryptoProvider, dial func(ctx c
 		}
 		t.Cleanup(priv.Release)
 		privs[i] = priv
+		pubs[i] = pub
 		nodes[i] = Node{Addr: fmt.Sprintf("node-%d:9000", i), StaticPub: pub}
 	}
 	nodes[0].Addr = ln.Addr().String()
@@ -372,7 +374,7 @@ func dialScriptedThrough(t *testing.T, p jcrypto.CryptoProvider, dial func(ctx c
 	}
 	got := make(chan accepted, 1)
 	go func() {
-		s, err := acceptScripted(ln, p, privs)
+		s, err := acceptScripted(ln, p, privs, pubs)
 		got <- accepted{s, err}
 	}()
 	cl, err := Dial(Config{Provider: p, Chain: nodes, Dial: dial})

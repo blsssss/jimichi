@@ -48,47 +48,91 @@ func (p *Provider) GenerateEphemeral() (*secmem.Buffer, []byte, error) {
 	return priv, pub, nil
 }
 
-// ukm goes in as the HKDF salt, which gives it the role VKO gives it in the GOST
-// suite: two sessions between the same keys never share a secret
-func (p *Provider) Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error) {
+// HKDF-SHA-256 (RFC 5869) with the transcript hash as the extract salt and
+// again in the expand info, so the raw X25519 output never leaves this call
+func (p *Provider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Context) (*secmem.Buffer, error) {
 	if priv == nil || priv.Len() != privSize {
 		return nil, jcrypto.ErrBadKeySize
+	}
+	if !p.owns(ctx) {
+		return nil, jcrypto.ErrBadContext
+	}
+	label, err := jcrypto.Label(p.Suite(), "agree")
+	if err != nil {
+		return nil, err
 	}
 	if len(peerPub) != pubSize {
 		return nil, jcrypto.ErrBadPublicKey
 	}
 
+	// with both lengths right the only refusal left is a point of small order,
+	// whose shared value is all zeroes
 	shared, err := curve25519.X25519(priv.Bytes(), peerPub)
 	if err != nil {
-		return nil, fmt.Errorf("c25519: x25519: %w", err)
+		return nil, fmt.Errorf("%w: %v", jcrypto.ErrBadPublicKey, err)
 	}
 	defer secmem.Zero(shared)
 
-	out, err := secmem.New(keySize)
+	th := ctx.Sum()
+	return extractExpand(th, shared, info(label, th))
+}
+
+func (p *Provider) MixKey(chain, secret *secmem.Buffer, ctx jcrypto.Context) (*secmem.Buffer, error) {
+	if chain == nil || chain.Len() != keySize || secret == nil || secret.Len() != keySize {
+		return nil, jcrypto.ErrBadKeySize
+	}
+	if !p.owns(ctx) {
+		return nil, jcrypto.ErrBadContext
+	}
+	label, err := jcrypto.Label(p.Suite(), "mix")
 	if err != nil {
 		return nil, err
 	}
-	kdf := hkdf.New(sha256.New, shared, ukm, []byte("jimichi/agree"))
-	if _, err := io.ReadFull(kdf, out.Bytes()); err != nil {
-		out.Release()
-		return nil, fmt.Errorf("c25519: hkdf: %w", err)
-	}
-	return out, nil
+	return extractExpand(chain.Bytes(), secret.Bytes(), info(label, ctx.Sum()))
 }
 
-func (p *Provider) DeriveKey(secret *secmem.Buffer, label []byte, size int) (*secmem.Buffer, error) {
-	if secret == nil || secret.Len() == 0 {
+func (p *Provider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.Context, size int) (*secmem.Buffer, error) {
+	if secret == nil || secret.Len() != keySize {
 		return nil, jcrypto.ErrBadKeySize
 	}
-	if size <= 0 {
+	if size <= 0 || size > keySize {
 		return nil, jcrypto.ErrBadKeySize
 	}
+	if !p.owns(ctx) {
+		return nil, jcrypto.ErrBadContext
+	}
+	label, err := jcrypto.DeriveLabel(p.Suite(), purpose)
+	if err != nil {
+		return nil, err
+	}
+	return expand(secret.Bytes(), info(label, ctx.Sum()), size)
+}
+
+func (p *Provider) owns(ctx jcrypto.Context) bool {
+	return ctx.Valid() && ctx.Suite() == p.Suite()
+}
+
+// the label holds no zero byte and the hash has a fixed size, so the split
+// between them is unambiguous
+func info(label, th []byte) []byte {
+	out := make([]byte, 0, len(label)+1+len(th))
+	out = append(out, label...)
+	out = append(out, 0x00)
+	return append(out, th...)
+}
+
+func extractExpand(salt, ikm, info []byte) (*secmem.Buffer, error) {
+	prk := hkdf.Extract(sha256.New, ikm, salt)
+	defer secmem.Zero(prk)
+	return expand(prk, info, keySize)
+}
+
+func expand(prk, info []byte, size int) (*secmem.Buffer, error) {
 	out, err := secmem.New(size)
 	if err != nil {
 		return nil, err
 	}
-	kdf := hkdf.Expand(sha256.New, secret.Bytes(), label)
-	if _, err := io.ReadFull(kdf, out.Bytes()); err != nil {
+	if _, err := io.ReadFull(hkdf.Expand(sha256.New, prk, info), out.Bytes()); err != nil {
 		out.Release()
 		return nil, fmt.Errorf("c25519: hkdf expand: %w", err)
 	}

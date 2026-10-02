@@ -3,6 +3,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,9 @@ type Deliver func(circuit uint64, payload []byte) []byte
 type Config struct {
 	Provider   jcrypto.CryptoProvider
 	StaticPriv *secmem.Buffer
+	// the public half as the node publishes it: an initiator that authenticates
+	// the link, and a client when Onion is nil, bind their keys to these bytes
+	StaticPub []byte
 	// the keys that open setup layers, closed by the caller after Close; nil
 	// keeps StaticPriv, the link key, in that role as well for the life of the
 	// node
@@ -187,6 +191,14 @@ func New(cfg Config) (*Relay, error) {
 	if cfg.StaticPriv == nil {
 		return nil, errors.New("relay: no static key")
 	}
+	pubSize, err := wire.PublicKeySize(cfg.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.StaticPub) != pubSize {
+		return nil, fmt.Errorf("%w: %d bytes, want %d", ErrStaticPubSize, len(cfg.StaticPub), pubSize)
+	}
+	cfg.StaticPub = bytes.Clone(cfg.StaticPub)
 	if cfg.QueueCells < 0 || cfg.QueueCells > maxQueueCells {
 		return nil, fmt.Errorf("relay: queue of %d cells outside 0..%d", cfg.QueueCells, maxQueueCells)
 	}
@@ -197,9 +209,12 @@ func New(cfg Config) (*Relay, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkKeyPair(cfg.Provider, cfg.StaticPriv, cfg.StaticPub, ErrStaticPair); err != nil {
+		return nil, err
+	}
 	onion := cfg.Onion
 	if onion == nil {
-		onion = staticRing(cfg.StaticPriv, cfg.SetupCache)
+		onion = staticRing(cfg.Provider, cfg.StaticPriv, cfg.StaticPub, cfg.SetupCache)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Relay{
@@ -225,6 +240,11 @@ const onwardTimeout = 5 * time.Second
 // with the map overhead, so this keeps a cache near 36 MiB and the two of a
 // node between a rotation and the release of the old key inside a 128 MiB pod
 const MaxSetupCache = 1 << 20
+
+var (
+	ErrStaticPubSize = errors.New("relay: static public key of the wrong size")
+	ErrStaticPair    = errors.New("relay: static public key is not the half of the private key")
+)
 
 var (
 	errDuplicate = errors.New("relay: circuit id already in use")
@@ -348,7 +368,7 @@ func (r *Relay) handle(conn net.Conn, src netip.Addr) {
 	if r.lim.handshake > 0 {
 		_ = conn.SetDeadline(time.Now().Add(r.lim.handshake))
 	}
-	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv)
+	lc, err := link.Accept(conn, r.cfg.Provider, r.cfg.StaticPriv, r.cfg.StaticPub)
 	r.handshakeDone(src)
 	if err != nil {
 		r.stats.timeout(err)

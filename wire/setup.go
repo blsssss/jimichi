@@ -18,14 +18,16 @@ const (
 	setupFlags = 1
 	setupHdr   = setupFlags + AddrSize + 8
 
-	LabelSetup  = "jimichi/setup"
-	LabelCell   = "jimichi/cell"
-	LabelReplay = "jimichi/setup/replay"
+	exchangeSetup = "setup"
+
+	purposeSetup  = "setup"
+	purposeCell   = "cell"
+	purposeReplay = "setup/replay"
 
 	// taken from the shared secret like the cell key, so the offsets need no
 	// bytes in the setup cell
-	LabelCounterForward  = "jimichi/counter/fwd"
-	LabelCounterBackward = "jimichi/counter/bwd"
+	purposeCounterForward  = "counter/fwd"
+	purposeCounterBackward = "counter/bwd"
 )
 
 // no suite fits more layers into one setup cell; the bound also keeps a
@@ -122,8 +124,7 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 	}
 	overhead := sz.overhead
 
-	pubLen := len(chain[0].StaticPub)
-	perHop := perHopCost(pubLen, overhead)
+	perHop := perHopCost(sz.pub, overhead)
 	if setupLayerLen(len(chain), perHop) < 0 {
 		return nil, ErrSetupSize
 	}
@@ -150,30 +151,40 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 	}
 
 	for i, hop := range chain {
+		if len(hop.StaticPub) != sz.pub {
+			release()
+			return nil, fmt.Errorf("wire: key of hop %d: %w", i, jcrypto.ErrBadPublicKey)
+		}
 		ephPriv, ephPub, err := p.GenerateEphemeral()
 		if err != nil {
 			release()
 			return nil, err
 		}
-		secret, err := p.Agree(ephPriv, hop.StaticPub, linkUKM(hop.Link))
+		ctx, err := setupContext(p, i, hop.Link, hop.StaticPub, ephPub)
+		if err != nil {
+			ephPriv.Release()
+			release()
+			return nil, err
+		}
+		secret, err := p.Agree(ephPriv, hop.StaticPub, ctx)
 		ephPriv.Release()
 		if err != nil {
 			release()
 			return nil, fmt.Errorf("wire: agree with hop %d: %w", i, err)
 		}
-		setupKeys[i], err = p.DeriveKey(secret, []byte(LabelSetup), p.KeySize())
+		setupKeys[i], err = p.DeriveKey(secret, purposeSetup, ctx, p.KeySize())
 		if err != nil {
 			secret.Release()
 			release()
 			return nil, err
 		}
-		cellKeys[i], err = p.DeriveKey(secret, []byte(LabelCell), p.KeySize())
+		cellKeys[i], err = p.DeriveKey(secret, purposeCell, ctx, p.KeySize())
 		if err != nil {
 			secret.Release()
 			release()
 			return nil, err
 		}
-		offsets[i], err = deriveOffsets(p, secret)
+		offsets[i], err = deriveOffsets(p, secret, ctx)
 		secret.Release()
 		if err != nil {
 			release()
@@ -257,8 +268,10 @@ type SetupLayer struct {
 }
 
 // index travels in the counter field: a relay must know its position before it
-// can tell how much of the body belongs to its layer
-func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) (*SetupLayer, error) {
+// can tell how much of the body belongs to its layer. staticPub is the key the
+// client took from the descriptor: it is part of the transcript, so a layer
+// built for another key does not open
+func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, staticPub []byte, cell *Cell) (*SetupLayer, error) {
 	hdr, err := cell.Header()
 	if err != nil {
 		return nil, err
@@ -276,6 +289,9 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 		return nil, err
 	}
 	pubLen, overhead := sz.pub, sz.overhead
+	if len(staticPub) != pubLen {
+		return nil, jcrypto.ErrBadPublicKey
+	}
 
 	perHop := perHopCost(pubLen, overhead)
 	layerLen := setupLayerLen(index, perHop)
@@ -286,30 +302,34 @@ func OpenSetup(p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, cell *Cell) 
 	layer := cell.Body()[:layerLen]
 	ephPub := layer[:pubLen]
 
-	secret, err := p.Agree(staticPriv, ephPub, linkUKM(hdr.Circuit))
+	ctx, err := setupContext(p, index, hdr.Circuit, staticPub, ephPub)
 	if err != nil {
 		return nil, err
 	}
-	setupKey, err := p.DeriveKey(secret, []byte(LabelSetup), p.KeySize())
+	secret, err := p.Agree(staticPriv, ephPub, ctx)
+	if err != nil {
+		return nil, err
+	}
+	setupKey, err := p.DeriveKey(secret, purposeSetup, ctx, p.KeySize())
 	if err != nil {
 		secret.Release()
 		return nil, err
 	}
 	defer setupKey.Release()
-	// taken from the secret and not from the key on the wire: keys that differ
-	// by a point of small order, and X25519 encodings with the top bit set, all
-	// give one secret and open the same layer
-	tag, err := setupTag(p, secret)
+	// the bytes of the ephemeral key are in the transcript, so another encoding
+	// of the same point gives another secret and only an exact copy of the
+	// layer reaches this tag
+	tag, err := setupTag(p, secret, ctx)
 	if err != nil {
 		secret.Release()
 		return nil, err
 	}
-	cellKey, err := p.DeriveKey(secret, []byte(LabelCell), p.KeySize())
+	cellKey, err := p.DeriveKey(secret, purposeCell, ctx, p.KeySize())
 	if err != nil {
 		secret.Release()
 		return nil, err
 	}
-	offsets, err := deriveOffsets(p, secret)
+	offsets, err := deriveOffsets(p, secret, ctx)
 	secret.Release()
 	if err != nil {
 		cellKey.Release()
@@ -366,9 +386,9 @@ func ForwardSetup(layer *SetupLayer, index int) (*Cell, error) {
 
 // the tag is a one-way image of the secret under its own label, so keeping it
 // on the heap for the life of the node key reveals none of the layer keys
-func setupTag(p jcrypto.CryptoProvider, secret *secmem.Buffer) (SetupTag, error) {
+func setupTag(p jcrypto.CryptoProvider, secret *secmem.Buffer, ctx jcrypto.Context) (SetupTag, error) {
 	var tag SetupTag
-	b, err := p.DeriveKey(secret, []byte(LabelReplay), len(tag))
+	b, err := p.DeriveKey(secret, purposeReplay, ctx, len(tag))
 	if err != nil {
 		return tag, err
 	}
@@ -381,10 +401,12 @@ func setupAAD(index int) []byte {
 	return []byte{byte(Version), byte(KindControl), byte(index)}
 }
 
-func linkUKM(link uint64) []byte {
-	ukm := make([]byte, 8)
-	binary.BigEndian.PutUint64(ukm, link)
-	return ukm
+// one transcript per hop: version, hop index, identifier of the link into the
+// hop, the hop's onion key, the client's ephemeral key
+func setupContext(p jcrypto.CryptoProvider, index int, link uint64, staticPub, ephPub []byte) (jcrypto.Context, error) {
+	var id [8]byte
+	binary.BigEndian.PutUint64(id[:], link)
+	return jcrypto.NewContext(p, exchangeSetup, []byte{byte(Version)}, []byte{byte(index)}, id[:], staticPub, ephPub)
 }
 
 func putAddr(dst []byte, addr string) error {

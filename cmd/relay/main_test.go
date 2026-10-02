@@ -12,6 +12,7 @@ import (
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
 	"github.com/jimichi-org/jimichi/crypto/secmem"
 	"github.com/jimichi-org/jimichi/crypto/suite"
+	"github.com/jimichi-org/jimichi/wire"
 )
 
 // hands out keys as usual and remembers every buffer, so a test can see
@@ -54,6 +55,10 @@ func TestFailedStartReleasesTheKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer taken.Close()
+	// the size probe of the suite makes a key pair once; it runs here so no case counts it
+	if _, err := wire.PublicKeySize(inner); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, c := range []struct {
 		name  string
@@ -74,8 +79,8 @@ func TestFailedStartReleasesTheKeys(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "listen") {
 				t.Fatalf("serveNode = %v, want a listen error", err)
 			}
-			if len(p.keys) != 2 {
-				t.Fatalf("%d keys made, want the static and the identity key", len(p.keys))
+			if len(p.keys) != 3 {
+				t.Fatalf("%d keys made, want the static key, the identity key and the one of the key pair check", len(p.keys))
 			}
 			for i, k := range p.keys {
 				if k.Bytes() != nil {

@@ -29,8 +29,9 @@ func unhex(t *testing.T, s string) []byte {
 	return b
 }
 
-// RFC 7836 appendix A.1: VKO GOST R 34.10-2012 with the 256-bit output, on the
-// 512-bit paramSetA curve the example uses. Both sides must reach the same KEK
+// RFC 7836, appendix B, example 7: VKO GOST R 34.10-2012 with the 256-bit
+// output, on the 512-bit paramSetA curve the example uses. Both sides must
+// reach the same KEK
 func TestVKOKnownAnswer(t *testing.T) {
 	c := gost3410.CurveIdtc26gost341012512paramSetA()
 	ukm := unhex(t, "1d80603c8544c727")
@@ -53,7 +54,7 @@ func TestVKOKnownAnswer(t *testing.T) {
 	}
 }
 
-// R 50.1.113-2016, 4.4: KDF_GOSTR3411_2012_256 with key 00..1f, label
+// RFC 7836, appendix B, example 9: KDF_GOSTR3411_2012_256 with key 00..1f, label
 // 26bdb878 and seed af21434145656378
 func TestKDFKnownAnswer(t *testing.T) {
 	key := unhex(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
@@ -116,9 +117,10 @@ func TestOffCurvePointIsRefused(t *testing.T) {
 	}
 	defer priv.Release()
 
+	ctx := testContext(t, []byte("session-1"))
 	bad := bytes.Clone(pub)
 	bad[0] ^= 0x01
-	if _, err := p.Agree(priv, bad, []byte("ukm")); !errors.Is(err, jcrypto.ErrBadPublicKey) {
+	if _, err := p.Agree(priv, bad, ctx); !errors.Is(err, jcrypto.ErrBadPublicKey) {
 		t.Fatalf("Agree with an off-curve point: %v, want ErrBadPublicKey", err)
 	}
 	if p.Verify(bad, []byte("m"), make([]byte, 64)) {
@@ -126,7 +128,7 @@ func TestOffCurvePointIsRefused(t *testing.T) {
 	}
 
 	tooBig := bytes.Repeat([]byte{0xff}, len(pub))
-	if _, err := p.Agree(priv, tooBig, []byte("ukm")); !errors.Is(err, jcrypto.ErrBadPublicKey) {
+	if _, err := p.Agree(priv, tooBig, ctx); !errors.Is(err, jcrypto.ErrBadPublicKey) {
 		t.Fatalf("Agree with coordinates above p: %v, want ErrBadPublicKey", err)
 	}
 }
@@ -148,28 +150,128 @@ func TestKeysHaveTheExpectedShape(t *testing.T) {
 	}
 }
 
-func TestDeriveKeyRefusesMoreThanOneBlock(t *testing.T) {
-	secret, err := secmem.NewFrom(bytes.Repeat([]byte{7}, 32))
+func testContext(t *testing.T, parts ...[]byte) jcrypto.Context {
+	t.Helper()
+	ctx, err := jcrypto.NewContext(New(), "test", parts...)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return ctx
+}
+
+func fixedSecret(t *testing.T, first byte) *secmem.Buffer {
+	t.Helper()
+	raw := make([]byte, keySize)
+	for i := range raw {
+		raw[i] = first + byte(i)
+	}
+	b, err := secmem.NewFrom(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// the agreement is nothing but VKO under the first 8 bytes of the transcript
+// hash followed by one KDF call seeded with the whole hash. Keys and values are
+// the GOST Agree vector of providertest
+func TestAgreeIsVKOThenKDF(t *testing.T) {
+	c := curve()
+	priv := unhex(t, "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	pubA := unhex(t, "000ad8811b8280e56a2c9b37b7170a3de04039df9151482097e3cc0669ecb7a0"+
+		"623f29508cc68b124c3d15a4e2a26e3e71dc391fb2c62d558071878e6814f9a3")
+	pubB := unhex(t, "b6749ce1d202dd4550a1ad7a8797e16e47cfdb0a0b446465e447f56abb4dae1b"+
+		"43cad001b96e51d4f10df16549327c9eea30e0a74adf0ce5a01c5934ec52edc6")
+	ctx, err := jcrypto.NewContext(New(), "setup", []byte{0x02}, []byte{0x00}, []byte{0, 0, 0, 0, 0, 0, 0, 200}, pubB, pubA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	th := ctx.Sum()
+	if got := hex.EncodeToString(th[:ukmSize]); got != "28381a1c9c8e2531" {
+		t.Fatalf("UKM %s, want 28381a1c9c8e2531", got)
+	}
+
+	kek, err := vko(c, priv, pubB, th[:ukmSize])
+	if err != nil {
+		t.Fatalf("vko: %v", err)
+	}
+	if got := hex.EncodeToString(kek); got != "e50506395189f57d28577d26b265f204e048cb78976dd3bee1fbe7098d75ca94" {
+		t.Fatalf("KEK %s", got)
+	}
+	label, err := jcrypto.Label(jcrypto.SuiteGOST, "agree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]byte, keySize)
+	derive(want, kek, label, th)
+
+	key, err := secmem.NewFrom(bytes.Clone(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer key.Release()
+	got, err := New().Agree(key, pubB, ctx)
+	if err != nil {
+		t.Fatalf("Agree: %v", err)
+	}
+	defer got.Release()
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatalf("Agree %x, want KDF(VKO) %x", got.Bytes(), want)
+	}
+}
+
+// MixKey is the same KDF keyed with the chain key, the seed being the
+// transcript hash followed by the mixed secret
+func TestMixKeyIsKDF(t *testing.T) {
+	chain, secret := fixedSecret(t, 0x40), fixedSecret(t, 0x60)
+	defer chain.Release()
 	defer secret.Release()
-	if _, err := New().DeriveKey(secret, []byte("x"), 33); err == nil {
-		t.Fatal("DeriveKey accepted 33 bytes")
-	}
-	short, err := New().DeriveKey(secret, []byte("x"), 16)
+	ctx := testContext(t, []byte("session-1"))
+
+	label, err := jcrypto.Label(jcrypto.SuiteGOST, "mix")
 	if err != nil {
 		t.Fatal(err)
 	}
-	full, err := New().DeriveKey(secret, []byte("x"), 32)
+	want := make([]byte, keySize)
+	derive(want, chain.Bytes(), label, append(ctx.Sum(), secret.Bytes()...))
+
+	got, err := New().MixKey(chain, secret, ctx)
+	if err != nil {
+		t.Fatalf("MixKey: %v", err)
+	}
+	defer got.Release()
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatalf("MixKey %x, want %x", got.Bytes(), want)
+	}
+}
+
+// DeriveKey is the same KDF with the transcript hash as the seed, and a shorter
+// key is the prefix of the one block it gives
+func TestDeriveKeyIsKDF(t *testing.T) {
+	secret := fixedSecret(t, 0x40)
+	defer secret.Release()
+	ctx := testContext(t, []byte("session-1"))
+
+	label, err := jcrypto.Label(jcrypto.SuiteGOST, "setup/replay")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(short.Bytes(), full.Bytes()[:16]) {
-		t.Fatal("a shorter key must be the prefix of the full block")
+	want := make([]byte, keySize)
+	derive(want, secret.Bytes(), label, ctx.Sum())
+
+	for _, size := range []int{16, keySize} {
+		got, err := New().DeriveKey(secret, "setup/replay", ctx, size)
+		if err != nil {
+			t.Fatalf("DeriveKey(%d): %v", size, err)
+		}
+		if !bytes.Equal(got.Bytes(), want[:size]) {
+			t.Fatalf("DeriveKey(%d) %x, want %x", size, got.Bytes(), want[:size])
+		}
+		got.Release()
 	}
-	short.Release()
-	full.Release()
+	if _, err := New().DeriveKey(secret, "setup/replay", ctx, keySize+1); !errors.Is(err, jcrypto.ErrBadKeySize) {
+		t.Fatalf("DeriveKey accepted 33 bytes: %v", err)
+	}
 }
 
 // the 4-torsion of paramSetA, built in Edwards coordinates where it is easy to
@@ -201,7 +303,7 @@ func TestLowOrderPointsAreRefused(t *testing.T) {
 		if _, err := publicKey(c, raw); err == nil {
 			t.Fatalf("%s: publicKey accepted it", pt.name)
 		}
-		if _, err := p.Agree(priv, raw, []byte("ukm")); !errors.Is(err, jcrypto.ErrBadPublicKey) {
+		if _, err := p.Agree(priv, raw, testContext(t, []byte("session-1"))); !errors.Is(err, jcrypto.ErrBadPublicKey) {
 			t.Fatalf("%s: Agree gave %v, want ErrBadPublicKey", pt.name, err)
 		}
 		if p.Verify(raw, []byte("m"), make([]byte, 64)) {
@@ -233,19 +335,30 @@ func TestCurveIsParamSetA(t *testing.T) {
 	}
 }
 
-// 8 bytes go in as they are; anything longer is hashed down to 8 first, so the
-// factor stays a 64-bit number; a zero factor becomes one
+// 8 bytes go in as they are, little endian; a zero factor becomes one; no
+// other length is taken, so nothing is hashed down on the way to the factor
 func TestVKOFactor(t *testing.T) {
 	short := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	if got, want := vkoFactor(short), gost3410.NewUKM(short); got.Cmp(want) != 0 {
-		t.Fatalf("8-byte UKM changed: %v, want %v", got, want)
+	got, err := vkoFactor(short)
+	if err != nil || got.Cmp(big.NewInt(0x0807060504030201)) != 0 {
+		t.Fatalf("8-byte UKM gave %x, %v", got, err)
 	}
-	long := bytes.Repeat([]byte{9}, 64)
-	if got := vkoFactor(long); got.BitLen() > 64 {
-		t.Fatalf("64-byte UKM gave a %d-bit factor", got.BitLen())
+	one, err := vkoFactor(make([]byte, 8))
+	if err != nil || one.Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("zero UKM gave %v, %v, want 1", one, err)
 	}
-	if got := vkoFactor(make([]byte, 8)); got.Cmp(big.NewInt(1)) != 0 {
-		t.Fatalf("zero UKM gave %v, want 1", got)
+	for _, n := range []int{0, 7, 9, 16, 32, 64} {
+		if _, err := vkoFactor(bytes.Repeat([]byte{9}, n)); err == nil {
+			t.Fatalf("a %d-byte UKM was accepted", n)
+		}
+	}
+	priv, pub, err := New().GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer priv.Release()
+	if _, err := vko(curve(), priv.Bytes(), pub, bytes.Repeat([]byte{9}, 32)); err == nil {
+		t.Fatal("vko accepted a 32-byte UKM")
 	}
 }
 
@@ -299,18 +412,34 @@ func TestCofactorIsClearedForMixedPoints(t *testing.T) {
 	}
 	mixed := (&gost3410.PublicKey{C: c, X: x, Y: y}).Raw()
 
-	ukm := []byte("12345678")
-	plain, err := p.Agree(priv, peerPub, ukm)
+	ctx := testContext(t, []byte("session-1"))
+	plain, err := p.Agree(priv, peerPub, ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer plain.Release()
-	shifted, err := p.Agree(priv, mixed, ukm)
+	shifted, err := p.Agree(priv, mixed, ctx)
 	if err != nil {
 		t.Fatalf("Agree on a mixed point: %v", err)
 	}
 	defer shifted.Release()
 	if !bytes.Equal(plain.Bytes(), shifted.Bytes()) {
 		t.Fatal("the torsion part changed the shared secret")
+	}
+
+	// the two encodings give one VKO point, so only the transcript tells them
+	// apart: once each context carries the bytes its side saw, the secrets differ
+	own, err := p.Agree(priv, peerPub, testContext(t, peerPub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer own.Release()
+	other, err := p.Agree(priv, mixed, testContext(t, mixed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Release()
+	if bytes.Equal(own.Bytes(), other.Bytes()) {
+		t.Fatal("two encodings of one key gave one secret under their own transcripts")
 	}
 }

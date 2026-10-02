@@ -39,11 +39,15 @@ type CryptoProvider interface {
 
 	GenerateEphemeral() (priv *secmem.Buffer, pub []byte, err error)
 
-	// ukm binds the secret to one session and must match on both sides
-	Agree(priv *secmem.Buffer, peerPub, ukm []byte) (*secmem.Buffer, error)
+	// ctx binds the secret to the transcript and must match on both sides
+	Agree(priv *secmem.Buffer, peerPub []byte, ctx Context) (*secmem.Buffer, error)
 
-	// label separates keys derived from the same secret for different purposes
-	DeriveKey(secret *secmem.Buffer, label []byte, size int) (*secmem.Buffer, error)
+	// chains a second agreement onto the first; both are KeySize secrets
+	MixKey(chain, secret *secmem.Buffer, ctx Context) (*secmem.Buffer, error)
+
+	// purpose separates keys derived from one secret; the provider builds the
+	// label from it, the suite and the scheme version
+	DeriveKey(secret *secmem.Buffer, purpose string, ctx Context, size int) (*secmem.Buffer, error)
 
 	KeySize() int
 
