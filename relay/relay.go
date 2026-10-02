@@ -75,6 +75,8 @@ type Relay struct {
 	cfg   Config
 	lim   limits
 	onion *OnionRing
+	// onwardTimeout, held here so that a test need not wait it out
+	onward time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -203,6 +205,7 @@ func New(cfg Config) (*Relay, error) {
 		cfg:       cfg,
 		lim:       lim,
 		onion:     onion,
+		onward:    onwardTimeout,
 		ctx:       ctx,
 		cancel:    cancel,
 		circuits:  make(map[uint64]*circuit),
@@ -690,7 +693,7 @@ func (r *Relay) extend(c *circuit, layer *wire.SetupLayer, index int) error {
 		return err
 	}
 
-	_ = raw.SetDeadline(time.Now().Add(onwardTimeout))
+	_ = raw.SetDeadline(time.Now().Add(r.onward))
 	// with the next node's link key the frame keys depend on its static key, and
 	// the handshake ends only once that node has shown it derived them, so the
 	// setup goes to no other; without a key the link is anonymous and hides
@@ -732,7 +735,7 @@ func (r *Relay) newPacer(out *link.Conn) *pacer {
 }
 
 func (r *Relay) dial(addr string) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, onwardTimeout)
+	ctx, cancel := context.WithTimeout(r.ctx, r.onward)
 	defer cancel()
 	if r.cfg.Dial != nil {
 		return r.cfg.Dial(ctx, "tcp", addr)

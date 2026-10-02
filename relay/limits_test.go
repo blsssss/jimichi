@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"sync"
@@ -440,6 +441,82 @@ func TestStalledNextHopTearsTheCircuitDown(t *testing.T) {
 			case <-closed:
 			case <-time.After(2 * time.Second):
 				t.Fatal("Close is stuck")
+			}
+		})
+	}
+}
+
+// a next hop that takes the connection and leaves the link handshake unfinished:
+// it says nothing, or answers its key and withholds the frame that confirms it
+func startSilentHop(t *testing.T, answersKey bool) (addr string, pub []byte) {
+	t.Helper()
+	p := c25519.New()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, pub, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv.Release()
+	hello, err := link.InitiatorHandshakeSize(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := make(chan net.Conn, 1)
+	go func() {
+		raw, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		held <- raw
+		if !answersKey {
+			return
+		}
+		if _, err := io.ReadFull(raw, make([]byte, hello)); err == nil {
+			_, _ = raw.Write(pub)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		select {
+		case raw := <-held:
+			_ = raw.Close()
+		default:
+		}
+	})
+	return ln.Addr().String(), pub
+}
+
+// the handshake onwards ends at its deadline wherever the next hop stopped: one
+// failed extend, one deadline that ran out and the setup cell dropped
+func TestSilentNextHopFailsTheExtendAtItsDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		answersKey bool
+	}{{"no answer", false}, {"no confirmation", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, pub := startSilentHop(t, tc.answersKey)
+			s := serveRelay(t, Config{Peers: func(next string) ([]byte, bool) { return pub, next == addr }})
+			s.r.mu.Lock()
+			s.r.onward = 150 * time.Millisecond
+			s.r.mu.Unlock()
+
+			cl, err := client.Dial(client.Config{Provider: c25519.New(), Chain: []client.Node{
+				{Addr: s.addr, StaticPub: s.pub},
+				{Addr: addr, StaticPub: pub},
+			}})
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			t.Cleanup(func() { _ = cl.Close() })
+			// well inside the 5 s the bound is outside this test
+			waitClosed(t, cl, 3*time.Second)
+
+			if st := s.r.Stats().Snapshot(); st.FailedExtend != 1 || st.TimedOut != 1 || st.Dropped != 1 || st.RefusedExtend != 0 || st.Broken != 0 {
+				t.Fatalf("failed extends = %d, timed out = %d, dropped = %d, refused extends = %d, closed circuits = %d, want 1, 1, 1, 0, 0",
+					st.FailedExtend, st.TimedOut, st.Dropped, st.RefusedExtend, st.Broken)
 			}
 		})
 	}
