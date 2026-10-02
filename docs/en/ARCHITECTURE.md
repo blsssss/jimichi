@@ -184,7 +184,8 @@ identifier and the counter of every cell.
   nodes this way, and no experiment block compares it with the authenticated one.
 - Two keys are derived from the secret, one per direction. The nonce is the frame number in that
   direction.
-- The binding takes no byte on the wire: the hello, the answer and the frame keep their sizes.
+- The binding takes no byte on the wire: the hello, the answer and the frame carry no field for
+  it.
 - A frame is the 512-byte cell plus a 16-byte tag, 528 bytes. After the handshake the wire carries
   only frames of one size: no identifiers, no counters.
 - The link layer takes its primitives from the same CryptoProvider, so it works on the GOST suite
@@ -270,9 +271,9 @@ Setup takes one control cell of the same 512 bytes, with no extra round trips.
   ephemeral key (CRYPTO, section "Key derivation"). The node assembles the same transcript from
   the cell header, its onion key and the start of the layer.
 - Two keys are derived from the secret under the same transcript, one for the control cell and
-  one for data cells, two counter offsets and a replay tag.
-- The binding takes no byte in the cell: the control cell and the data cell are the same on the
-  wire, and a control cell still carries four nodes on c25519 and three on GOST.
+  one for data cells, and two counter offsets, and at the node a replay tag as well.
+- The binding takes no byte in the cell: a control cell carries four nodes on c25519 and three on
+  GOST.
 - The control cell is nested like a data cell: the layer of each node holds its ephemeral public
   key, the address of the next node, the identifier of the next link and the layer for the next
   node.

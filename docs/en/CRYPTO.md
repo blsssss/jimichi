@@ -201,9 +201,10 @@ The GOST profile:
 
 ### Who calls what
 
-Setup, the same on the client and on the node: `ctx = NewContext(p, "setup", ...)`,
-`secret = Agree(.., ctx)`, then DeriveKey under the same ctx for `setup`, `cell`, `setup/replay`,
-`counter/fwd`, `counter/bwd`. A node holding two onion keys builds a context for each of them: a
+Setup: the client and the node build the same `ctx = NewContext(p, "setup", ...)`,
+`secret = Agree(.., ctx)`, then DeriveKey under the same ctx for `setup`, `cell`, `counter/fwd`,
+`counter/bwd`. The node also derives `setup/replay`; the client does not derive the replay tag.
+A node holding two onion keys builds a context for each of them: a
 layer built for the key of one epoch does not open under the key of another.
 
 Link, both agreements under one context:
@@ -216,6 +217,12 @@ Link, both agreements under one context:
 The frame keys: DeriveKey with `link/i2r` and `link/r2i`. The responder's first frame confirms
 the whole transcript: if a single byte of it differs between the sides, the frame does not open.
 
+The key pair check at node start, exchange `relay/keycheck`: the node generates a one-time pair
+and, under a context made of its published link key and the one-time public key, agrees a secret
+from both sides. The two secrets must be equal; no key is derived from them and both are released
+at once. A node whose published key is not the public half of its private key does not start:
+it would otherwise confirm no authenticated link and open no setup.
+
 ### Rules for changes
 
 - The scheme version `v1` changes with any change to the transcript layout, the set of purposes
@@ -224,10 +231,13 @@ the whole transcript: if a single byte of it differs between the sides, the fram
 - A new purpose is a new row in the label table and a new golden vector in crypto/providertest.
 - The golden vectors pin the composition: the hashes of three transcripts, every derived key,
   MixKey and Agree on fixed keys, for both suites. The comment next to them says how to recompute
-  the values without this code. No standard publishes a VKO example on the 256-bit paramSetA, so
-  the GOST primitives are checked against the examples of the standards, and the vectors of the
-  scheme come from a second implementation with pinned intermediate values (the transcript hash,
-  the UKM, the KEK).
+  the values without this code. The VKO examples of RFC 7836 (appendix B, examples 7 and 8) are on
+  the 512-bit paramSetA, so the GOST primitives are checked against the examples of the standards
+  in the tests of crypto/gost, and the composition on the 256-bit paramSetA is pinned by the
+  vectors of the scheme with the intermediate values (the transcript hash, the UKM, the KEK)
+  written down in crypto/providertest. They were computed by an independent implementation that
+  is not part of the repository; everything but the KEK is a hash or an HMAC and can be
+  recomputed with any Streebog implementation.
 
 The provider checks are the same in both suites and run in this order: sizes of the secrets, the
 context, the label, the public key.
@@ -240,7 +250,7 @@ context, the label, the public key.
 | ctx | made by NewContext with a provider of the same suite | ErrBadContext |
 | purpose, exchange | the name format; in DeriveKey not one reserved to the provider | ErrBadLabel |
 | transcript parts | 1 to 255, each 1 to 65535 bytes | ErrBadContext |
-| peerPub | the length, and in GOST the point checks as well | ErrBadPublicKey |
+| peerPub | the length; a point of small order (on c25519 X25519 itself refuses it); in GOST also a point off the curve or with a coordinate not below p | ErrBadPublicKey |
 
 ## Signatures
 
@@ -278,7 +288,7 @@ and has no primitives of its own.
 | Link key | mixed into the handshake by whoever opens a link to the node, which authenticates the node on that link | until the process ends |
 | Onion key | the client agrees the layer secret of a circuit setup with it | with -onion-rotate one period as the published key and the grace period after it; without rotation the link key serves in this role until the process ends |
 | Hop keys of a circuit | open and seal the cells of one circuit at one node | until the circuit is torn down |
-| Frame keys of a link | seal the frames of one link; derived from two ephemeral keys | until the link closes |
+| Frame keys of a link | seal the frames of one link; derived from the agreement of the two ephemeral keys and, in the authenticated mode, also from the agreement with the responder's link key (section "Key derivation") | until the link closes |
 
 - The signing, link and onion keys are generated through the CryptoProvider straight into secmem
   buffers. An onion key is released, its buffer zeroed, at the end of its grace period

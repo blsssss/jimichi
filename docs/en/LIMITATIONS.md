@@ -64,9 +64,10 @@ English | [Русский](../ru/LIMITATIONS.md)
 - There is no negotiation of the key scheme version: sides on different versions are not
   compatible, and a link handshake between them ends at the confirmation frame with no cause
   named. Nodes and clients are updated together.
-- Link keys and hop keys do not change while the link and the circuit live, and there is no
-  bound on the frames per key other than the counter limit. Rotation inside links and circuits
-  is planned ([#58](https://github.com/jimichi-org/jimichi/issues/58)).
+- Frame keys of a link and hop keys do not change while the link and the circuit live. Cells
+  under a hop key are bounded only by the counter limit (2^60 per direction); frames under a
+  frame key are bounded by nothing but the 64-bit frame number. Rotation inside links and
+  circuits is planned ([#58](https://github.com/jimichi-org/jimichi/issues/58)).
 - The baseline without node authentication (-auth=false) extends a circuit to any address named
   in the setup cell, and its links between nodes are anonymous: they hide headers from a passive
   observer only. Its client takes the unverified keys of every hop from the entry alone, and a
