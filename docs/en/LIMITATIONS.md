@@ -243,14 +243,16 @@ English | [Русский](../ru/LIMITATIONS.md)
   GOST, so one chain crosses up to three ordered pairs on c25519 and two on GOST. Its 32
   circuits held open through the same nodes in the same order fill the link allowance of every
   pair on that path; or one setup every 5 s along the same path spends the setup allowance of
-  those pairs as fast as it refills. Through N entries that is up to 3N of the N(N - 1) ordered
-  pairs on c25519 and 2N on GOST: 15 and 10 of 20 with five nodes. A chain that crosses a busy
-  pair fails at setup, and the client exits and draws another, so the address influences which
-  chains survive. A holder of the CA key with rogue nodes in the roster can keep the pairs
-  between honest nodes busy and leave the pairs through its own nodes free. What that costs in
-  addresses and circuits, and how far it raises the share of surviving chains the rogue nodes
-  hold, is not measured: the measurement is planned (EXPERIMENT, block 3,
-  [#117](https://github.com/jimichi-org/jimichi/issues/117)).
+  those pairs as fast as it refills. On an otherwise idle network that is, through N entries, up
+  to 3N of the N(N - 1) ordered pairs on c25519 and 2N on GOST: 15 and 10 of 20 with five nodes.
+  Where the circuits of other clients already take part of a pair's allowance, the address only
+  tops it up and can split its own allowance at one entry over several paths, so it keeps more
+  pairs busy than that. A chain that crosses a busy pair fails at setup, and the client exits
+  and draws another, so the address influences which chains survive. A holder of the CA key with
+  rogue nodes in the roster can keep the pairs between honest nodes busy and leave the pairs
+  through its own nodes free. What that costs in addresses and circuits, and how far it raises
+  the share of surviving chains the rogue nodes hold, is not measured: the measurement is
+  planned (EXPERIMENT, block 3, [#117](https://github.com/jimichi-org/jimichi/issues/117)).
 - A circuit is torn down after the idle timeout and after its lifetime. The client does not
   rebuild it: the client process exits and builds a new circuit at its next start, on the testbed
   when the orchestrator restarts the pod. The moment depends only on the node parameters and the

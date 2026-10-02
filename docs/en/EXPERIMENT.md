@@ -182,13 +182,13 @@ and whether that matches the theoretical probability of picking a compromised ch
 
 The choice of the chain is measured without traffic and without nodes. `cmd/lab -set paths` makes
 -samples attempts to draw a chain of -hops nodes among -nodes the way the client does, with the
-client's own functions for the entry, for the bound and for the rest of the chain, on a stream
-derived from -seed in place of the system generator: the entry among all the nodes, a refusal
-when its mirror lacks more than min(-missing, N - h) of them (the bound), the other hops among
-the nodes the mirror holds. A chosen chain then comes up when every node on it extends the
-circuit to the next one, and here the lab applies the rule of the node: an honest node extends
-only to a node whose descriptor it holds, a rogue node to any node. The first -rogue nodes are
-rogue and act together:
+client's own functions for the entry, for taking or refusing its mirror and for the rest of the
+chain, on a stream derived from -seed in place of the system generator: the entry among all the
+nodes, a refusal when its mirror lacks more than min(-missing, N - h) of them (the bound), the
+other hops among the nodes the mirror holds. A chosen chain then comes up when every node on it
+extends the circuit to the next one, and here the lab applies the rule of the node: an honest
+node extends only to a node whose descriptor it holds, a rogue node to any node. The first
+-rogue nodes are rogue and act together:
 
 | Flag | What the rogue nodes do | What it does to the chains |
 |---|---|---|
@@ -202,9 +202,15 @@ chains that came up, the two shares of chains, each next to the value the model 
 standard error of a share at that value, and the values of a uniform choice next to them. A
 configuration in which no attempt gives a chain that comes up is turned away: there is no chain
 to take a share of. The report row carries nodes, hops, rogue_nodes, missing, left_out,
-withheld, samples, seed and rev, so the same sample can be drawn again, and the report file is
-named after the same configuration, so runs started within one second do not overwrite each
-other.
+withheld, samples, seed and rev, so the same sample can be drawn again. The report file is named
+after all of these but rev and after the second it is written in, so two runs within one second
+overwrite each other only when they differ in nothing but rev.
+
+Rows drawn at one seed read the same stream: while no attempt is refused they draw the same
+entries, and an honest entry with a full mirror draws the same chain. Such rows are not
+independent samples, and their shares can coincide to the last digit: with -leftout within the
+bound and no -withhold the sampled share of chains with a rogue node is that of full mirrors at
+the same seed. Rows meant as independent samples take different seeds.
 
 The values the model gives are computed exactly, the chains of a rogue entry by summing over
 the kind of node in each position, and are checked in the tests of the metric against every
