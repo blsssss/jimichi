@@ -89,8 +89,9 @@ client_starts() {
   echo $((restarts + 1))
 }
 
-# a relay fetches the descriptor of each roster peer once and again only at
-# half of its life. Two passes in a row that show every relay with all its
+# a relay fetches the descriptor of each roster peer once and again from half
+# of its life until the peer serves a later one, long after a fresh
+# enrollment. Two passes in a row that show every relay with all its
 # peers and the same counts of descriptor requests mean those fetches are over:
 # a single pass could be read while the last relay is still asking. From here
 # the requests a relay answers for its own descriptor stay as they are unless a
