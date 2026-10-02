@@ -61,6 +61,36 @@ func MaxAbsent(n, hops, missing int) int {
 	return min(missing, n-hops)
 }
 
+// what a client that draws its chain makes of the mirror of the entry it drew
+type MirrorVerdict int
+
+const (
+	MirrorTaken MirrorVerdict = iota
+	// the mirror does not hold the entry that served it
+	MirrorLacksEntry
+	// the mirror lacks more listed nodes than MaxAbsent allows
+	MirrorLacksTooMany
+)
+
+// JudgeMirror is the rule by which a client that draws its chain takes or
+// refuses the mirror of its entry; served[i] says whether the mirror holds
+// listed node i. absent and allowed are the two numbers the rule compares
+func JudgeMirror(served []bool, entry, hops, missing int) (verdict MirrorVerdict, absent, allowed int) {
+	for _, held := range served {
+		if !held {
+			absent++
+		}
+	}
+	allowed = MaxAbsent(len(served), hops, missing)
+	switch {
+	case entry < 0 || entry >= len(served) || !served[entry]:
+		return MirrorLacksEntry, absent, allowed
+	case absent > allowed:
+		return MirrorLacksTooMany, absent, allowed
+	}
+	return MirrorTaken, absent, allowed
+}
+
 // a 64-bit value reduced modulo m favours the low remainders unless the first
 // 2^64 mod m values are thrown away, which leaves a whole number of cycles
 func below(rnd io.Reader, m int) (int, error) {

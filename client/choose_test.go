@@ -77,6 +77,43 @@ func TestMaxAbsentIsMissingUpToTheNodesBeyondTheChain(t *testing.T) {
 	}
 }
 
+// five listed nodes and chains of three unless said otherwise. The entry has
+// to be in its own mirror, and that is looked at first; then the nodes left
+// out are counted against min(missing, n - hops)
+func TestJudgeMirrorKnownAnswers(t *testing.T) {
+	const y, n = true, false
+	for _, c := range []struct {
+		name                 string
+		served               []bool
+		entry, hops, missing int
+		want                 client.MirrorVerdict
+		absent, allowed      int
+	}{
+		{"a full mirror", []bool{y, y, y, y, y}, 2, 3, 1, client.MirrorTaken, 0, 1},
+		{"a full mirror, nothing allowed", []bool{y, y, y, y, y}, 4, 3, 0, client.MirrorTaken, 0, 0},
+		{"one node left out of the one allowed", []bool{y, y, y, y, n}, 0, 3, 1, client.MirrorTaken, 1, 1},
+		{"one node left out, nothing allowed", []bool{y, y, y, y, n}, 0, 3, 0, client.MirrorLacksTooMany, 1, 0},
+		{"two left out of the one allowed", []bool{y, y, y, n, n}, 0, 3, 1, client.MirrorLacksTooMany, 2, 1},
+		{"two left out of the two allowed", []bool{y, y, y, n, n}, 0, 3, 2, client.MirrorTaken, 2, 2},
+		// 5 - 3 = 2 nodes to spare, whatever -missing says
+		{"three left out, two to spare", []bool{y, y, n, n, n}, 0, 3, 4, client.MirrorLacksTooMany, 3, 2},
+		{"three left out for chains of two", []bool{y, y, n, n, n}, 1, 2, 4, client.MirrorTaken, 3, 3},
+		{"the entry left out, within the bound", []bool{n, y, y, y, y}, 0, 3, 1, client.MirrorLacksEntry, 1, 1},
+		{"the same mirror from another entry", []bool{n, y, y, y, y}, 1, 3, 1, client.MirrorTaken, 1, 1},
+		{"the entry left out and too many", []bool{n, n, y, y, y}, 0, 3, 1, client.MirrorLacksEntry, 2, 1},
+		// 3 - 3 = 0 nodes to spare
+		{"three nodes for three hops", []bool{y, y, n}, 0, 3, 1, client.MirrorLacksTooMany, 1, 0},
+		{"an entry outside the list", []bool{y, y, y, y, y}, 5, 3, 1, client.MirrorLacksEntry, 0, 1},
+		{"an entry before the list", []bool{y, y, y, y, y}, -1, 3, 1, client.MirrorLacksEntry, 0, 1},
+	} {
+		verdict, absent, allowed := client.JudgeMirror(c.served, c.entry, c.hops, c.missing)
+		if verdict != c.want || absent != c.absent || allowed != c.allowed {
+			t.Errorf("%s: JudgeMirror = %d with %d absent of %d allowed, want %d with %d of %d",
+				c.name, verdict, absent, allowed, c.want, c.absent, c.allowed)
+		}
+	}
+}
+
 // a stream that runs out gives no path: two draws are there, the third is cut
 func TestChooseFailsWhenTheStreamEnds(t *testing.T) {
 	short := io.MultiReader(words(7, 6), bytes.NewReader([]byte{0, 0, 0}))

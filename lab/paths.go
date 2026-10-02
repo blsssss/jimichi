@@ -27,11 +27,10 @@ func SamplePaths(nodes, hops, samples int, seed int64) ([][]int, error) {
 // SampleMirrorPaths draws paths the way a client does when the mirror of its
 // entry need not hold every listed node; mirrors[e][i] says whether entry e
 // serves node i. Each attempt draws the entry among all the nodes, is refused
-// when the mirror lacks the entry itself or more nodes than the client allows
-// for that -missing (client.MaxAbsent), and otherwise draws the other hops
-// among the nodes the mirror holds. A refused attempt gives no path and is
-// counted. With full mirrors the paths are those of SamplePaths for the same
-// seed
+// when the client's own rule for that -missing refuses the mirror
+// (client.JudgeMirror), and otherwise draws the other hops among the nodes the
+// mirror holds. A refused attempt gives no path and is counted. With full
+// mirrors the paths are those of SamplePaths for the same seed
 func SampleMirrorPaths(mirrors [][]bool, hops, missing, samples int, seed int64) (paths [][]int, refused int, err error) {
 	nodes := len(mirrors)
 	if hops < 1 || hops > nodes {
@@ -44,11 +43,11 @@ func SampleMirrorPaths(mirrors [][]bool, hops, missing, samples int, seed int64)
 	// stands among them, as the client numbers the bundles it verified
 	held := make([][]int, nodes)
 	place := make([]int, nodes)
+	taken := make([]bool, nodes)
 	for entry, mirror := range mirrors {
 		if len(mirror) != nodes {
 			return nil, 0, fmt.Errorf("lab: the mirror of node %d covers %d nodes, want %d", entry, len(mirror), nodes)
 		}
-		place[entry] = -1
 		for node, served := range mirror {
 			if !served {
 				continue
@@ -58,8 +57,9 @@ func SampleMirrorPaths(mirrors [][]bool, hops, missing, samples int, seed int64)
 			}
 			held[entry] = append(held[entry], node)
 		}
+		verdict, _, _ := client.JudgeMirror(mirror, entry, hops, missing)
+		taken[entry] = verdict == client.MirrorTaken
 	}
-	allowed := client.MaxAbsent(nodes, hops, missing)
 	stream := rand.New(rand.NewSource(Derive(seed, streamPaths)))
 	paths = make([][]int, 0, samples)
 	for range samples {
@@ -67,7 +67,7 @@ func SampleMirrorPaths(mirrors [][]bool, hops, missing, samples int, seed int64)
 		if err != nil {
 			return nil, 0, err
 		}
-		if place[entry] < 0 || nodes-len(held[entry]) > allowed {
+		if !taken[entry] {
 			refused++
 			continue
 		}
