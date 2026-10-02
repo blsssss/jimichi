@@ -165,7 +165,7 @@ exit. This is stronger than passive correlation and will test whether batching h
 Status: partly implemented. The choice of the chain is measured (`cmd/lab -set paths`). The other
 scenarios are planned ([#117](https://github.com/jimichi-org/jimichi/issues/117)): the lab has no
 scenario with a compromised or inserted node, and replay and tampering are covered by the tests
-of the node, not measured as a share.
+of the node and of the client, not measured as a share.
 
 | Scenario | Metric |
 |---|---|
@@ -175,7 +175,7 @@ of the node, not measured as a share.
 | Inserted node with a valid certificate | fraction of intercepted sessions, fraction decrypted |
 | Choice of the chain with k rogue nodes among N | share of chains with a rogue entry and exit and share of chains with a rogue node, over the chains that come up among those drawn with the client's own choice, against the values the model gives: with full mirrors, with rogue entries that leave honest nodes out of their mirrors, and with rogue nodes that withhold their descriptors |
 | Ordered pairs of nodes kept busy from one address (planned, [#125](https://github.com/jimichi-org/jimichi/issues/125)) | share of the surviving chains with a rogue entry and exit and with a rogue node, against the addresses and circuits the adversary spends (LIMITATIONS, node limits) |
-| Replay and tampering | share of replayed, reordered or altered cells that go no further than the first node that sees them (a cell out of turn closes the circuit, an altered one is dropped), one hundred percent expected |
+| Replay and tampering | share of replayed, reordered or altered cells that go no further than the first party able to check them: forward that is the first node that sees them (a cell out of turn closes the circuit, an altered one is dropped); backward the first node checks the order, and the altered body of a reply is checked only by the client, which closes the circuit; one hundred percent expected |
 
 The block is to conclude which share of the chain must be compromised to destroy the property,
 and whether that matches the theoretical probability of picking a compromised chain.
@@ -336,9 +336,9 @@ lab and the benchmarks have no switch for the key-memory measures).
   the exit cannot seal a reply for any reason other than its length (a reply too long for a cell
   goes back as cover under the same number), or a cell cannot be written to the next node or back
   towards the client. A write on a link the node closed itself while closing a circuit is not
-  counted again. A client closes its
-  circuit on a reply out of turn, a reply that does not open, or a reply beyond the number of cells
-  it wrote. The flow then stops before the run ends and its traces are shorter.
+  counted again. A client closes its circuit on a reply with a bad header, a reply that does not
+  open, a reply out of turn, or a reply beyond the number of cells it wrote. The flow then stops
+  before the run ends and its traces are shorter.
 - A report row carries relay_broken_circuits (the sum of the closures each relay noticed, so one
   circuit can be counted by several relays), broken_flows (clients that closed their circuit) and,
   per flow, flow_closed and flow_closed_after: whether the circuit closed before the run was read,

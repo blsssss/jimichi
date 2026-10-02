@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -835,5 +837,221 @@ func TestFailureClassNamesNoAddress(t *testing.T) {
 		if fixed := (selection{fixed: true}).cause(c.err); fixed != c.err.Error() {
 			t.Errorf("cause of %q with a fixed chain is %q, want the error itself", c.err, fixed)
 		}
+	}
+}
+
+// the line and the code of a refusal are fixed texts: they name the check the
+// reply failed and nothing of the circuit
+func TestEndingOfACircuit(t *testing.T) {
+	for _, c := range []struct {
+		refused error
+		code    int
+		line    string
+	}{
+		{nil, 1, "circuit closed"},
+		{client.ErrReplyHeader, 3, "circuit closed: client: reply refused: bad header"},
+		{client.ErrReplyNotOpened, 3, "circuit closed: client: reply refused: did not open"},
+		{client.ErrReplyOutOfTurn, 3, "circuit closed: client: reply refused: out of turn"},
+		{client.ErrReplyUnsolicited, 3, "circuit closed: client: reply refused: more replies than cells written"},
+	} {
+		if code, line := ending(c.refused); code != c.code || line != c.line {
+			t.Errorf("ending(%v) = %d, %q, want %d, %q", c.refused, code, line, c.code, c.line)
+		}
+	}
+}
+
+// a circuit that carries some round trips and then ends the way the test says
+type endingCircuit struct {
+	answered int
+	// how it ends: a Send that fails, or with nil the reply channel closing
+	sendErr error
+	refused error
+	sends   int
+	replies chan []byte
+}
+
+func (c *endingCircuit) Send(payload []byte) error {
+	c.sends++
+	switch {
+	case c.sends <= c.answered:
+		c.replies <- payload
+	case c.sendErr != nil:
+		return c.sendErr
+	default:
+		close(c.replies)
+	}
+	return nil
+}
+
+func (c *endingCircuit) Replies() <-chan []byte { return c.replies }
+
+func (c *endingCircuit) Refused() error { return c.refused }
+
+// a refusal gives code 3 and its class whichever way the loop met the end of
+// the circuit, a failed send or the closed reply channel, and whatever the
+// chain selection; without a refusal the same two ends give code 1
+func TestExchangeEndsWithTheCodeAndLineOfTheCircuit(t *testing.T) {
+	brokenPipe := errors.New("write tcp 10.244.0.9:51234->10.96.0.7:9000: broken pipe")
+	for _, c := range []struct {
+		name     string
+		count    int
+		answered int
+		sendErr  error
+		refused  error
+		fixed    bool
+		code     int
+		line     string
+	}{
+		{"every message answered", 2, 2, nil, nil, false, 0, ""},
+		{"reply channel closed over a refusal", 1, 0, nil, client.ErrReplyOutOfTurn, false, 3, "circuit closed: client: reply refused: out of turn"},
+		{"reply channel closed with no refusal", 1, 0, nil, nil, false, 1, "circuit closed"},
+		{"send failed on the close of a refusal", 1, 0, brokenPipe, client.ErrReplyNotOpened, false, 3, "circuit closed: client: reply refused: did not open"},
+		{"send failed on the close of a refusal, fixed chain", 1, 0, brokenPipe, client.ErrReplyNotOpened, true, 3, "circuit closed: client: reply refused: did not open"},
+		{"send failed with no refusal", 1, 0, brokenPipe, nil, false, 1, "send: connection failed"},
+		{"send failed with no refusal, fixed chain", 1, 0, brokenPipe, nil, true, 1, "send: " + brokenPipe.Error()},
+		{"send failed on a refusal after a round trip, endless count", 0, 1, brokenPipe, client.ErrReplyHeader, false, 3, "circuit closed: client: reply refused: bad header"},
+		{"reply channel closed over a refusal after two round trips", 5, 2, nil, client.ErrReplyUnsolicited, false, 3, "circuit closed: client: reply refused: more replies than cells written"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var logged bytes.Buffer
+			circuit := &endingCircuit{answered: c.answered, sendErr: c.sendErr, refused: c.refused, replies: make(chan []byte, 1)}
+			code, line := exchange(circuit, log.New(&logged, "", 0), []byte("ping"), c.count, 0, selection{fixed: c.fixed}.cause)
+			if code != c.code || line != c.line {
+				t.Fatalf("exchange = %d, %q, want %d, %q", code, line, c.code, c.line)
+			}
+			if got := strings.Count(logged.String(), "round trip 4 bytes"); got != c.answered {
+				t.Fatalf("%d round trips logged, want %d:\n%s", got, c.answered, logged.String())
+			}
+		})
+	}
+}
+
+const asClient = "JIMICHI_TEST_AS_CLIENT"
+
+// with the variable set the test binary is the client itself, so a test reads
+// the exit code and the lines of the real process
+func TestMain(m *testing.M) {
+	if os.Getenv(asClient) != "" {
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// the client process against an entry played by the test. No node behind the
+// entry is needed: the entry alone decides what reaches the client's link
+func TestProcessExitsWithTheCodeOfTheCircuitEnd(t *testing.T) {
+	reply := func(shift uint64) func(*link.Conn, uint64) error {
+		return func(conn *link.Conn, inbound uint64) error {
+			cell, err := wire.NewCell(wire.Header{Kind: wire.KindData, Circuit: inbound + shift}, make([]byte, wire.BodySize))
+			if err != nil {
+				return err
+			}
+			return conn.WriteCell(cell)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		// what the entry does once the first message has reached it
+		answer func(conn *link.Conn, inbound uint64) error
+		code   int
+		line   string
+	}{
+		{"a reply nobody sealed", reply(0), 3, "circuit closed: client: reply refused: did not open"},
+		{"a reply under another identifier", reply(1), 3, "circuit closed: client: reply refused: bad header"},
+		{"the entry closes the link", func(conn *link.Conn, _ uint64) error { return conn.Close() }, 1, "circuit closed"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := provider(t, jcrypto.SuiteC25519)
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			linkPriv, linkPub, err := p.GenerateEphemeral()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer linkPriv.Release()
+
+			addrs := []string{ln.Addr().String(), "127.0.0.2:9000", "127.0.0.3:9000"}
+			bundles := make([][]byte, len(addrs))
+			for i := range addrs {
+				linkKey := agreementKey(t, p)
+				if i == 0 {
+					linkKey = linkPub
+				}
+				if bundles[i], err = pki.Unsigned(p, linkKey, agreementKey(t, p)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			info, at := serveInfo(t, nil)
+			mirror := mirrorOf(t, addrs, bundles)
+			info.mirror.Store(&mirror)
+			_, infoPort, err := net.SplitHostPort(at)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			entry := make(chan error, 1)
+			go func() {
+				entry <- func() error {
+					raw, err := ln.Accept()
+					if err != nil {
+						return err
+					}
+					defer raw.Close()
+					conn, err := link.Accept(raw, p, linkPriv)
+					if err != nil {
+						return err
+					}
+					defer conn.Close()
+					var setup, cell wire.Cell
+					if err := conn.ReadCell(&setup); err != nil {
+						return err
+					}
+					hdr, err := setup.Header()
+					if err != nil {
+						return err
+					}
+					if err := conn.ReadCell(&cell); err != nil {
+						return err
+					}
+					if err := c.answer(conn, hdr.Circuit); err != nil {
+						return err
+					}
+					// the link stays open until the client has made its own end
+					for conn.ReadCell(&cell) == nil {
+					}
+					return nil
+				}()
+			}()
+
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, self,
+				"-nodes", strings.Join(addrs, ","), "-fixed-chain", "-info-port", infoPort,
+				"-suite", jcrypto.SuiteC25519.String(), "-auth=false", "-harden=false", "-keymem", "none", "-count", "1")
+			cmd.Env = append(os.Environ(), asClient+"=1")
+			out, err := cmd.CombinedOutput()
+			_ = ln.Close()
+			if cmd.ProcessState == nil {
+				t.Fatalf("the client did not run: %v", err)
+			}
+			if err := <-entry; err != nil {
+				t.Fatalf("the entry: %v\n%s", err, out)
+			}
+
+			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+			// a log line is the date, the time and the text
+			last := strings.SplitN(strings.TrimSpace(lines[len(lines)-1]), " ", 3)
+			if code := cmd.ProcessState.ExitCode(); code != c.code || len(last) != 3 || last[2] != c.line {
+				t.Fatalf("exit code %d, want %d and the last line %q:\n%s", code, c.code, c.line, out)
+			}
+		})
 	}
 }

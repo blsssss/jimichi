@@ -2013,16 +2013,17 @@ func TestClientEndsTheCircuitOnABadReply(t *testing.T) {
 		// cells the client writes before the exit answers
 		written int
 		cells   func(t *testing.T, s *scripted) []*wire.Cell
+		refused error
 	}{
 		{"out of turn", 2, func(t *testing.T, s *scripted) []*wire.Cell {
 			return []*wire.Cell{s.reply(t, 1, "early")}
-		}},
+		}, client.ErrReplyOutOfTurn},
 		{"does not open", 2, func(t *testing.T, s *scripted) []*wire.Cell {
 			return []*wire.Cell{s.reply(t, 0, "fine"), s.forged(t, wire.KindData, 1)}
-		}},
+		}, client.ErrReplyNotOpened},
 		{"more replies than cells", 1, func(t *testing.T, s *scripted) []*wire.Cell {
 			return []*wire.Cell{s.reply(t, 0, "fine"), s.reply(t, 1, "extra")}
-		}},
+		}, client.ErrReplyUnsolicited},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := c25519.New()
@@ -2053,8 +2054,8 @@ func TestClientEndsTheCircuitOnABadReply(t *testing.T) {
 					t.Fatal("the client kept the circuit")
 				}
 			}
-			if !cl.Broken() {
-				t.Fatal("the client did not report the circuit as broken")
+			if got := cl.Refused(); got != tc.refused || !cl.Broken() {
+				t.Fatalf("Refused = %v, Broken = %v, want %v and true", got, cl.Broken(), tc.refused)
 			}
 		})
 	}
