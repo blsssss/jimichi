@@ -327,20 +327,18 @@ func (s selection) enough(at []int, entry int) error {
 		}
 		return nil
 	}
-	if at[entry] < 0 {
+	served := make([]bool, len(at))
+	for i, place := range at {
+		served[i] = place >= 0
+	}
+	switch verdict, absent, allowed := client.JudgeMirror(served, entry, s.hops, s.missing); verdict {
+	case client.MirrorTaken:
+		return nil
+	case client.MirrorLacksEntry:
 		return &entryError{errNoBundle}
-	}
-	absent := 0
-	for _, i := range at {
-		if i < 0 {
-			absent++
-		}
-	}
-	allowed := min(s.missing, len(s.addrs)-s.hops)
-	if absent > allowed {
+	default:
 		return fmt.Errorf("%w: %d of %d listed nodes, at most %d may be left out", errTooFew, absent, len(s.addrs), allowed)
 	}
-	return nil
 }
 
 // with a fixed chain the entry is the first listed node, which the
