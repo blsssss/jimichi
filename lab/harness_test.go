@@ -38,6 +38,40 @@ func TestExitTracesMatchTheirFlow(t *testing.T) {
 	}
 }
 
+// one flow, sent at once and without cover: n messages are n cells out and,
+// echoed by the exit, n cells back. Forwards each tap counts n+1 frames after
+// the initiator's hello, the setup and the n cells. Backwards it counts n: the
+// responder of a link first sends its key and one frame that confirms the
+// handshake, and a tap that took that frame for traffic would count n+1
+func TestTapsCountTheCellsOfAFlowWithoutTheHandshake(t *testing.T) {
+	run, err := Execute(Config{Flows: 1, Duration: 300 * time.Millisecond, SendEvery: 20 * time.Millisecond, Seed: 11})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	n := run.Sent
+	if n == 0 || len(run.Latency) != n || run.Unanswered != 0 {
+		t.Fatalf("%d messages sent, %d echoes back, %d unanswered; want every message of a quiet run echoed",
+			n, len(run.Latency), run.Unanswered)
+	}
+	if len(run.Exit) != 1 || len(run.ExitBack) != 1 {
+		t.Fatalf("%d and %d exit traces for one flow", len(run.Exit), len(run.ExitBack))
+	}
+	for _, tc := range []struct {
+		name  string
+		trace *Trace
+		want  int
+	}{
+		{"entry", run.Entry[0], n + 1},
+		{"exit", run.Exit[0], n + 1},
+		{"entry back", run.EntryBack[0], n},
+		{"exit back", run.ExitBack[0], n},
+	} {
+		if got := tc.trace.Len(); got != tc.want {
+			t.Errorf("%s: %d frames for %d messages, want %d", tc.name, got, n, tc.want)
+		}
+	}
+}
+
 // a paced chain keeps both directions of both links busy while flows are quiet
 func TestPacedRunFillsBothDirections(t *testing.T) {
 	if testing.Short() {
