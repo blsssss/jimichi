@@ -79,12 +79,14 @@ type Client struct {
 	replies chan []byte
 	queue   chan []byte
 	dropped uint64
+	// the circuit identifier on the entry link, which every reply must carry
+	inbound uint64
 	// fixed at Dial: Close empties the circuit, and Send must not read it then
 	maxPayload int
 
-	mu     sync.Mutex
-	closed bool
-	broken bool
+	mu      sync.Mutex
+	closed  bool
+	refused error
 
 	// the link has its own write lock; holding mu across a write to a stalled
 	// entry would keep Close from closing the connection that unblocks it
@@ -182,6 +184,7 @@ func Dial(cfg Config) (*Client, error) {
 		conn:    conn,
 		circuit: circuit,
 		keys:    setup.CellKeys,
+		inbound: links[0],
 		replies: make(chan []byte, 64),
 		queue:   make(chan []byte, 256),
 
@@ -221,7 +224,7 @@ func (c *Client) MaxPayload() int { return c.maxPayload }
 func (c *Client) Replies() <-chan []byte { return c.replies }
 
 // the exit numbers its replies from zero and no relay drops or reorders one,
-// so a reply out of turn or one that does not open ends the circuit
+// so nothing is tolerated: the first reply that fails a check ends the circuit
 func (c *Client) receive() {
 	defer c.busy.Done()
 	defer close(c.replies)
@@ -233,7 +236,7 @@ func (c *Client) receive() {
 		payload, cover, err := c.open(&cell, want)
 		if err != nil {
 			c.mu.Lock()
-			c.broken = true
+			c.refused = err
 			c.mu.Unlock()
 			_ = c.conn.Close()
 			return
@@ -248,27 +251,46 @@ func (c *Client) receive() {
 	}
 }
 
-var errOutOfTurn = errors.New("client: reply out of turn")
+// a refusal is reported as one of the four classes and nothing else: the cause
+// would carry values read from the cell
+var (
+	ErrReply            = errors.New("client: reply refused")
+	ErrReplyHeader      = fmt.Errorf("%w: bad header", ErrReply)
+	ErrReplyNotOpened   = fmt.Errorf("%w: did not open", ErrReply)
+	ErrReplyOutOfTurn   = fmt.Errorf("%w: out of turn", ErrReply)
+	ErrReplyUnsolicited = fmt.Errorf("%w: more replies than cells written", ErrReply)
+)
 
 func (c *Client) open(cell *wire.Cell, want uint64) ([]byte, bool, error) {
 	h, err := cell.Header()
+	if err != nil || h.Kind != wire.KindData || h.Circuit != c.inbound {
+		return nil, false, ErrReplyHeader
+	}
+	// the layers come before the number, so out of turn is said only of a
+	// genuine reply; every refusal ends the circuit, the order picks the class
+	payload, cover, err := c.circuit.OpenExit(cell, wire.Backward)
 	if err != nil {
-		return nil, false, err
+		return nil, false, ErrReplyNotOpened
 	}
-	// no more replies than cells written: the exit answers each cell once
-	if h.Kind != wire.KindData || want >= c.sent.Load() || c.circuit.ReplyNumber(h.Counter) != want {
-		return nil, false, errOutOfTurn
+	if c.circuit.ReplyNumber(h.Counter) != want {
+		return nil, false, ErrReplyOutOfTurn
 	}
-	return c.circuit.OpenExit(cell, wire.Backward)
+	// the exit answers each cell once
+	if want >= c.sent.Load() {
+		return nil, false, ErrReplyUnsolicited
+	}
+	return payload, cover, nil
 }
 
-// whether this client closed its circuit over a reply out of turn, one that
-// did not open or one beyond the cells it wrote
-func (c *Client) Broken() bool {
+// the class of the reply this client closed its circuit over; nil while the
+// circuit lives and when the far side or Close ended it
+func (c *Client) Refused() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.broken
+	return c.refused
 }
+
+func (c *Client) Broken() bool { return c.Refused() != nil }
 
 func (c *Client) Send(payload []byte) error {
 	if c.cfg.Mode == ConstantRate && c.cfg.Rate > 0 {
