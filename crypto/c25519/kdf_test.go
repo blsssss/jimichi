@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"testing"
 
 	jcrypto "github.com/jimichi-org/jimichi/crypto"
@@ -137,5 +138,30 @@ func TestAnotherEncodingOfTheKeyChangesTheSecret(t *testing.T) {
 	}
 	if bytes.Equal(agree(pub, context(t, pub)), agree(twin, context(t, twin))) {
 		t.Fatal("two encodings of one key gave one secret under their own transcripts")
+	}
+}
+
+// u = 0, 1 and p-1 are points of small order: X25519 gives all zeroes for them, and
+// the provider reports the key, as the GOST suite does for its 4-torsion
+func TestAgreeRefusesPointsOfSmallOrder(t *testing.T) {
+	p := c25519.New()
+	priv, _, err := p.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer priv.Release()
+	ctx := context(t, []byte("session-1"))
+	for _, u := range []string{
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	} {
+		out, err := p.Agree(priv, unhex(t, u), ctx)
+		if !errors.Is(err, jcrypto.ErrBadPublicKey) {
+			if out != nil {
+				out.Release()
+			}
+			t.Fatalf("Agree with u = %s: %v, want ErrBadPublicKey", u, err)
+		}
 	}
 }

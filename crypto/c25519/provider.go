@@ -65,9 +65,11 @@ func (p *Provider) Agree(priv *secmem.Buffer, peerPub []byte, ctx jcrypto.Contex
 		return nil, jcrypto.ErrBadPublicKey
 	}
 
+	// with both lengths right the only refusal left is a point of small order,
+	// whose shared value is all zeroes
 	shared, err := curve25519.X25519(priv.Bytes(), peerPub)
 	if err != nil {
-		return nil, fmt.Errorf("c25519: x25519: %w", err)
+		return nil, fmt.Errorf("%w: %v", jcrypto.ErrBadPublicKey, err)
 	}
 	defer secmem.Zero(shared)
 

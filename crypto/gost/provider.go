@@ -226,14 +226,20 @@ func (p *Provider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.
 	if err != nil {
 		return nil, err
 	}
+	full, err := secmem.New(keySize)
+	if err != nil {
+		return nil, err
+	}
+	derive(full.Bytes(), secret.Bytes(), label, ctx.Sum())
+	if size == keySize {
+		return full, nil
+	}
+	defer full.Release()
 	out, err := secmem.New(size)
 	if err != nil {
 		return nil, err
 	}
-	var full [keySize]byte
-	derive(full[:], secret.Bytes(), label, ctx.Sum())
-	copy(out.Bytes(), full[:size])
-	secmem.Zero(full[:])
+	copy(out.Bytes(), full.Bytes())
 	return out, nil
 }
 

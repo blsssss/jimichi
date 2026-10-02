@@ -94,6 +94,7 @@ func testAgreeBadInput(t *testing.T, p jcrypto.CryptoProvider) {
 		{"short private key", short, pub, ctx, jcrypto.ErrBadKeySize},
 		{"short public key", priv, []byte{1, 2, 3}, ctx, jcrypto.ErrBadPublicKey},
 		{"long public key", priv, append(bytes.Clone(pub), 0), ctx, jcrypto.ErrBadPublicKey},
+		{"all-zero public key", priv, make([]byte, len(pub)), ctx, jcrypto.ErrBadPublicKey},
 		{"zero context", priv, pub, jcrypto.Context{}, jcrypto.ErrBadContext},
 		{"context of another suite", priv, pub, foreignContext(t, p), jcrypto.ErrBadContext},
 		// the context is checked before the public key is looked at
@@ -362,10 +363,12 @@ func testTranscriptSeparates(t *testing.T, p jcrypto.CryptoProvider) {
 //
 // The c25519 values were computed with Python hashlib and hmac. The GOST values
 // come from a second implementation written from the standards (Streebog, HMAC,
-// VKO in affine coordinates) that first reproduced RFC 6986 M1, the KDF example
-// of R 50.1.113-2016 and VKO of RFC 7836 A.1. No standard publishes a VKO
-// example on the 256-bit paramSetA, so the primitives are held by the standard
-// vectors in crypto/gost and these vectors pin the composition.
+// VKO in affine coordinates) that first reproduced RFC 6986 M1 and the examples
+// 7 (VKO) and 9 (KDF) of RFC 7836, appendix B. Those VKO examples are on the
+// 512-bit paramSetA, so the primitives are held by the standard vectors in
+// crypto/gost and these vectors pin the composition on the 256-bit paramSetA.
+// Everything here but the KEK of the Agree vector is a hash or an HMAC, which
+// openssl dgst with gost-engine (md_gost12_256) reproduces as well.
 type goldenSuite struct {
 	pubSize int
 	th      [3]string
@@ -483,7 +486,8 @@ func goldenContexts(t *testing.T, p jcrypto.CryptoProvider) [3]jcrypto.Context {
 
 func testGoldenTranscript(t *testing.T, p jcrypto.CryptoProvider) {
 	g := goldenFor(t, p)
-	_, pub := mustEphemeral(t, p)
+	priv, pub := mustEphemeral(t, p)
+	priv.Release()
 	if len(pub) != g.pubSize {
 		t.Fatalf("public key of %d bytes, the vectors assume %d", len(pub), g.pubSize)
 	}

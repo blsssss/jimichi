@@ -29,8 +29,9 @@ func unhex(t *testing.T, s string) []byte {
 	return b
 }
 
-// RFC 7836 appendix A.1: VKO GOST R 34.10-2012 with the 256-bit output, on the
-// 512-bit paramSetA curve the example uses. Both sides must reach the same KEK
+// RFC 7836, appendix B, example 7: VKO GOST R 34.10-2012 with the 256-bit
+// output, on the 512-bit paramSetA curve the example uses. Both sides must
+// reach the same KEK
 func TestVKOKnownAnswer(t *testing.T) {
 	c := gost3410.CurveIdtc26gost341012512paramSetA()
 	ukm := unhex(t, "1d80603c8544c727")
@@ -53,7 +54,7 @@ func TestVKOKnownAnswer(t *testing.T) {
 	}
 }
 
-// R 50.1.113-2016, 4.4: KDF_GOSTR3411_2012_256 with key 00..1f, label
+// RFC 7836, appendix B, example 9: KDF_GOSTR3411_2012_256 with key 00..1f, label
 // 26bdb878 and seed af21434145656378
 func TestKDFKnownAnswer(t *testing.T) {
 	key := unhex(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
