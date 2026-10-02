@@ -221,7 +221,7 @@ English | [Русский](../ru/LIMITATIONS.md)
   on the host clock.
 - On the GOST suite every signature leaves heap copies of the signing scalar and the one-time
   number k as math/big: the request, the certificate, every timer re-signing of the descriptor,
-  each half of its lifetime, and the signing at every rotation of the onion key (CRYPTO, known
+  each half of -descriptor-ttl, and the signing at every rotation of the onion key (CRYPTO, known
   gaps). When issuance runs on a Windows host, the CA key stays in unlocked memory of a process
   without dump prevention while it issues.
 - The node limits (ARCHITECTURE) give one address at most 32 of the 512 links, 4 of the 32
