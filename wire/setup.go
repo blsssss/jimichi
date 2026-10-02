@@ -124,8 +124,7 @@ func BuildSetup(p jcrypto.CryptoProvider, chain []SetupHop) (*SetupResult, error
 	}
 	overhead := sz.overhead
 
-	pubLen := len(chain[0].StaticPub)
-	perHop := perHopCost(pubLen, overhead)
+	perHop := perHopCost(sz.pub, overhead)
 	if setupLayerLen(len(chain), perHop) < 0 {
 		return nil, ErrSetupSize
 	}

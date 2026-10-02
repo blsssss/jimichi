@@ -110,12 +110,11 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 	defer ephPriv.Release()
 
 	mode := byte(modeAnonymous)
-	var staticPriv *secmem.Buffer
 	if peerStatic != nil {
 		if len(peerStatic) != len(ephPub) {
 			return nil, fmt.Errorf("%w: %w", ErrHandshake, jcrypto.ErrBadPublicKey)
 		}
-		mode, staticPriv = modeAuthenticated, ephPriv
+		mode = modeAuthenticated
 	}
 	hello := append([]byte{mode}, ephPub...)
 	if _, err := raw.Write(hello); err != nil {
@@ -131,7 +130,7 @@ func Dial(raw net.Conn, p jcrypto.CryptoProvider, peerStatic []byte) (*Conn, err
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
-	secret, err := chainKey(p, ctx, staticPriv, peerStatic, ephPriv, peerEph)
+	secret, err := chainKey(p, ctx, mode, ephPriv, peerStatic, ephPriv, peerEph)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +188,7 @@ func Accept(raw net.Conn, p jcrypto.CryptoProvider, staticPriv *secmem.Buffer, s
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHandshake, err)
 	}
-	secret, err := chainKey(p, ctx, staticPriv, peerEph, ephPriv, peerEph)
+	secret, err := chainKey(p, ctx, mode, staticPriv, peerEph, ephPriv, peerEph)
 	if err != nil {
 		return nil, err
 	}
@@ -219,16 +218,18 @@ func handshakeContext(p jcrypto.CryptoProvider, mode byte, initiatorEph, respond
 
 // the ephemeral secret gives forward secrecy, the static one binds the channel
 // to the node the initiator chose; chained, so neither alone gives the frame
-// keys. A nil staticPriv is the anonymous mode
-func chainKey(p jcrypto.CryptoProvider, ctx jcrypto.Context, staticPriv *secmem.Buffer, staticPeer []byte, ephPriv *secmem.Buffer, ephPeer []byte) (*secmem.Buffer, error) {
-	if staticPriv == nil {
+// keys. esPriv and esPeer are this side's halves of the agreement that involves
+// the responder's link key: the initiator brings its ephemeral key to it, the
+// responder its link key
+func chainKey(p jcrypto.CryptoProvider, ctx jcrypto.Context, mode byte, esPriv *secmem.Buffer, esPeer []byte, ephPriv *secmem.Buffer, ephPeer []byte) (*secmem.Buffer, error) {
+	if mode != modeAuthenticated {
 		ee, err := p.Agree(ephPriv, ephPeer, ctx)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
 		}
 		return ee, nil
 	}
-	es, err := p.Agree(staticPriv, staticPeer, ctx)
+	es, err := p.Agree(esPriv, esPeer, ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrHandshake, err)
 	}

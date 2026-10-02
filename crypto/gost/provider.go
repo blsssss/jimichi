@@ -226,23 +226,15 @@ func (p *Provider) DeriveKey(secret *secmem.Buffer, purpose string, ctx jcrypto.
 	if err != nil {
 		return nil, err
 	}
-	full, err := secmem.New(keySize)
-	if err != nil {
-		return nil, err
-	}
-	derive(full.Bytes(), secret.Bytes(), label, ctx.Sum())
-	if size == keySize {
-		return full, nil
-	}
-	defer full.Release()
 	out, err := secmem.New(size)
 	if err != nil {
 		return nil, err
 	}
-	copy(out.Bytes(), full.Bytes())
+	derive(out.Bytes(), secret.Bytes(), label, ctx.Sum())
 	return out, nil
 }
 
+// a dst shorter than the output takes its prefix
 func derive(dst, key, label, seed []byte) {
 	kdf := gost34112012256.NewKDF(key)
 	sum := kdf.Derive(nil, label, seed)
